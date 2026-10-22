@@ -4,8 +4,8 @@
 
 # Curator
 
-Curator is a media manager which covers the whole path from a finished download in
-Lidarr, Radarr, Sonarr to a Kodi (default and best supported and tested), Plex, Jellyfin, Emby library update. When one of those apps reports an
+Curator is a media manager built for Kodi. It covers the whole path from a finished download in
+Lidarr, Radarr, Sonarr to a Kodi library update. When one of those apps reports an
 import, Curator indexes the music, movie, movie set, or TV folder, reads and writes Kodi `.nfo`
 files and artwork, trailers and theme songs, probes every video for codec, HDR and audio details, and then asks Kodi to
 scan the folder that changed. Recent changes are listed in `CHANGELOG.md`.
@@ -185,9 +185,9 @@ A scan will not prune more than 20% of the known items for a root in one run, an
 | `CMM_PROBE_WORKERS` | `8` | Number of parallel video probe workers (1–20). More workers keep more NAS reads in flight; useful for deep scans on multi-core machines. |
 | `CMM_ARTIST_WORKERS` | `4` | Parallel music artist scan threads (local metadata only; online lookups remain serial). |
 | `CMM_SKIP_PATTERNS` | *(empty)* | Comma-separated glob patterns excluded from all directory walks, e.g. `*.tmp,__pycache__`. Added to the built-in skip list. Patterns can also be managed through the Settings UI. |
-| `CMM_WRITE_SIDECARS` | `1` | Set to `0` to disable `.cmm_mediainfo.xml` sidecar files. |
-| `CMM_ALLOWED_ORIGINS` | *(any)* | Comma-separated list of allowed WebSocket origins, e.g. `http://192.168.10.10:4455`. When not set, any origin is accepted. |
-| `CMM_TIMEZONE` | *(system)* | IANA timezone name for scheduled scans, e.g. `Europe/Amsterdam`. Takes precedence over `TZ`. |
+| `CMM_WRITE_SIDECARS` | `1` | Starting value of the **Write a .cmm_mediainfo.xml media info file** boxes under Settings, Movies and Settings, TV. Set to `0` to start with both off. Once you save those settings, the boxes decide, one for movies and one for TV. |
+| `CMM_ALLOWED_ORIGINS` | *(any)* | Comma-separated list of allowed WebSocket origins, e.g. `http://192.168.1.50:4455`. When not set, any origin is accepted. |
+| `CMM_TIMEZONE` | *(system)* | IANA timezone name for scheduled scans, library cleans and backups, e.g. `Europe/Amsterdam`. Takes precedence over `TZ`. A zone saved under Settings, General, Time zone wins over both and needs no restart; leave that box empty, or press Reset next to it, to use this one. |
 
 ## Scraping movies and TV
 
@@ -519,7 +519,7 @@ On the Integrations tab:
 
 Kodi's library scan takes a folder, not a TMDB id or an IMDb id. Those ids are how Kodi matches a file it has already found. A new movie or episode is picked up only when Kodi scans the folder that holds it. Curator already knows that folder: the movie folder for a movie, and the show folder for an episode. Kodi has to be given that folder in the path text *Kodi* uses.
 
-Curator sees a container path such as `/music/TV/Show Name`. Kodi sees the same files as a source path such as `nfs://192.168.10.111/Media/TV/Show Name/`. Settings, Integrations, **Kodi paths** translates one into the other. The longest matching Curator prefix wins. One row per share is enough when several libraries sit on the same export. A movie under `/music/4K Movies/Title` and a show under `/music/TV/Show` are both covered by Curator path `/music` and Kodi path `nfs://192.168.10.111/Media`.
+Curator sees a container path such as `/media/TV/Show Name`. Kodi sees the same files as a source path such as `nfs://192.168.1.20/Media/TV/Show Name/`. Settings, Integrations, **Kodi paths** translates one into the other. The longest matching Curator prefix wins. One row per share is enough when several libraries sit on the same export. A movie under `/media/4K Movies/Title` and a show under `/media/TV/Show` are both covered by Curator path `/media` and Kodi path `nfs://192.168.1.20/Media`.
 
 If any folder in a batch has no matching row, that update scans Kodi's whole video library.
 
@@ -530,16 +530,16 @@ If any folder in a batch has no matching row, that update scans Kodi's whole vid
    - Linux: `~/.kodi/userdata/sources.xml`
    - LibreELEC and CoreELEC: `/storage/.kodi/userdata/sources.xml`
    - Android: `Android/data/org.xbmc.kodi/files/.kodi/userdata/sources.xml`
-2. In the `<video>` section, each `<source>` has a `<name>` and a `<path>`. Copy the `<path>` text, not the name. `nfs://192.168.10.111/Media/TV/` is the path. `TV` is only the label.
-3. Drop the last library folder when several sources share one export. `nfs://192.168.10.111/Media/TV/` and `nfs://192.168.10.111/Media/Movies/` both start with `nfs://192.168.10.111/Media`. Use that shorter prefix as the Kodi path, and the container mount of that same export as the Curator path (`/music` when that export is mounted at `/music`).
+2. In the `<video>` section, each `<source>` has a `<name>` and a `<path>`. Copy the `<path>` text, not the name. `nfs://192.168.1.20/Media/TV/` is the path. `TV` is only the label.
+3. Drop the last library folder when several sources share one export. `nfs://192.168.1.20/Media/TV/` and `nfs://192.168.1.20/Media/Movies/` both start with `nfs://192.168.1.20/Media`. Use that shorter prefix as the Kodi path, and the container mount of that same export as the Curator path (`/media` when that export is mounted at `/media`).
 4. Add one row for each export Curator mounts. Examples:
 
    | Curator path | Kodi path |
    |---|---|
-   | `/music` | `nfs://192.168.10.111/Media` |
-   | `/server1/Media` | `nfs://192.168.10.19/Media` |
-   | `/server2/Media` | `nfs://192.168.10.13/Media` |
-   | `/server2/Media2` | `nfs://192.168.10.13/Media2` |
+   | `/media` | `nfs://192.168.1.20/Media` |
+   | `/nas1/Media` | `nfs://192.168.1.21/Media` |
+   | `/nas2/Media` | `nfs://192.168.1.22/Media` |
+   | `/nas2/Media2` | `nfs://192.168.1.22/Media2` |
 
 5. Save settings. The next movie update scans `nfs://…/Movies/Movie Folder/`. The next episode update scans `nfs://…/TV/Show Name/`.
 
