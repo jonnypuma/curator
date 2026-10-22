@@ -4,8 +4,8 @@
 
 # Curator
 
-Curator is a media manager built for Kodi. It covers the whole path from a finished download in
-Lidarr, Radarr, Sonarr to a Kodi library update. When one of those apps reports an
+Curator is a media manager which covers the whole path from a finished download in
+Lidarr, Radarr, Sonarr to a Kodi (default and best supported and tested), Plex, Jellyfin, Emby library update. When one of those apps reports an
 import, Curator indexes the music, movie, movie set, or TV folder, reads and writes Kodi `.nfo`
 files and artwork, trailers and theme songs, probes every video for codec, HDR and audio details, and then asks Kodi to
 scan the folder that changed. Recent changes are listed in `CHANGELOG.md`.
