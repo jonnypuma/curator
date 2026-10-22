@@ -1,3 +1,7 @@
+<img width="2038" height="1117" alt="Screenshot 2026-10-20 231004" src="https://github.com/user-attachments/assets/6912f40a-7ac4-4834-b5b0-d43a9d2b53ca" />
+<img width="2023" height="1042" alt="Screenshot 2026-10-20 234002" src="https://github.com/user-attachments/assets/667648ea-db21-43e5-af46-641bbbaf30be" />
+<img width="2046" height="1111" alt="Screenshot 2026-10-20 231044" src="https://github.com/user-attachments/assets/f96319d1-5574-4df4-91c5-7e660b4cff95" />
+
 # Curator
 
 Curator is a media manager built for Kodi. It covers the whole path from a finished download in
