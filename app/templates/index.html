@@ -1,0 +1,1754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Curator Media Manager</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="alternate icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+    <div id="boot-screen" class="boot-screen" role="status" aria-live="polite">
+        <img class="logo-mark" src="{{ url_for('static', filename='logo.svg') }}" alt="">
+        <div class="brand-name">CURATOR</div>
+        <div class="boot-status">
+            <span class="activity-spin" aria-hidden="true"></span>
+            <span id="boot-label">Starting…</span>
+        </div>
+        <div class="boot-bar" id="boot-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="4" aria-label="Loading library">
+            <span id="boot-bar-fill"></span>
+        </div>
+        <p id="boot-step" class="boot-step">Waiting for the database…</p>
+    </div>
+    <header>
+        <div class="brand" data-action="about-open" role="button" tabindex="0" title="About Curator">
+            <img class="logo-mark" src="{{ url_for('static', filename='logo.svg') }}" alt="">
+            <div>
+                <div class="brand-line">
+                    <span class="brand-name">CURATOR</span>
+                    <span class="version-pill">v{{ version }}</span>
+                </div>
+                <div class="brand-meta">
+                    <span class="status-dot" aria-hidden="true"></span>
+                    <span id="db-label">PostgreSQL</span>
+                </div>
+            </div>
+        </div>
+        <div class="header-pills">
+            <nav class="media-switch" role="tablist" aria-label="Library">
+            <button type="button" role="tab" class="media-tab" data-media="music" aria-selected="true" title="Music library">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                <span>Music</span>
+            </button>
+            <button type="button" role="tab" class="media-tab" data-media="movies" aria-selected="false" title="Movies">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 4v16M17 4v16M2 9h5M2 15h5M17 9h5M17 15h5"/></svg>
+                <span>Movies</span>
+            </button>
+            <button type="button" role="tab" class="media-tab" data-media="sets" aria-selected="false" title="Movie sets">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="12" height="14" rx="1.5"/><path d="M7 7V4.5A1.5 1.5 0 0 1 8.5 3h11A1.5 1.5 0 0 1 21 4.5v12a1.5 1.5 0 0 1-1.5 1.5H15"/></svg>
+                <span>Sets</span>
+            </button>
+            <button type="button" role="tab" class="media-tab" data-media="tv" aria-selected="false" title="TV shows">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m8 2 4 5 4-5"/></svg>
+                <span>TV Shows</span>
+            </button>
+            </nav>
+            <button type="button" id="queue-pill" class="pill queue-pill hidden" title="Webhook queue" data-action="queue-open"></button>
+            <span id="video-library-stats" class="video-library-stats"></span>
+        </div>
+        <div class="controls-area">
+            <div id="scan-group" class="scan-group">
+                <button id="scan-btn" type="button" class="header-btn scan-main" title="Scan all music paths">
+                    <span id="scan-mark" aria-hidden="true"></span><span id="scan-label">Scan | All paths</span>
+                </button>
+                <button id="scan-toggle" type="button" class="header-btn scan-caret" aria-label="Choose which path to scan" aria-expanded="false">▾</button>
+                <div id="scan-menu" class="scan-menu hidden"></div>
+            </div>
+            <button id="acoustid-btn" type="button" class="header-btn primary" title="Match the open album with MusicBrainz and AcoustID">AcoustID</button>
+            <button type="button" id="duplicates-btn" class="icon-btn" data-action="open-duplicates" title="Duplicates" aria-label="Duplicates">
+                <svg viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd" aria-hidden="true">
+                    <path d="M 2 5 L 11 5 L 11 19 L 2 19 Z M 3.2 6.2 L 9.8 6.2 L 9.8 17.8 L 3.2 17.8 Z" />
+                    <rect x="4.1" y="7.1" width="4.8" height="9.8" />
+                    <path d="M 15.5 5 L 22 5 L 22 19 L 15.5 19 L 15.5 17.8 L 20.8 17.8 L 20.8 6.2 L 15.5 6.2 Z" />
+                    <rect x="15.5" y="7.1" width="4.4" height="9.8" />
+                    <rect x="11.5" y="10.1" width="0.6" height="1" />
+                    <rect x="12.5" y="10.1" width="0.6" height="1" />
+                    <path d="M 13.5 10.1 L 13.8 10.1 L 13.8 9.4 L 14.9 10.6 L 13.8 11.8 L 13.8 11.1 L 13.5 11.1 Z" />
+                    <rect x="11.5" y="12.9" width="0.6" height="1" />
+                    <rect x="12.5" y="12.9" width="0.6" height="1" />
+                    <path d="M 13.5 12.9 L 13.8 12.9 L 13.8 12.2 L 14.9 13.4 L 13.8 14.6 L 13.8 13.9 L 13.5 13.9 Z" />
+                </svg>
+            </button>
+            <button type="button" id="lang-btn" class="icon-btn" data-action="lang-open" title="Language defaults" aria-label="Language defaults">
+                <svg viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd" aria-hidden="true"><path d="M 3.79 2.5 L 20.19 2.49 L 20.57 2.56 L 20.92 2.7 L 21.27 2.94 L 21.57 3.23 L 21.87 3.75 L 22.01 4.38 L 22.01 20.86 L 21.92 21.14 L 21.72 21.37 L 21.34 21.51 L 21.11 21.48 L 20.87 21.37 L 18.01 18.51 L 3.85 18.51 L 3.38 18.41 L 3.01 18.25 L 2.48 17.81 L 2.15 17.3 L 1.99 16.64 L 1.99 4.38 L 2.13 3.75 L 2.43 3.23 L 2.73 2.94 L 3.08 2.7 L 3.43 2.56 L 3.79 2.5 Z M 7.79 6.5 L 7.3 6.71 L 7.1 6.89 L 6.89 7.22 L 4.45 13.34 L 4.4 13.52 L 4.45 13.95 L 4.59 14.18 L 4.81 14.38 L 5.14 14.5 L 5.49 14.47 L 5.75 14.36 L 6.02 14.06 L 6.48 12.83 L 9.53 12.83 L 9.89 13.88 L 10.05 14.18 L 10.28 14.38 L 10.6 14.5 L 10.86 14.5 L 11.1 14.43 L 11.37 14.23 L 11.53 13.97 L 11.6 13.66 L 11.58 13.45 L 9.19 7.4 L 8.95 6.96 L 8.64 6.67 L 8.19 6.5 L 7.79 6.5 Z M 16.35 6.5 L 16.16 6.57 L 15.89 6.84 L 15.82 7.03 L 15.81 7.84 L 13.47 7.86 L 13.3 7.93 L 13.1 8.13 L 13.01 8.34 L 13.03 8.72 L 13.1 8.86 L 13.28 9.03 L 13.56 9.15 L 18.48 9.15 L 18.45 9.49 L 18.21 10.24 L 17.89 10.9 L 17.51 11.41 L 16.94 11.96 L 16.54 12.25 L 16.07 12.5 L 15.67 12.22 L 15.09 11.6 L 14.79 11.13 L 14.42 10.24 L 14.22 10.04 L 13.91 9.92 L 13.72 9.92 L 13.61 9.95 L 13.3 10.14 L 13.13 10.45 L 13.13 10.76 L 13.29 11.25 L 13.76 12.16 L 14.11 12.66 L 14.46 13.03 L 13.51 13.14 L 13.32 13.21 L 13.15 13.36 L 13.01 13.64 L 13.01 13.95 L 13.15 14.23 L 13.37 14.4 L 13.51 14.45 L 13.86 14.45 L 14.54 14.36 L 15.48 14.15 L 16.0 13.96 L 16.98 14.29 L 17.55 14.4 L 18.23 14.47 L 18.55 14.36 L 18.8 14.06 L 18.85 13.66 L 18.75 13.43 L 18.53 13.21 L 18.27 13.11 L 17.77 13.06 L 18.32 12.62 L 18.82 12.09 L 19.15 11.65 L 19.5 11.02 L 19.81 10.19 L 19.95 9.58 L 20.0 9.28 L 19.97 8.27 L 19.73 7.96 L 19.44 7.84 L 17.19 7.84 L 17.18 7.03 L 17.11 6.84 L 16.79 6.55 L 16.65 6.5 L 16.35 6.5 Z M 7.99 8.58 L 8.06 8.67 L 9.02 11.39 L 9.03 11.52 L 6.94 11.51 L 7.99 8.58 Z" /></svg>
+            </button>
+            <label class="theme-wrap">
+                <span class="sr-only">Theme</span>
+                <select id="theme-select" class="theme-select" title="Theme">
+                    <option value="mocha">Mocha</option>
+                    <option value="macchiato">Macchiato</option>
+                    <option value="nord">Nord</option>
+                    <option value="dracula">Dracula</option>
+                    <option value="oled">OLED black</option>
+                    <option value="olive">Olive Garden</option>
+                    <option value="sunset">Ocean Sunset</option>
+                    <option value="deepsea">Deep Sea</option>
+                    <option value="nightfall">Vivid Nightfall</option>
+                    <option value="coastal">Coastal Blues</option>
+                    <option value="lavender">Soft Lavender</option>
+                    <option value="candle">Candlelit Library</option>
+                </select>
+            </label>
+            <button type="button" class="icon-btn" data-action="insights-open" title="Library analytics" aria-label="Library analytics">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v18h18"/><path d="M8 17v-5M13 17V8M18 17v-8"/></svg>
+            </button>
+            <button id="trakt-sync-btn" type="button" class="icon-btn trakt-sync-icon" data-action="trakt-sync" title="Sync Trakt watched state" aria-label="Sync Trakt watched state">
+                <img src="/media/providers/trakt.png" alt="">
+            </button>
+            <button id="settings-btn" type="button" class="icon-btn" title="Settings" aria-label="Settings">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9c.3.7.9 1.1 1.6 1.1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+            </button>
+        </div>
+    </header>
+    <nav id="pane-tabs" class="pane-tabs" aria-label="Panes">
+        <button type="button" data-pane-tab="left" aria-pressed="true">Library</button>
+        <button type="button" data-pane-tab="center" aria-pressed="false"><span class="pane-music">Albums</span><span class="pane-video">Details</span></button>
+        <button type="button" data-pane-tab="right" aria-pressed="false" class="pane-music">Details</button>
+    </nav>
+    <main>
+        <section id="video-stage" class="video-stage">
+            <div id="video-left" class="video-left">
+                <div class="video-toolbar">
+                    <span class="video-tools">
+                        <button type="button" class="btn-ghost" data-action="video-reload" title="Reload the list from the database">Reload</button>
+                        <button type="button" class="btn-ghost" id="video-batch-scrape" data-action="video-batch-scrape" hidden>Scrape</button>
+                        <button type="button" class="btn-ghost" id="video-batch-art" data-action="video-batch-art" hidden>Artwork</button>
+                        <button type="button" class="btn-ghost" id="video-batch-nfo" data-action="video-batch-nfo" hidden>.nfo</button>
+                        <button type="button" class="btn-ghost" id="video-batch-rename" data-action="video-batch-rename" hidden>Rename</button>
+                        <button type="button" class="btn-ghost" id="video-batch-subs" data-action="video-batch-subs" hidden>Subtitles</button>
+                        <button type="button" class="btn-ghost" id="video-batch-trailers" data-action="video-batch-trailers" hidden>Trailers</button>
+                        <button type="button" class="btn-ghost" id="video-batch-processed" data-action="video-batch-processed" hidden>Processed</button>
+                        <button type="button" class="btn-ghost" id="video-batch-reload" data-action="video-batch-reload" hidden title="Scan the selected folders again">Rescan</button>
+                        <button type="button" class="btn-ghost" id="video-sets-scrape" data-action="video-sets-scrape" hidden>Scrape sets</button>
+                        <button type="button" class="btn-ghost btn-remove" id="video-sets-remove" data-action="video-set-remove" hidden>Remove</button>
+                        <button type="button" class="btn-ghost btn-remove" id="video-sets-delete" data-action="video-set-delete" hidden>Delete</button>
+                        <button type="button" class="btn-ghost" id="video-scrape-btn" data-action="video-scrape-open" title="Open the scrape dialog. A selection is already chosen in that dialog.">Scrape</button>
+                        <button type="button" class="btn-ghost" id="video-tags-btn" data-action="tags-open" title="Rename, merge and delete tags">Tags</button>
+                        <button type="button" class="btn-ghost" id="video-export-btn" data-action="insights-export" title="Save the shown list as CSV or XML (format in Settings, Files)">Export</button>
+                        <button type="button" class="btn-ghost" id="video-columns-btn" data-action="video-columns" aria-expanded="false">Columns</button>
+                        <button type="button" class="btn-ghost" id="video-expand-btn" data-action="video-expand-all" title="Expand all rows">Expand all</button>
+                        <button type="button" class="btn-ghost" id="video-collapse-btn" data-action="video-collapse-all" title="Collapse all rows">Collapse all</button>
+                        <button type="button" class="icon-btn view-toggle-btn" id="video-view-toggle" data-action="video-view-toggle" title="Switch to Poster Grid view" aria-label="Switch to Poster Grid view">
+                            <svg class="icon-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+                            <svg class="icon-list hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                        </button>
+                        <span class="size-toggle hidden" role="group" aria-label="Card size" data-size-toggle="video"><button type="button" class="btn-ghost" data-action="grid-size" data-grid-size="small" aria-pressed="false" title="Small cards">S</button><button type="button" class="btn-ghost" data-action="grid-size" data-grid-size="medium" aria-pressed="true" title="Medium cards">M</button><button type="button" class="btn-ghost" data-action="grid-size" data-grid-size="large" aria-pressed="false" title="Large cards, with badges">L</button></span>
+                    </span>
+                    <div class="video-toolbar-search">
+                        <label class="sr-only" for="video-filter">Filter</label>
+                        <input id="video-filter" type="search" placeholder="Filter titles, years, codecs, IDs…">
+                        <span id="video-stage-counts" class="muted video-counts"></span>
+                    </div>
+                    <div class="video-select-sort">
+                    <div id="video-batch-select" class="batch-select" hidden>
+                        <span>Batch select</span>
+                        <button type="button" class="link new" data-action="video-select-tier" data-tier="new" title="Select items marked new">NEW</button>
+                        <button type="button" class="link" data-action="video-select-tier" data-tier="unscraped" title="Select items Curator has not scraped">Unscraped</button>
+                        <button type="button" class="link" data-action="video-select-tier" data-tier="art" title="Select items with no poster, or episodes with no thumbnail">Missing artwork</button>
+                        <button type="button" class="link" data-action="video-select-tier" data-tier="meta" title="Select items with no plot, or movies and shows with no TMDB id">Missing metadata</button>
+                        <button type="button" class="link" data-action="video-select-all" title="Select the items on screen">All</button>
+                        <button type="button" class="link" data-action="video-select-none" title="Clear the selection">None</button>
+                    </div>
+                    <div class="tree-stats video-sort-row">
+                        <label class="filter-wrap sort-wrap" id="video-sort-wrap" hidden>
+                            <span class="sr-only">Sort</span>
+                            <select id="video-sort-select" title="Reorder the list. Nothing is hidden."></select>
+                        </label>
+                        <button type="button" id="video-add-btn" data-action="video-add-open" title="Search TMDB and send the movie to Radarr" hidden>+ Movie</button>
+                    </div>
+                    </div>
+                    <div id="video-columns-menu" class="video-columns-menu hidden"></div>
+                    <div id="video-col-filter" class="video-col-filter hidden"></div>
+                </div>
+                <div id="video-ribbons" class="video-ribbons" role="toolbar" aria-label="Quick filters"></div>
+                <div id="video-list" class="video-list" tabindex="0" aria-label="Library"></div>
+                <div class="tree-legend video-legend">
+                    <button type="button" id="video-prune-held" class="btn-ghost btn-remove hidden" data-action="video-prune-held" title="Remove every item marked Not found from the library. Files are not touched.">Remove all not found</button>
+                    <span id="video-selected-count">Items Selected: 0</span>
+                </div>
+            </div>
+            <div class="video-split" id="video-split" title="Drag to resize. Double-click to reset." aria-hidden="true"></div>
+            <div id="video-center" class="video-center" aria-live="polite">
+                <div class="video-empty">
+                    <h2 id="video-stage-title">Movies</h2>
+                    <p class="muted">Pick an item on the left.</p>
+                </div>
+            </div>
+        </section>
+        <section class="pane" id="left-pane">
+            <div class="search-box">
+                <label class="sr-only" for="artist-search">Search artists</label>
+                <input id="artist-search" type="search" placeholder="Filter artists, albums, or MBID...">
+                <div class="library-tools">
+                    <div class="library-tools-main">
+                        <div class="batch-select">
+                            <span>Batch select</span>
+                            <button type="button" class="link new" data-action="select-tier" data-tier="new" disabled title="Select albums that are new"><i class="dot warn" aria-hidden="true"></i> NEW</button>
+                            <button type="button" class="link gold" data-action="select-tier" data-tier="gold" disabled title="Select albums that are 100% matched">📀 100%</button>
+                            <button type="button" class="link silver" data-action="select-tier" data-tier="silver" disabled title="Select albums that are partially matched">💿 Partial</button>
+                            <button type="button" class="link unmatched" data-action="select-tier" data-tier="unmatched" disabled title="Select albums that are unmatched">⚪ Unmatched</button>
+                            <button type="button" class="link" data-action="select-all" title="Select the albums on screen">All</button>
+                            <button type="button" class="link" data-action="select-none" title="Clear the selection">None</button>
+                            <span class="totals batch-totals" id="header-totals">
+                                <span class="pill pill-accent" title="Artists"><span id="hdr-artists">0</span> artists</span>
+                                <span class="pill pill-mauve" title="Albums"><span id="hdr-albums">0</span> albums</span>
+                                <span class="pill pill-success" title="Tracks"><span id="hdr-tracks">0</span> tracks</span>
+                            </span>
+                        </div>
+                        <div class="tree-stats">
+                            <span id="tree-stats" class="hidden"></span>
+                            <label class="filter-wrap">
+                                <span class="sr-only">Library filter</span>
+                                <select id="library-filter" class="sr-only">
+                                    <option value="all">All artists and albums</option>
+                                    <option value="type-album">Albums</option>
+                                    <option value="type-ep">EPs</option>
+                                    <option value="type-single">Singles</option>
+                                    <option value="type-live">Live</option>
+                                    <option value="type-compilation">Compilations</option>
+                                    <option value="new">New / unprocessed only</option>
+                                    <option value="gold">100% matched (MusicBrainz)</option>
+                                    <option value="silver">Partially matched</option>
+                                    <option value="unmatched">Unmatched</option>
+                                    <option value="missing-art">Missing artwork</option>
+                                    <option value="missing-nfo">Missing NFO</option>
+                                    <option value="nfo-changes">NFO differs from the database</option>
+                                    <option value="incomplete">Incomplete tags</option>
+                                    <option value="missing-tracks">Short of the MusicBrainz track list</option>
+                                    <option value="missing-info">Missing artist info</option>
+                                    <option value="missing-review">Missing album review</option>
+                                    <option value="duplicates">Duplicates</option>
+                                    <option value="upgrade">Upgrade available</option>
+                                    <option value="prune-held">Not found, kept by prune safety</option>
+                                    <option value="locked">Locked</option>
+                                    <option value="case-folders">Folders that differ only by capital letters</option>
+                                    <option value="missing-releases">Studio albums in the discography that are not on disk</option>
+                                    <option value="pending">Loaded matches</option>
+                                </select>
+                                <span class="filter-picker">
+                                    <button type="button" id="library-filter-btn" class="filter-picker-btn" data-action="library-filter-toggle" aria-haspopup="listbox" aria-expanded="false">All artists and albums</button>
+                                    <span id="library-filter-menu" class="filter-picker-menu hidden">
+                                        <input id="library-filter-find" type="search" placeholder="Find a filter" autocomplete="off" aria-label="Find a filter">
+                                        <span id="library-filter-options"></span>
+                                    </span>
+                                </span>
+                            </label>
+                            <button type="button" class="link" data-action="music-filter-clear">Clear filters</button>
+                            <button type="button" class="link" data-action="music-filter-save">Save filter</button>
+                            <span class="saved-filter-menu">
+                                <button type="button" class="link" data-action="music-filter-menu">Saved</button>
+                                <span class="saved-filter-list hidden" id="music-saved-filters"></span>
+                            </span>
+                            <label class="filter-wrap sort-wrap">
+                                <span class="sr-only">Library sort</span>
+                                <select id="library-sort" title="Reorder the library. Nothing is hidden.">
+                                    <option value="name">Sort by name</option>
+                                    <option value="artists">Latest added artists</option>
+                                    <option value="albums">Latest added albums</option>
+                                    <option value="modified">Latest date modified</option>
+                                </select>
+                            </label>
+                            <span class="library-commit">
+                                <button type="button" id="apply-all-matches" data-action="apply-all-matches" disabled>Apply All Matches (0 total matches)</button>
+                                <button type="button" id="add-artist" data-action="add-artist">+ Artist</button>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <div class="music-ribbon-row">
+                    <div id="music-ribbons" class="video-ribbons music-ribbons" role="toolbar" aria-label="Music quick filters"></div>
+                    <div class="music-ribbon-tools">
+                        <button type="button" class="link" data-action="expand-all">Expand all</button>
+                        <button type="button" class="link" data-action="insights-export" title="Save the shown list as CSV or XML (format in Settings, Files)">Export</button>
+                        <button type="button" class="icon-btn view-toggle-btn" id="music-view-toggle" data-action="music-view-toggle" title="Switch to Poster Grid view" aria-label="Switch to Poster Grid view">
+                            <svg class="icon-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+                            <svg class="icon-list hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                        </button>
+                        <span class="size-toggle hidden" role="group" aria-label="Card size" data-size-toggle="music"><button type="button" class="btn-ghost" data-action="grid-size" data-grid-size="small" aria-pressed="false" title="Small cards">S</button><button type="button" class="btn-ghost" data-action="grid-size" data-grid-size="medium" aria-pressed="true" title="Medium cards">M</button><button type="button" class="btn-ghost" data-action="grid-size" data-grid-size="large" aria-pressed="false" title="Large cards, with badges">L</button></span>
+                    </div>
+                </div>
+            </div>
+            <div class="tree-pane">
+                <div class="pane-content" id="tree"><div class="tree-loading" role="status"><span class="activity-spin" aria-hidden="true"></span><span>Loading...</span></div></div>
+                <div id="filter-overlay" class="filter-overlay hidden" role="status" aria-live="polite">
+                    <span class="activity-spin" aria-hidden="true"></span>
+                    <span id="filter-overlay-label">Filtering…</span>
+                    <span id="filter-overlay-elapsed" class="filter-overlay-elapsed"></span>
+                    <div class="filter-progress" aria-hidden="true"><div id="filter-progress-bar" class="filter-progress-bar is-unknown"></div></div>
+                </div>
+            </div>
+            <div class="tree-legend">
+                <button type="button" id="music-prune-held" class="btn-ghost btn-remove hidden" data-action="music-prune-held" title="Remove every album marked Not found from the database. Files are not touched.">Remove all not found</button>
+                <span id="tree-selected-count">Items Selected: 0</span>
+            </div>
+        </section>
+        <div class="pane-split" data-split="left" title="Drag to resize. Double-click to collapse the library."></div>
+        <section class="pane" id="center-pane">
+            <div id="center-artist" class="center-scroll hidden"></div>
+            <div id="center-album" class="center-album">
+                <div id="album-summary"></div>
+                <div class="matrix-toolbar">
+                    <span id="center-title">Track matrix</span>
+                    <div class="header-actions">
+                        <div class="density-switch" role="group" aria-label="Row density">
+                            <button type="button" class="btn-ghost" data-density="compact">Compact</button>
+                            <button type="button" class="btn-ghost" data-density="standard">Standard</button>
+                            <button type="button" class="btn-ghost" data-density="relaxed">Relaxed</button>
+                        </div>
+                        <button id="columns-btn" type="button" class="btn-ghost">Columns</button>
+                        <div id="column-menu" class="menu hidden"></div>
+                        <button type="button" class="btn-ghost" data-action="artwork">Artwork</button>
+                        <button type="button" class="btn-ghost" data-action="lyrics">Lyrics</button>
+                    </div>
+                </div>
+                <div class="pane-content" id="tracks"></div>
+                <div id="track-preview" class="track-preview">No track selected</div>
+            </div>
+        </section>
+        <div class="pane-split" data-split="right" title="Drag to resize. Double-click to collapse the tag pane."></div>
+        <section class="pane" id="right-pane">
+            <div class="pane-header">
+                <span><span id="inspector-title">ID3 tag sandbox</span> <span id="active-track-badge" class="pill pill-accent"></span></span>
+                <div class="header-actions">
+                    <button id="clear-artist-nfo" type="button" class="btn-ghost hidden" data-action="clear-artist-nfo">Clear</button>
+                    <button id="save-tags" type="button">Save tags</button>
+                </div>
+            </div>
+            <div id="track-location" class="track-location hidden"></div>
+            <div class="inspector-tabs">
+                <button type="button" data-inspector="tags" class="active">Embedded ID3</button>
+                <button type="button" data-inspector="diff">MB delta</button>
+                <button type="button" data-inspector="sidecar">Tag Completion Status</button>
+                <button type="button" data-inspector="album-art">Artwork</button>
+                <button type="button" data-inspector="album-nfo">album.nfo</button>
+                <button type="button" data-inspector="artist-nfo" class="hidden">artist.nfo</button>
+                <button type="button" data-inspector="artist-art" class="hidden">Artwork</button>
+            </div>
+            <div id="completeness-card"></div>
+            <div class="pane-content inspector-panel" id="editor"></div>
+            <div class="pane-content inspector-panel hidden" id="editor-diff"></div>
+            <div class="pane-content inspector-panel hidden" id="editor-sidecar"></div>
+            <div class="pane-content inspector-panel hidden" id="editor-album-nfo"></div>
+            <div class="pane-content inspector-panel hidden" id="editor-album-art"></div>
+            <div class="pane-content inspector-panel hidden" id="editor-artist-nfo"></div>
+            <div class="pane-content inspector-panel hidden" id="editor-artist-art"></div>
+        </section>
+    </main>
+    <div id="dock" class="dock">
+        <div class="dock-player-slot">
+            <div class="dock-player">
+            <audio id="player" preload="none"></audio>
+            <button type="button" id="player-toggle" data-action="toggle-preview">Preview</button>
+            <button type="button" id="player-span" class="btn-ghost player-span" data-action="player-span" aria-pressed="false" title="15 second preview. Click for the whole file.">
+                <svg class="span-half" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2.25"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor"/></svg>
+                <svg class="span-full" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="currentColor"/></svg>
+            </button>
+            <button type="button" id="player-clock" class="player-clock" role="slider" aria-label="Playback position" aria-valuemin="0" aria-valuemax="15" aria-valuenow="0" aria-orientation="horizontal" disabled>
+                <span class="player-clock-fill" id="player-clock-fill"></span>
+                <span id="player-time" class="mono tabular">00:00:00 / 00:00:15</span>
+            </button>
+            <button type="button" id="player-volume" class="player-knob" role="slider" aria-label="Volume" aria-valuemin="0" aria-valuemax="100" aria-valuenow="90" aria-orientation="horizontal" title="Drag right to raise the volume, left to lower it">
+                <svg class="player-knob-svg" viewBox="0 0 64 64" aria-hidden="true">
+                    <path d="M32 6a24 24 0 1 1-22 36" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="1.6 3.4" stroke-linecap="butt"/>
+                    <circle cx="32" cy="30" r="15" fill="currentColor"/>
+                    <g id="player-knob-mark">
+                        <rect x="30.3" y="13" width="3.4" height="8" rx="1.2" fill="var(--bg-surface)"/>
+                    </g>
+                    <rect x="6" y="54" width="12" height="3" rx="1.5" fill="currentColor"/>
+                    <path d="M46 52.5h12M52 46.5v12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                </svg>
+            </button>
+            <button type="button" id="player-lyrics-edit" class="player-knob player-lyrics-btn hidden" data-action="lyrics-edit" title="Edit synced lyrics" aria-label="Edit synced lyrics">
+                <svg viewBox="0 0 40 26" width="27" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <!-- Document body: rounded-bottom, folded top-right corner -->
+                    <path d="M2 2h15.5L23 7.5V22.5a1.5 1.5 0 0 1-1.5 1.5H2A1.5 1.5 0 0 1 .5 22.5V3.5A1.5 1.5 0 0 1 2 2z"/>
+                    <!-- Folded corner -->
+                    <path d="M17.5 2.2V7.5H23" stroke-width="1.2"/>
+                    <!-- Text lines on document -->
+                    <line x1="3.5" y1="10" x2="13.5" y2="10" stroke-width="1.2"/>
+                    <line x1="3.5" y1="13" x2="13.5" y2="13" stroke-width="1.2"/>
+                    <line x1="3.5" y1="16" x2="9" y2="16" stroke-width="1.2"/>
+                    <!-- Double music note (overlapping lower-right area of doc) -->
+                    <ellipse cx="11" cy="22" rx="1.9" ry="1.25" transform="rotate(-18 11 22)" fill="currentColor" stroke="none"/>
+                    <ellipse cx="17" cy="21" rx="1.9" ry="1.25" transform="rotate(-18 17 21)" fill="currentColor" stroke="none"/>
+                    <line x1="12.7" y1="21.2" x2="12.7" y2="15.2" stroke-width="1.35"/>
+                    <line x1="18.7" y1="20.2" x2="18.7" y2="14.2" stroke-width="1.35"/>
+                    <path d="M12.7 15.2 L18.7 14.2 L18.7 15.8 L12.7 16.8 Z" fill="currentColor" stroke="none"/>
+                    <!-- Pencil: slim vertical, pointed at bottom -->
+                    <path d="M30 3.5 L33 3.5 L33 21 L31.5 24.5 L30 21 Z" stroke-width="1.3" stroke-linejoin="round"/>
+                    <!-- Eraser band at top -->
+                    <line x1="30" y1="6" x2="33" y2="6" stroke-width="1.1"/>
+                    <!-- Eraser cap -->
+                    <path d="M30 3.5 L33 3.5 L33 1.5 L30 1.5 Z" stroke-width="1.2" stroke-linejoin="round"/>
+                </svg>
+            </button>
+            <div class="player-stage" id="player-stage">
+                <canvas id="player-wave" width="220" height="36" aria-hidden="true"></canvas>
+                <span class="player-now" id="player-now"><span id="player-now-text"></span></span>
+            </div>
+            </div>
+            <div id="batch-bar" class="batch-bar" aria-hidden="true">
+                <div>
+                    <strong><span id="batch-selected-count">0</span> albums</strong>
+                    <div class="muted" id="batch-selected-tracks">0 tracks</div>
+                </div>
+                <span class="pill pill-gold" id="batch-gold-count">0 gold</span>
+                <span class="pill pill-silver" id="batch-silver-count">0 partial</span>
+                <div class="batch-actions">
+                    <div class="select-row select-row-main">
+                        <button type="button" data-action="batch-scrape" title="Find metadata for the checked albums.">Scrape…</button>
+                        <div class="scan-group rescan-split" id="batch-rescan">
+                            <button type="button" class="scan-main" data-action="batch-rescan" data-mode="deep" data-count="0">Rescan | Deep</button>
+                            <button type="button" class="scan-caret" data-action="batch-rescan-menu" aria-label="Choose scan mode" aria-expanded="false">▾</button>
+                            <div class="scan-menu hidden">
+                                <button type="button" data-action="batch-rescan-mode" data-mode="incremental">Incremental</button>
+                                <button type="button" data-action="batch-rescan-mode" data-mode="full">Full</button>
+                                <button type="button" data-action="batch-rescan-mode" data-mode="deep" class="active">Deep</button>
+                            </div>
+                        </div>
+                        <button type="button" class="btn-ghost btn-remove" data-action="batch-forget" title="Removes the checked albums from the library. The files stay on disk.">Remove from library</button>
+                        <button type="button" class="btn-ghost btn-remove" data-action="batch-delete" title="Deletes the checked album folders and the files inside them.">Delete from disk</button>
+                    </div>
+                    <div class="select-row select-row-more">
+                        <button type="button" class="btn-ghost" data-action="batch-edit-fields" title="Set the same genres, label, edition, and other shared fields on every checked album.">Edit fields…</button>
+                        <button type="button" data-action="open-batch">Review batch</button>
+                        <button type="button" class="btn-ghost" data-action="group-compilation" title="Merges checked albums that share the same title into one compilation row. Track files stay in their folders. The extra album rows are removed from the library. Needs at least two albums.">Merge as compilation</button>
+                        <button type="button" class="btn-ghost" data-action="batch-nfo" title="Rewrites artist.nfo and album.nfo for the checked albums from the library.">Write .nfo</button>
+                        <button type="button" class="btn-ghost" data-action="batch-lock" title="Lock the checked albums so scrapes and metadata lookups skip them. When every checked album is locked this unlocks them.">Lock</button>
+                        <button type="button" class="btn-process" data-action="batch-processed" title="Marks the checked albums processed so the NEW badge goes away. Tags and files stay as they are.">Mark processed</button>
+                        <button type="button" class="btn-ghost" data-action="select-none">Clear</button>
+                    </div>
+                </div>
+            </div>
+            <div id="video-select-bar" class="batch-bar" aria-hidden="true">
+                <div>
+                    <strong><span id="video-select-count">0</span> <span id="video-select-noun">movies</span></strong>
+                    <div class="muted" id="video-select-detail"></div>
+                </div>
+                <div id="video-select-actions" class="video-select-actions"></div>
+            </div>
+        </div>
+        <div class="dock-jobs">
+            <div id="activity" class="activity is-idle" role="status" aria-live="polite">
+                <span class="activity-spin" aria-hidden="true"></span>
+                <span id="activity-label">Idle</span>
+                <span id="activity-chips" class="activity-chips"></span>
+            </div>
+            <button type="button" id="dock-scan" class="btn-ghost" data-action="open-scan" title="Open the scan engine"><span id="dock-scan-mark" aria-hidden="true"></span>Scan engine</button>
+            <button type="button" id="dock-cancel" class="btn-ghost hidden" data-action="cancel-scan">Cancel</button>
+            <button type="button" id="dock-queue" class="icon-btn" data-action="queue-open" title="Queue" aria-label="Queue">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3.5h10.5a1.5 1.5 0 0 1 1.5 1.5V11"/><path d="M6 6.5h10.5a1.5 1.5 0 0 1 1.5 1.5V14"/><rect x="2.5" y="9.5" width="13" height="11.5" rx="1.5"/><path d="M5.5 13.5h7"/><path d="M5.5 17h5"/></svg>
+                <span id="dock-queue-count" class="icon-count hidden">0</span>
+                <span id="dock-queue-countdown" class="icon-count dock-queue-cd hidden" aria-hidden="true"></span>
+            </button>
+            <div id="toast-dock" class="toast-dock">
+                <button type="button" id="alert-bell" class="icon-btn alert-bell" data-action="toggle-alerts" aria-label="Alerts" title="Alerts">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9a6 6 0 1 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
+                    <span id="alert-count" class="alert-count hidden">0</span>
+                </button>
+            </div>
+            <button type="button" id="jobs-btn" class="icon-btn" data-action="toggle-jobs" aria-label="Jobs" title="Jobs">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 6h11"/><path d="M10 12h11"/><path d="M10 18h11"/><path d="m3 6 1.5 1.5L7 5"/><path d="m3 12 1.5 1.5L7 11"/><path d="m3 18 1.5 1.5L7 17"/></svg>
+                <span id="jobs-count" class="jobs-count hidden">0</span>
+            </button>
+            <aside id="job-drawer" class="job-drawer hidden" aria-label="Jobs">
+                <div class="job-drawer-head">
+                    <strong id="job-heading">Jobs</strong>
+                    <span class="job-drawer-actions">
+                        <button type="button" id="jobs-queue-btn" class="icon-btn" data-action="queue-open" title="Queue" aria-label="Queue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3.5h10.5a1.5 1.5 0 0 1 1.5 1.5V11"/><path d="M6 6.5h10.5a1.5 1.5 0 0 1 1.5 1.5V14"/><rect x="2.5" y="9.5" width="13" height="11.5" rx="1.5"/><path d="M5.5 13.5h7"/><path d="M5.5 17h5"/></svg><span id="jobs-queue-count" class="icon-count hidden">0</span></button>
+                        <button type="button" class="icon-btn trakt-sync-icon" data-action="trakt-sync" title="Sync Trakt now" aria-label="Sync Trakt now"><img src="/media/providers/trakt.png" alt=""></button>
+                        <button type="button" class="btn-ghost" data-action="rollback">Rollback last batch</button>
+                    </span>
+                </div>
+                <div id="job-list" class="job-list"></div>
+            </aside>
+        </div>
+    </div>
+    <div id="snackbar" class="snackbar hidden" role="status"></div>
+    <div id="sub-sync-modal" class="modal modal-wide hidden" role="dialog" aria-modal="true" aria-labelledby="sub-sync-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="sub-sync-title">Sync subtitles</h2>
+                <button type="button" class="btn-auto-sync" data-action="sub-sync-done" title="Close this window and delete the temporary preview copy of the video, if one was made">Sync OK</button>
+                <button type="button" class="btn-ghost" data-close="sub-sync-modal">Close</button>
+            </div>
+            <div class="episode-split-layout sub-sync-layout">
+                <div class="episode-split-player sub-sync-player" id="sub-sync-player-wrap">
+                    <video id="sub-sync-video" controls preload="metadata" crossorigin="anonymous"></video>
+                    <p id="sub-sync-video-note" class="muted scan-status hidden"></p>
+                    <div class="episode-split-player-controls sub-sync-controls">
+                        <span id="sub-sync-timecode" class="split-timecode">0:00:00.000</span>
+                        <button type="button" class="btn-ghost" data-action="sub-sync-mark" id="sub-sync-mark-btn" disabled>Mark video time for the selected cue</button>
+                        <span class="muted" id="sub-sync-mark-note">Select a cue, scrub to where it should be, then press Mark.</span>
+                    </div>
+                </div>
+                <div class="modal-body" id="sub-sync-body">
+                    <p class="muted">Loading subtitles&hellip;</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="episode-split-modal" class="modal modal-wide hidden" role="dialog" aria-modal="true" aria-labelledby="episode-split-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="episode-split-title">Split episodes</h2>
+                <button type="button" class="btn-ghost" data-close="episode-split-modal">Close</button>
+            </div>
+            <div class="episode-split-layout">
+                <div class="episode-split-player hidden" id="episode-split-player-wrap">
+                    <video id="episode-split-video" controls preload="metadata"></video>
+                    <div class="episode-split-player-controls">
+                        <span id="episode-split-timecode" class="split-timecode">0:00:00.000</span>
+                        <button type="button" class="btn-ghost" data-action="video-split-mark">Mark current time</button>
+                        <span class="muted" id="episode-split-mark-target"></span>
+                    </div>
+                </div>
+                <div class="modal-body" id="episode-split-body"></div>
+            </div>
+        </div>
+    </div>
+    <div id="danger-modal" class="modal modal-alert hidden" role="dialog" aria-modal="true" aria-labelledby="danger-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="danger-title">Delete from disk?</h2>
+                <button type="button" class="btn-ghost" data-close="danger-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="danger-text"></p>
+                <p id="danger-warn" class="danger-warn hidden"></p>
+                <div class="job-actions">
+                    <button type="button" class="btn-ghost" data-close="danger-modal">Cancel</button>
+                    <button type="button" id="danger-library" class="btn-ghost btn-remove hidden" data-action="confirm-danger-library">Remove from library</button>
+                    <button type="button" id="danger-confirm" class="btn-danger" data-action="confirm-danger">Delete</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="album-menu" class="track-menu hidden" role="menu" aria-label="Library"></div>
+    <div id="diff-menu" class="track-menu hidden" role="menu" aria-label="Tag comparison"></div>
+    <div id="video-menu" class="track-menu hidden" role="menu" aria-label="Library item"></div>
+    <div id="track-menu" class="track-menu hidden" role="menu">
+        <button type="button" data-action="auto-number">Auto-number tracks</button>
+        <label>Disc number <input id="menu-disc" type="number" min="1" value="1"></label>
+        <button type="button" data-action="set-disc">Set disc number</button>
+    </div>
+    <div id="palette" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="palette-title">
+        <div class="palette">
+            <h2 id="palette-title" class="sr-only">Command palette</h2>
+            <input id="palette-input" type="search" placeholder="Actions, or type to open an artist or album. Use &gt; for actions." autocomplete="off">
+            <div id="palette-list"></div>
+        </div>
+    </div>
+
+    <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="settings-title">Application settings</h2>
+                <button type="button" class="btn-ghost" data-close="settings-modal">Close</button>
+            </div>
+            <nav id="settings-tabs" class="settings-tabs" role="tablist" aria-label="Settings sections">
+                <button type="button" role="tab" data-settings-tab="general">General</button>
+                <button type="button" role="tab" data-settings-tab="music">Music</button>
+                <button type="button" role="tab" data-settings-tab="movies">Movies</button>
+                <button type="button" role="tab" data-settings-tab="sets">Movie Sets</button>
+                <button type="button" role="tab" data-settings-tab="tv">TV Shows</button>
+                <button type="button" role="tab" data-settings-tab="files">Files</button>
+                <button type="button" role="tab" data-settings-tab="automation">Automation</button>
+                <button type="button" role="tab" data-settings-tab="notifications">Notifications</button>
+                <button type="button" role="tab" data-settings-tab="integrations">Integrations</button>
+                <button type="button" role="tab" data-settings-tab="sync">Schedules</button>
+                <button type="button" role="tab" data-settings-tab="backup">Backup</button>
+                <button type="button" role="tab" data-settings-tab="about">About</button>
+            </nav>
+            <p id="settings-status" class="settings-status" aria-live="polite"></p>
+            <div class="modal-body" id="settings-body"></div>
+            <div class="settings-footer">
+                <button type="button" id="save-settings" data-action="save-settings">Save settings</button>
+            </div>
+        </div>
+    </div>
+    <div id="kodi-sources-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="kodi-sources-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="kodi-sources-title">Kodi path mappings</h2>
+                <button type="button" class="btn-ghost" data-close="kodi-sources-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="kodi-sources-note" class="muted"></p>
+                <div id="kodi-sources-list" class="kodi-sources"></div>
+            </div>
+            <div class="settings-footer">
+                <button type="button" class="btn-ghost" data-action="kodi-sources-test">Test in Kodi</button>
+                <button type="button" data-action="kodi-sources-accept">Accept</button>
+            </div>
+        </div>
+    </div>
+    <div id="review-search-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="review-search-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="review-search-title">Album review</h2>
+                <button type="button" class="btn-ghost" data-close="review-search-modal">Close</button>
+            </div>
+            <form id="review-search-form" class="review-search">
+                <label>Artist <input id="review-search-artist" type="text" autocomplete="off" spellcheck="false"></label>
+                <label>Album <input id="review-search-album" type="text" autocomplete="off" spellcheck="false"></label>
+                <button type="submit">Search</button>
+            </form>
+            <div class="modal-body" id="review-search-body"></div>
+        </div>
+    </div>
+    <div id="add-artist-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="add-artist-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="add-artist-title">Add artist</h2>
+                <button type="button" class="btn-ghost" data-close="add-artist-modal">Close</button>
+            </div>
+            <form id="add-artist-form" class="artwork-search">
+                <label for="add-artist-query">Search criteria</label>
+                <input id="add-artist-query" type="search" autocomplete="off" spellcheck="false" placeholder="Artist name" aria-label="Artist name">
+                <button type="submit">Search</button>
+            </form>
+            <div class="modal-body" id="add-artist-body"></div>
+        </div>
+    </div>
+    <div id="artist-search-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="artist-search-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="artist-search-title">Artist metadata manual search</h2>
+                <button type="button" class="btn-ghost" data-close="artist-search-modal">Close</button>
+            </div>
+            <form id="artist-search-form" class="artwork-search">
+                <label for="artist-search-query">Search criteria</label>
+                <input id="artist-search-query" type="search" autocomplete="off" spellcheck="false" placeholder="Artist name" aria-label="Artist metadata search criteria">
+                <button type="submit">Search</button>
+            </form>
+            <div class="modal-body" id="artist-search-body"></div>
+        </div>
+    </div>
+    <div id="artwork-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="artwork-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="artwork-title">Select artwork</h2>
+                <button type="button" class="btn-ghost hidden" id="undo-artwork" data-action="undo-artwork">Undo last artwork</button>
+                <button type="button" class="btn-ghost" data-close="artwork-modal">Close</button>
+            </div>
+            <form id="artwork-search" class="artwork-search hidden">
+                <label for="artwork-query">Search criteria</label>
+                <input id="artwork-query" type="search" autocomplete="off" spellcheck="false" placeholder="Artist - Album" aria-label="Artwork search criteria">
+                <button type="submit">Search</button>
+            </form>
+            <div class="art-workspace">
+            <div id="art-compare" class="art-compare hidden">
+                <div class="art-compare-stage">
+                    <div class="art-compare-frame">
+                        <img id="compare-current" alt="Current cover">
+                        <img id="compare-candidate" alt="Candidate cover">
+                    </div>
+                    <label><span id="compare-label">Compare</span> <input id="compare-slider" type="range" min="0" max="100" value="50" aria-label="Compare the current artwork and the highlighted artwork"></label>
+                </div>
+            </div>
+            <div class="art-split" data-art-split role="separator" aria-orientation="vertical" aria-label="Resize the comparison" title="Drag to resize the comparison"></div>
+            <div class="modal-body">
+                <div id="loupe" class="loupe hidden" aria-hidden="true"></div>
+                <div id="artwork-body"></div>
+                <input id="artwork-file" class="file-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif,.jpg,.jpeg,.png,.webp,.gif">
+                <div id="artwork-scan-actions" class="scan-prompt-actions hidden"></div>
+            </div>
+            </div>
+        </div>
+    </div>
+    <div id="art-zoom" class="art-zoom-view hidden">
+        <button type="button" class="btn-ghost art-zoom-close" data-action="close-zoom">Close</button>
+        <div class="art-zoom-stage">
+            <button type="button" id="fanart-prev" class="art-zoom-nav hidden" data-action="fanart-prev" aria-label="Previous fanart" title="Previous fanart">‹</button>
+            <img id="art-zoom-image" alt="">
+            <button type="button" id="fanart-next" class="art-zoom-nav hidden" data-action="fanart-next" aria-label="Next fanart" title="Next fanart">›</button>
+        </div>
+        <p id="art-zoom-caption" class="muted"></p>
+    </div>
+    <aside id="trailer-popout" class="trailer-popout hidden" aria-label="Trailer player">
+        <div id="trailer-popout-head" class="trailer-popout-head">
+            <strong id="trailer-popout-title" class="trailer-popout-title">Trailer</strong>
+            <div class="trailer-popout-actions">
+                <button type="button" id="trailer-popout-pip" class="btn-ghost hidden" data-action="video-trailer-popout-pip" title="Picture-in-Picture">PiP</button>
+                <button type="button" id="trailer-popout-size" class="btn-ghost" data-action="video-trailer-popout-size" title="Toggle large player">Large</button>
+                <button type="button" class="btn-ghost" data-action="video-trailer-popout-close" title="Close trailer player">×</button>
+            </div>
+        </div>
+        <div id="trailer-popout-stage" class="trailer-popout-stage"></div>
+    </aside>
+    <div id="nfo-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="nfo-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="nfo-title">artist.nfo</h2>
+                <div class="modal-actions">
+                    <button type="button" class="btn-ghost" data-action="nfo-copy">Copy</button>
+                    <button type="button" class="btn-ghost hidden" id="nfo-write" data-action="nfo-write">Write .nfo</button>
+                    <button type="button" class="btn-ghost" data-close="nfo-modal">Close</button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <p id="nfo-note" class="nfo-note hidden"></p>
+                <div id="nfo-diff" class="nfo-diff hidden"></div>
+                <pre id="nfo-body" class="nfo-view"></pre>
+            </div>
+        </div>
+    </div>
+    <div id="scrape-prefs-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="scrape-prefs-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="scrape-prefs-title">Custom scrapers</h2>
+                <button type="button" class="btn-ghost" data-close="scrape-prefs-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">Default uses the order in Settings. A saved provider is asked first for this item. The other enabled providers still fill anything it does not have.</p>
+                <label class="field">Metadata provider
+                    <select id="scrape-prefs-source"></select>
+                </label>
+                <label class="field">Artwork provider
+                    <select id="scrape-prefs-art"></select>
+                </label>
+                <label class="field hidden" id="scrape-prefs-order-wrap">Episode order
+                    <select id="scrape-prefs-order">
+                        <option value="">Default</option>
+                        <option value="aired">Aired</option>
+                        <option value="dvd">DVD</option>
+                        <option value="absolute">Absolute</option>
+                    </select>
+                </label>
+                <p class="vactions"><button type="button" data-action="video-scrape-prefs-save">Save</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="files-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="files-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="files-title">Files on disk</h2>
+                <button type="button" class="btn-ghost" data-close="files-modal">Close</button>
+            </div>
+            <div class="modal-body" id="files-body"></div>
+        </div>
+    </div>
+    <div id="match-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="match-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="match-title">MusicBrainz releases</h2>
+                <button type="button" class="btn-ghost" data-close="match-modal">Close</button>
+            </div>
+            <div class="modal-body" id="match-body"></div>
+            <div id="match-scan-actions" class="scan-prompt-actions hidden"></div>
+        </div>
+    </div>
+    <div id="scan-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="scan-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="scan-title" class="scan-engine-title"><span data-scan-icon aria-hidden="true"></span><span data-scan-label>Scan engine</span></h2>
+                <button type="button" class="btn-ghost" data-close="scan-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">Target: <span id="scan-target">All music paths</span>. None of these modes writes tags by itself.</p>
+                <div class="scan-mode">
+                    <label class="choice"><input type="radio" name="scan-mode" value="incremental" checked> Incremental deep scan</label>
+                    <p class="muted scan-mode-note">Compares modification times with the index. Unchanged albums are skipped. New and changed albums are read in full and looked up.</p>
+                </div>
+                <div class="scan-mode">
+                    <label class="choice"><input type="radio" name="scan-mode" value="full"> Full scan</label>
+                    <p class="muted scan-mode-note">Uses the same file check. Fills missing country flags and other blank release details from tags already stored, records Upgrade available where a better copy exists, and looks up albums that are still missing details.</p>
+                </div>
+                <div class="scan-mode">
+                    <label class="choice"><input type="radio" name="scan-mode" value="deep"> Deep rescan</label>
+                    <p class="muted scan-mode-note">Re-reads every audio file and looks up every album again, including albums that are already complete.</p>
+                </div>
+                <label class="choice"><input type="checkbox" id="scan-force"> Force, including an empty library wipe</label>
+                <label class="choice"><input type="checkbox" id="scan-verbose"> Verbose log</label>
+                <p class="muted scan-mode-note">Also writes each album into the container log for the next scan you start here. For every job, turn on Verbose logging in Settings and save.</p>
+                <div class="stepper" id="scan-steps">
+                    <span data-phase="directory">Directory walk</span>
+                    <span data-phase="delta">Changed files</span>
+                    <span data-phase="musicbrainz">MusicBrainz</span>
+                    <span data-phase="sidecars">Sidecar audit</span>
+                    <span data-phase="metadata">Metadata</span>
+                    <span data-phase="artwork">Artwork</span>
+                    <span data-phase="nfo">Write .nfo</span>
+                </div>
+                <div class="scan-meter">
+                    <div class="scan-meter-label" id="scan-total-label">Scan</div>
+                    <div class="progress-bar-bg"><div id="scan-total-progress" class="progress-bar-fill"></div></div>
+                </div>
+                <div class="scan-meter">
+                    <div class="scan-meter-label" id="scan-stage-label">This stage</div>
+                    <div class="progress-bar-bg"><div id="scan-progress" class="progress-bar-fill"></div></div>
+                </div>
+                <p id="scan-clock" class="scan-clock muted"></p>
+                <p id="scan-status" class="scan-status" role="status">Ready to scan.</p>
+                <div class="log-toolbar">
+                    <span class="section-label">Status log</span>
+                    <button type="button" class="btn-ghost" data-action="clear-scan-log">Clear</button>
+                    <button type="button" class="btn-ghost" data-action="scan-history">Saved scans</button>
+                </div>
+                <pre id="scan-log" class="console">Idle.</pre>
+                <div class="scan-sticky">
+                <div class="job-actions">
+                    <button type="button" class="btn-ghost" data-action="copy-job" data-job="scan">Copy status</button>
+                    <button type="button" class="btn-ghost" data-action="export-job" data-job="scan">Export JSON</button>
+                </div>
+                <p><button type="button" id="scan-start" data-action="start-scan">Start scan</button>
+                <button type="button" id="scan-apply-pending" class="btn-ghost hidden" data-action="apply-all-matches">Apply match</button></p>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="video-scan-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="video-scan-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="video-scan-title" class="scan-engine-title"><span data-scan-icon aria-hidden="true"></span><span data-scan-label>Scan engine</span></h2>
+                <button type="button" class="btn-ghost" data-close="video-scan-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">Target: <span id="video-scan-target">All folders</span>.</p>
+                <p class="muted" id="video-scan-intro">A scan reads .nfo files and local artwork, then probes the video files. When Download missing metadata and artwork during a scan is on, it looks up the enabled fields and images. Overwrite metadata and Overwrite artwork in Settings decide whether an existing value is replaced.</p>
+                <div class="scan-mode">
+                    <label class="choice"><input type="radio" name="video-scan-mode" value="incremental" checked> Incremental deep scan</label>
+                    <p class="muted scan-mode-note">A deep scan of the new and changed files. Those files are probed and looked up again.</p>
+                </div>
+                <div class="scan-mode">
+                    <label class="choice"><input type="radio" name="video-scan-mode" value="full"> Full scan</label>
+                    <p class="muted scan-mode-note">Reads every file and retries a probe that failed. It looks up a file that is new, changed, or missing an enabled field or image. A file that already has those, and has not changed, is left alone.</p>
+                </div>
+                <div class="scan-mode">
+                    <label class="choice"><input type="radio" name="video-scan-mode" value="deep"> Deep rescan</label>
+                    <p class="muted scan-mode-note">Rescans and reprobes the file or mount, then downloads metadata and artwork again for every item. This takes a long time on a big library.</p>
+                </div>
+                <p class="muted" id="video-scan-remove">Items are removed only when their folder was read to the end. A folder that is empty or not mounted keeps its items.</p>
+                <div id="video-scan-verbose-row">
+                    <label class="choice"><input type="checkbox" id="video-scan-verbose"> Verbose log</label>
+                    <p class="muted scan-mode-note">Also writes each file into the container log for the next movie or TV scan you start here. For every job, turn on Verbose logging in Settings and save.</p>
+                </div>
+                <div class="stepper" id="video-scan-steps">
+                    <span data-phase="walk">Folders and files</span>
+                    <span data-phase="lookup">Metadata and artwork</span>
+                    <span data-phase="trailers">Trailers</span>
+                    <span data-phase="nfo">Write .nfo</span>
+                </div>
+                <div class="scan-meter">
+                    <div class="scan-meter-label" id="video-scan-total-label">Scan</div>
+                    <div class="progress-bar-bg"><div id="video-scan-total-progress" class="progress-bar-fill"></div></div>
+                </div>
+                <div class="scan-meter">
+                    <div class="scan-meter-label" id="video-scan-stage-label">This stage</div>
+                    <div class="progress-bar-bg"><div id="video-scan-progress" class="progress-bar-fill"></div></div>
+                </div>
+                <p id="video-scan-clock" class="scan-clock muted"></p>
+                <p id="video-scan-status" class="scan-status" role="status">Ready to scan.</p>
+                <div class="log-toolbar">
+                    <span class="section-label">Status log</span>
+                    <button type="button" class="btn-ghost" data-action="clear-video-scan-log">Clear</button>
+                    <button type="button" class="btn-ghost" data-action="scan-history">Saved scans</button>
+                </div>
+                <pre id="video-scan-log" class="console">Idle.</pre>
+                <div class="scan-sticky">
+                <p><button type="button" id="video-scan-start" data-action="video-scan-start">Start scan</button>
+                <button type="button" id="video-apply-match" class="btn-ghost hidden" data-action="video-apply-match">Apply match</button></p>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="scan-history-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="scan-history-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="scan-history-title">Saved scans</h2>
+                <button type="button" class="btn-ghost" data-close="scan-history-modal">Close</button>
+            </div>
+            <div class="modal-body" id="scan-history-list"></div>
+        </div>
+    </div>
+    <div id="scan-report-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="scan-report-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="scan-report-title">Scan report</h2>
+                <button type="button" class="btn-ghost" data-close="scan-report-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="job-actions">
+                    <button type="button" class="btn-ghost" data-action="scan-report-copy">Copy</button>
+                    <button type="button" class="btn-ghost" data-action="scan-report-export">Export</button>
+                </div>
+                <pre id="scan-report-body" class="console"></pre>
+            </div>
+        </div>
+    </div>
+    <div id="library-update-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="library-update-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="library-update-title">Library update</h2>
+                <button type="button" class="btn-ghost" data-close="library-update-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="library-update-note" class="muted"></p>
+                <div id="library-update-players" class="library-update-list"></div>
+                <p><button type="button" data-action="library-update-send">Update</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="about-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="about-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="about-title">About Curator</h2>
+                <button type="button" class="btn-ghost" data-close="about-modal">Close</button>
+            </div>
+            <div class="modal-body" id="about-body"></div>
+        </div>
+    </div>
+    <div id="subs-find-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="subs-find-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="subs-find-title">Find subtitles</h2>
+                <button type="button" class="btn-ghost" data-close="subs-find-modal">Close</button>
+            </div>
+            <div class="modal-body" id="subs-find-body"></div>
+        </div>
+    </div>
+    <div id="pending-album-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="pending-album-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="pending-album-title">Apply match</h2>
+                <button type="button" class="btn-ghost" data-close="pending-album-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">These albums have a loaded match that has not been applied. Apply all saves each one to the tags, .nfo and lyrics that are on in Settings. Remove leaves an album out of this run; its loaded match stays.</p>
+                <div id="pending-album-list" class="pending-match-list"></div>
+            </div>
+            <div class="scan-results-footer">
+                <div class="job-actions">
+                    <button type="button" class="btn-primary" data-action="apply-all-matches-confirm">Apply all</button>
+                    <button type="button" class="btn-ghost" data-close="pending-album-modal">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="pending-match-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="pending-match-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="pending-match-title">Apply match</h2>
+                <button type="button" class="btn-ghost" data-close="pending-match-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">The scan found these but had no TMDB or TVDB id for them, so it kept the match in the database and wrote no files. Apply match writes their .nfo and artwork. If a title is wrong, fix its match first.</p>
+                <div id="pending-match-list" class="pending-match-list"></div>
+            </div>
+            <div class="scan-results-footer">
+                <div class="job-actions">
+                    <button type="button" class="btn-primary" data-action="video-apply-match-confirm">Apply all</button>
+                    <button type="button" class="btn-ghost" data-close="pending-match-modal">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="video-scrape-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="video-scrape-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="video-scrape-title">Scrape</h2>
+                <button type="button" class="btn-ghost" data-close="video-scrape-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">Fetches metadata from the sources in Settings, saves what you pick, and writes .nfo files. Locked items and locked fields are never changed.</p>
+                <div class="scan-mode" id="video-scrape-missing-mode">
+                    <label class="choice"><input type="radio" name="video-scrape-scope" value="missing" checked> Missing metadata</label>
+                    <p class="muted scan-mode-note">Items never scraped, or without a plot, an id or a poster.</p>
+                </div>
+                <div class="scan-mode">
+                    <label class="choice"><input type="radio" name="video-scrape-scope" value="selected"> Selected items (<span id="video-scrape-selected">0</span>)</label>
+                </div>
+                <div class="scan-mode" id="video-scrape-all-mode">
+                    <label class="choice"><input type="radio" name="video-scrape-scope" value="all"> Everything in this library</label>
+                </div>
+                <div id="video-scrape-unmatched" class="hidden"></div>
+                <div id="video-scrape-blocks"></div>
+                <label class="choice"><input type="checkbox" id="video-scrape-overwrite-meta"> Overwrite metadata this time</label>
+                <label class="choice"><input type="checkbox" id="video-scrape-overwrite-art"> Overwrite artwork this time</label>
+                <p class="muted">Leave these off to use Overwrite metadata and Overwrite artwork for this library under Settings. Turn one on to replace that for this scrape. An image is replaced only when the new one is larger.</p>
+                <label class="choice"><input type="checkbox" id="video-scrape-rewrite-nfo"> Rewrite .nfo files this time</label>
+                <p class="muted">On replaces each .nfo this scrape writes. A .nfo.bak is kept when that backup option is on. Off writes an .nfo only when one is missing. It starts from Rewrite .nfo files at the end of a scan.</p>
+                <pre id="video-scrape-log" class="console">Idle.</pre>
+            </div>
+            <div class="modal-footer">
+                <div class="progress-bar-bg"><div id="video-scrape-progress" class="progress-bar-fill"></div></div>
+                <div class="modal-footer-row">
+                    <p id="video-scrape-status" class="scan-status" role="status">Ready.</p>
+                    <button type="button" id="video-scrape-start" data-action="video-scrape-start">Start scrape</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="restore-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="restore-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="restore-title">Restore database</h2>
+                <button type="button" class="btn-ghost" data-close="restore-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="restore-warning"><strong>The current database will be deleted first.</strong> Every artist, album, movie, show, match, lock, edit, queue item and job is replaced by the contents of this dump:</p>
+                <p class="mono" id="restore-file-name"></p>
+                <p class="muted">Curator saves the current database to a before-restore dump in the backup folder before it deletes anything, and puts it back if the restore fails. Scans, scrapes and webhooks wait until the restore is done. Files on disk are not changed.</p>
+                <label class="field">Type RESTORE in capital letters to continue
+                    <input id="restore-confirm" autocomplete="off" spellcheck="false" placeholder="RESTORE">
+                </label>
+                <p><button type="button" id="restore-go" class="btn-danger hidden" data-action="restore-go">Restore</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="import-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="import-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="import-title">Import music</h2>
+                <button type="button" class="btn-ghost" data-close="import-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="restore-warning"><strong>Artists, albums and tracks in Curator are replaced</strong> by the music in this dump. Movies, TV, the queue and settings files stay:</p>
+                <p class="mono" id="import-file-name"></p>
+                <p class="muted">Curator saves the current database first and puts it back if the import fails. Files on disk are not changed. Export the old Resonance database with its Backup now (a <span class="mono">resonance-….dump</span> file) and put that file in the Curator folder, next to docker-compose.</p>
+                <label class="field">Type IMPORT in capital letters to continue
+                    <input id="import-confirm" autocomplete="off" spellcheck="false" placeholder="IMPORT">
+                </label>
+                <p><button type="button" id="import-go" class="btn-danger hidden" data-action="import-go">Import music</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="insights-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="insights-title">
+        <div class="modal-content modal-wide insights-modal">
+            <div class="modal-header">
+                <h2 id="insights-title">Library analytics</h2>
+                <button type="button" class="btn-ghost" data-close="insights-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="ins-controls">
+                    <label>Library <select id="insights-media"><option value="all">All libraries</option><option value="music">Music</option><option value="movies">Movies</option><option value="tv">TV shows</option></select></label>
+                    <label>Path <select id="insights-root"><option value="">All paths</option></select></label>
+                    <span id="insights-totals" class="muted"></span>
+                </div>
+                <div id="insights-body"></div>
+            </div>
+        </div>
+    </div>
+    <div id="tags-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="tags-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="tags-title">Tags</h2>
+                <button type="button" class="btn-ghost" data-close="tags-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div id="tags-picked"></div>
+                <div class="ins-controls">
+                    <label>Library <select id="tags-media"><option value="movies">Movies</option><option value="tv">TV shows</option></select></label>
+                    <label class="tags-filter-wrap"><span class="sr-only">Filter tags</span><input id="tags-filter" type="search" placeholder="Filter tags…"></label>
+                </div>
+                <p class="muted">Renaming to a tag that already exists merges the two. Locked items keep their tags.</p>
+                <div id="tags-list"></div>
+            </div>
+        </div>
+    </div>
+    <div id="video-files-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="video-files-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="video-files-title">Rename files</h2>
+                <button type="button" class="btn-ghost" data-close="video-files-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted" id="video-files-note"></p>
+                <div id="video-files-preview" class="vfiles-preview hidden"></div>
+                <div class="progress-bar-bg"><div id="video-files-progress" class="progress-bar-fill"></div></div>
+                <p id="video-files-status" class="scan-status" role="status">Ready.</p>
+                <pre id="video-files-log" class="console">Idle.</pre>
+                <p><button type="button" id="video-files-start" data-action="video-files-start">Start</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="video-move-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="video-move-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="video-move-title">Move</h2>
+                <button type="button" class="btn-ghost" data-close="video-move-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted" id="video-move-note">The folder is copied into the other library folder. The original is removed after the copy matches. Scans wait until the move finishes.</p>
+                <label>Destination <select id="video-move-dest" aria-label="Destination library folder"></select></label>
+                <div id="video-move-preview" class="vfiles-preview"></div>
+                <p><button type="button" id="video-move-start" data-action="video-move-start">Move</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="video-add-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="video-add-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="video-add-title">Add a title</h2>
+                <button type="button" class="btn-ghost" data-close="video-add-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted" id="video-add-note"></p>
+                <p class="vadd-problem hidden" id="video-add-problem" role="alert"></p>
+                <form id="video-add-form" class="vmatch-form">
+                    <select id="video-add-source" aria-label="Provider"></select>
+                    <select id="video-add-root" aria-label="Library folder"></select>
+                    <input id="video-add-query" type="search" placeholder="Title" aria-label="Title">
+                    <button type="submit">Search</button>
+                </form>
+                <label class="choice" id="video-add-search-row"><input type="checkbox" id="video-add-search"> <span id="video-add-search-label">Search for it now</span></label>
+                <p class="muted vadd-hint" id="video-add-hint"></p>
+                <div id="video-add-results" class="vmatch-results"></div>
+            </div>
+        </div>
+    </div>
+    <div id="video-match-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="video-match-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="video-match-title">Fix Match</h2>
+                <span id="video-match-bulk-progress" class="muted hidden" style="font-size:0.85em;"></span>
+                <button type="button" id="video-match-skip-btn" class="btn-ghost hidden" data-action="video-match-skip">Skip →</button>
+                <button type="button" class="btn-ghost" data-close="video-match-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted" id="video-match-item"></p>
+                <form id="video-match-form" class="vmatch-form">
+                    <input id="video-match-query" type="search" placeholder="Title" aria-label="Title">
+                    <input id="video-match-year" type="number" min="1870" max="2100" placeholder="Year" aria-label="Year">
+                    <select id="video-match-source" aria-label="Source"><option value="tmdb">TMDB</option><option value="tvdb">TVDB</option><option value="trakt">Trakt</option><option value="omdb">OMDb</option></select>
+                    <button type="submit">Search</button>
+                </form>
+                <p class="muted">Or paste an id: <input id="video-match-id" class="vmatch-id" inputmode="numeric" placeholder="TMDB or TVDB id"> <button type="button" class="btn-ghost" data-action="video-match-id">Use this id</button></p>
+                <div id="video-match-results" class="vmatch-results"></div>
+            </div>
+        </div>
+    </div>
+    <div id="queue-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="queue-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="queue-title">Queue</h2>
+                <button type="button" class="btn-ghost" data-close="queue-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div id="queue-now" class="queue-now" aria-live="polite"></div>
+                <div class="queue-tabs" role="tablist" aria-label="Queue">
+                    <button type="button" class="is-active" data-action="queue-tab" data-tab="webhook" role="tab" aria-selected="true">Webhook Queue</button>
+                    <button type="button" data-action="queue-tab" data-tab="scan" role="tab" aria-selected="false">Scan Queue</button>
+                    <button type="button" data-action="queue-tab" data-tab="arr" role="tab" aria-selected="false">ARR Queue</button>
+                    <button type="button" data-action="queue-tab" data-tab="library" role="tab" aria-selected="false">Library updates</button>
+                    <button type="button" data-action="queue-tab" data-tab="manual" role="tab" aria-selected="false">Manual library update</button>
+                </div>
+                <div class="queue-top" id="queue-top">
+                    <div class="queue-ring" id="queue-ring" aria-hidden="true">
+                        <svg viewBox="0 0 120 120"><circle class="queue-ring-track" cx="60" cy="60" r="52"></circle><circle id="queue-ring-bar" class="queue-ring-bar" cx="60" cy="60" r="52"></circle></svg>
+                        <div class="queue-ring-label"><strong id="queue-clock">–</strong><small id="queue-count">Empty</small></div>
+                    </div>
+                    <div class="queue-summary">
+                        <p id="queue-status" class="scan-status">The queue is empty.</p>
+                        <p class="muted" id="queue-rules"></p>
+                        <div class="job-actions">
+                            <button type="button" id="queue-flush" data-action="queue-flush">Force scan now</button>
+                            <button type="button" id="queue-clear" class="btn-ghost btn-remove" data-action="queue-clear">Clear</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="queue-manual" class="manual-library hidden"></div>
+                <h3 id="queue-list-title">Waiting</h3>
+                <div id="queue-items" class="queue-items"><p class="muted">Nothing queued.</p></div>
+                <div id="queue-events-wrap" class="queue-history">
+                    <h3 id="queue-events-title">Recent webhooks</h3>
+                    <div id="queue-events" class="queue-events"><p class="muted">No webhooks yet.</p></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="scan-results-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="scan-results-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="scan-results-title">Scan results</h2>
+                <button type="button" class="btn-ghost" data-close="scan-results-modal">Close</button>
+            </div>
+            <div class="modal-body scan-results">
+                <p id="scan-results-summary" class="scan-status"></p>
+                <h3 id="scan-results-lookups-title">Looked up</h3>
+                <pre id="scan-results-lookups" class="console"></pre>
+                <h3 id="scan-results-failures-title">Failures</h3>
+                <pre id="scan-results-failures" class="console"></pre>
+                <h3 id="scan-results-empty-title">Empty folders</h3>
+                <pre id="scan-results-empty" class="console"></pre>
+            </div>
+            <div class="scan-results-footer">
+                <div class="job-actions">
+                    <button type="button" class="btn-ghost" data-action="scan-results-copy">Copy results</button>
+                    <button type="button" class="btn-ghost" data-action="copy-job" data-job="scan">Copy status</button>
+                    <button type="button" class="btn-ghost" data-action="export-job" data-job="scan">Export JSON</button>
+                </div>
+                <p id="scan-results-note" class="muted">These lines are kept in the scan log and appended to <span class="mono">config/logs/scan.log</span>.</p>
+            </div>
+        </div>
+    </div>
+    <div id="batch-edit-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="batch-edit-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h2 id="batch-edit-title">Edit fields</h2>
+                    <p class="muted" id="batch-edit-note"></p>
+                </div>
+                <button type="button" class="btn-ghost" data-close="batch-edit-modal">Close</button>
+            </div>
+            <div class="modal-body" id="batch-edit-body"></div>
+        </div>
+    </div>
+    <div id="batch-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="batch-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <div>
+                    <h2 id="batch-title">Batch commit</h2>
+                    <p class="muted">Find metadata writes the MusicBrainz tags first. Missing artwork is downloaded next, then lyrics, then album.nfo, so the sidecar includes the release and review already stored. Mark processed runs last and only clears the NEW badge.</p>
+                </div>
+                <button type="button" class="btn-ghost" data-close="batch-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="rename-head">
+                    <span class="section-label">Applied to the checked albums</span>
+                    <span id="batch-rename-summary" class="rename-summary">Renaming: Skipped (Safe Mode - paths preserved)</span>
+                </div>
+                <div class="choice-row">
+                    <label class="choice"><input type="checkbox" id="batch-opt-tags" checked> Find metadata</label>
+                    <label class="choice"><input type="checkbox" id="batch-opt-art" checked> Download missing artwork</label>
+                    <label class="choice"><input type="checkbox" id="batch-opt-lrc" checked> Lyrics</label>
+                    <label class="choice"><input type="checkbox" id="batch-opt-nfo" checked> album.nfo</label>
+                    <label class="choice"><input type="checkbox" id="batch-opt-gain"> ReplayGain (rsgain, leaves audio untouched)</label>
+                    <label class="choice" title="Runs last. Clears the NEW badge. Files and nfos are left as they are."><input type="checkbox" id="batch-opt-processed" checked> Mark processed <span class="muted">last, clears NEW</span></label>
+                </div>
+                <div class="rename-card" id="batch-rename-card">
+                    <div class="rename-card-head">
+                        <label class="choice">
+                            <input type="checkbox" id="batch-opt-rename-master">
+                            <span>
+                                <strong>Move &amp; Rename Folders &amp; Files</strong>
+                                <span class="pill">Optional · Disabled by default</span>
+                            </span>
+                        </label>
+                        <button type="button" class="link" data-action="open-rename">Configure Expressions...</button>
+                    </div>
+                    <p class="muted">When unchecked, file names and directory trees stay as they are.</p>
+                    <div id="batch-rename-subpanel" class="hidden">
+                        <div class="choice-row">
+                            <span>Renaming scope</span>
+                            <label class="choice"><input type="radio" name="batch-rename-scope" value="both" checked> Both Folders + Files</label>
+                            <label class="choice"><input type="radio" name="batch-rename-scope" value="folder"> Folders Only</label>
+                            <label class="choice"><input type="radio" name="batch-rename-scope" value="file"> Files Only</label>
+                        </div>
+                        <div class="pattern-chip">Active pattern <span id="batch-rename-pattern" class="mono accent"></span></div>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table class="track-table" id="batch-preview"></table>
+                </div>
+                <div class="progress-bar-bg"><div id="batch-progress" class="progress-bar-fill"></div></div>
+                <pre id="batch-log" class="console"></pre>
+                <p>
+                    <button type="button" id="batch-run" data-action="run-batch">Commit selected</button>
+                </p>
+            </div>
+        </div>
+    </div>
+    <div id="lookup-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="lookup-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <div>
+                    <h2 id="lookup-title">Find metadata</h2>
+                    <p class="muted">Looks up MusicBrainz for each checked album. Load matches keeps those releases in the library tree until you open each album and press Apply match.</p>
+                </div>
+                <button type="button" class="btn-ghost" data-close="lookup-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <h3 class="lookup-choose">Please Choose:</h3>
+                <div class="lookup-modes">
+                    <button type="button" class="lookup-mode" id="lookup-review" data-action="lookup-review">
+                        <strong>Review suggestions</strong>
+                        <span>Suggests the closest release for each album and waits. Pick that release, choose another, or skip the album.</span>
+                    </button>
+                    <button type="button" class="lookup-mode" id="lookup-auto" data-action="lookup-auto">
+                        <strong>Choose closest matches</strong>
+                        <span>Selects the closest release for every checked album. Load matches to review them in the library. Files stay as they are until you apply each album.</span>
+                    </button>
+                </div>
+                <p id="lookup-activity" class="activity activity-inline hidden" role="status">
+                    <span class="activity-spin" aria-hidden="true"></span>
+                    <span id="lookup-activity-label">Finding metadata…</span>
+                </p>
+                <div class="progress-bar-bg"><div id="lookup-progress" class="progress-bar-fill"></div></div>
+                <div id="lookup-list" class="lookup-list"></div>
+                <div class="lookup-actions">
+                    <button type="button" id="lookup-apply" data-action="lookup-apply" disabled title="Loads the releases you kept. Files stay as they are until you apply each album.">Load matches</button>
+                </div>
+                <pre id="lookup-log" class="console"></pre>
+            </div>
+        </div>
+    </div>
+    <div id="rename-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="rename-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <div>
+                    <h2 id="rename-title">Folder and file patterns</h2>
+                    <p class="muted">Moves run only when renaming is enabled. The batch commit uses this saved pattern.</p>
+                </div>
+                <button type="button" class="btn-ghost" data-close="rename-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="rename-card" id="rename-scope-card">
+                    <div class="rename-card-head">
+                        <span class="section-label">Operation mode and scope</span>
+                        <label class="choice"><input type="checkbox" id="rename-execute-switch"> Enable Renaming on Commit</label>
+                    </div>
+                    <div class="choice-row">
+                        <label class="choice"><input type="radio" name="rename-scope" value="none"> No Renaming</label>
+                        <label class="choice"><input type="radio" name="rename-scope" value="both"> Folders and audio files</label>
+                        <label class="choice"><input type="radio" name="rename-scope" value="folder"> Folders only</label>
+                        <label class="choice"><input type="radio" name="rename-scope" value="file"> Audio files only</label>
+                    </div>
+                    <p id="rename-scope-note" class="muted">Renaming is skipped: files and folders stay untouched.</p>
+                </div>
+                <div id="rename-patterns-box">
+                    <div class="rename-card-head">
+                        <span class="section-label">Naming scheme</span>
+                        <label>Preset
+                            <select id="rename-preset">
+                                <option value="standard">Standard</option>
+                                <option value="multidisc">Multi-disc</option>
+                                <option value="flat">Flat folder</option>
+                                <option value="custom">Custom</option>
+                            </select>
+                        </label>
+                    </div>
+                    <label>Folder structure <input id="rename-pattern-folder" class="mono" spellcheck="false"></label>
+                    <label>Audio file name <input id="rename-pattern-file" class="mono" spellcheck="false"></label>
+                    <p class="pattern-example muted">Example: <span class="mono" id="rename-pattern-example"></span></p>
+                    <div class="token-row">
+                        <button type="button" class="btn-ghost" data-token="%albumartist%">%albumartist%</button>
+                        <button type="button" class="btn-ghost" data-token="%albumartists%">%albumartists%</button>
+                        <button type="button" class="btn-ghost" data-token="%artist%">%artist%</button>
+                        <button type="button" class="btn-ghost" data-token="%artists%">%artists%</button>
+                        <button type="button" class="btn-ghost" data-token="%album%">%album%</button>
+                        <button type="button" class="btn-ghost" data-token="%year%">%year%</button>
+                        <button type="button" class="btn-ghost" data-token="$num(%tracknumber%,2)">$num(%tracknumber%,2)</button>
+                        <button type="button" class="btn-ghost" data-token="$decade(%year%)">$decade(%year%)</button>
+                        <button type="button" class="btn-ghost" data-token="%discnumber%">%discnumber%</button>
+                        <button type="button" class="btn-ghost" data-token="%title%">%title%</button>
+                        <button type="button" class="btn-ghost" data-token="%format%">%format%</button>
+                        <button type="button" class="btn-ghost" data-token="%edition%">%edition%</button>
+                        <button type="button" class="btn-ghost" data-token="$if(%edition%,[%edition%] ,)">$if</button>
+                    </div>
+                    <div class="choice-row">
+                        <label class="choice"><input type="checkbox" id="rename-opt-clean" checked> Sanitize illegal characters</label>
+                        <label class="choice"><input type="checkbox" id="rename-opt-sidecars" checked> Relocate sidecars (folder.jpg, album.nfo, .lrc)</label>
+                        <label class="choice"><input type="checkbox" id="rename-opt-prune"> Remove empty folders left behind</label>
+                        <label class="choice"><input type="checkbox" id="rename-opt-quotes"> Straight quotes</label>
+                        <label class="choice"><input type="checkbox" id="rename-opt-junk"> Strip junk such as (Official Music Video) and [FLAC]</label>
+                        <label class="choice"><input type="checkbox" id="rename-opt-ascii"> ASCII transliteration</label>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table class="track-table" id="rename-preview"></table>
+                </div>
+                <p><button type="button" id="rename-save" data-action="save-rename">Save patterns</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="artist-pick-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="artist-pick-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="artist-pick-title">Merge with…</h2>
+                <button type="button" class="btn-ghost" data-close="artist-pick-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">Search for the other artist entry. Both folder paths are shown so two folders with the same band can be told apart.</p>
+                <div id="artist-pick-source" class="pick-source"></div>
+                <label>Artist
+                    <input id="artist-pick-query" type="search" autocomplete="off" spellcheck="false" placeholder="Name or folder">
+                </label>
+                <div id="artist-pick-results" class="pick-results"></div>
+            </div>
+        </div>
+    </div>
+    <div id="artist-merge-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="artist-merge-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="artist-merge-title">Merge artists</h2>
+                <button type="button" class="btn-ghost" data-close="artist-merge-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="artist-merge-text"></p>
+                <div id="artist-merge-choices"></div>
+                <div id="artist-merge-options"></div>
+                <p class="muted" id="artist-merge-note">The artist you leave unselected is removed from the library after its album folders move. A leftover artist folder on disk, such as one that still has artist.nfo, can show up again on the next scan.</p>
+                <div id="artist-merge-conflicts"></div>
+                <p id="artist-merge-error" class="merge-error hidden"></p>
+                <p>
+                    <button type="button" id="artist-merge-confirm" data-action="merge-artists">Merge</button>
+                    <button type="button" class="btn-ghost" data-close="artist-merge-modal">Cancel</button>
+                </p>
+            </div>
+        </div>
+    </div>
+    <div id="upgrade-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="upgrade-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <div>
+                    <h2 id="upgrade-title" class="upgrade-heading">Upgrade available</h2>
+                    <p class="muted" id="upgrade-summary"></p>
+                </div>
+                <button type="button" class="btn-ghost" data-close="upgrade-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div id="upgrade-compare"></div>
+                <div id="upgrade-actions">
+                    <label class="choice"><input type="checkbox" id="upgrade-purge"> Purge the old files and remove the other copy from the library</label>
+                    <p><button type="button" id="upgrade-confirm" data-action="confirm-upgrade">Replace and archive</button></p>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="delete-copy-modal" class="modal modal-alert hidden" role="dialog" aria-modal="true" aria-labelledby="delete-copy-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="delete-copy-title">Delete these files?</h2>
+                <button type="button" class="btn-ghost" data-action="cancel-delete-copy">Cancel</button>
+            </div>
+            <div class="modal-body">
+                <p id="delete-copy-text"></p>
+                <p class="muted mono" id="delete-copy-path"></p>
+                <p>Yes deletes the folder and the audio files in it. This cannot be undone.</p>
+                <p>
+                    <button type="button" class="btn-ghost" data-action="cancel-delete-copy">Cancel</button>
+                    <button type="button" class="btn-danger" data-action="confirm-delete-copy">Yes, delete files</button>
+                </p>
+            </div>
+        </div>
+    </div>
+    <div id="language-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="language-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <div>
+                    <h2 id="language-title">Language defaults</h2>
+                    <p class="muted">Search finds files from the probed tracks. Save sets the default inside MKV files on this page.</p>
+                </div>
+                <button type="button" class="btn-ghost" data-close="language-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="lang-toolbar">
+                    <label>Match
+                        <select id="lang-mode">
+                            <option value="not_default">Default is not</option>
+                            <option value="is_default">Default is</option>
+                            <option value="contains">Any file which contains</option>
+                        </select>
+                    </label>
+                    <label>Language
+                        <select id="lang-lang"></select>
+                    </label>
+                    <button type="button" data-action="lang-save">Save all</button>
+                </div>
+                <div class="lang-toolbar">
+                    <label>Scope
+                        <select id="lang-scope"><option value="">Entire library</option></select>
+                    </label>
+                    <label>Filename
+                        <input id="lang-filename" type="search" placeholder="german.dl." spellcheck="false">
+                    </label>
+                    <button type="button" data-action="lang-search">Search</button>
+                </div>
+                <p id="lang-note" class="muted"></p>
+                <p id="lang-status" class="muted"></p>
+                <div id="lang-list"></div>
+                <p id="lang-pager"></p>
+            </div>
+        </div>
+    </div>
+    <div id="duplicates-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="duplicates-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <div>
+                    <h2 id="duplicates-title">Duplicates</h2>
+                    <p id="duplicates-note" class="muted">Copies that share an identity. Delete removes that copy from disk.</p>
+                </div>
+                <button type="button" class="btn-ghost" data-close="duplicates-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="duplicates-scan"><button type="button" data-action="scan-duplicates">Fingerprint tracks that have no hash yet</button></p>
+                <div id="duplicates-list"></div>
+            </div>
+        </div>
+    </div>
+    <div id="split-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="split-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h2 id="split-title">Split into tagged tracks</h2>
+                    <p class="muted">The image and cue stay in the folder unless you remove them after a successful split.</p>
+                </div>
+                <button type="button" class="btn-ghost" data-close="split-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <label class="choice"><input type="checkbox" id="split-remove"> Remove the image after a successful split</label>
+                <p><button type="button" data-action="confirm-split">Split into tagged tracks</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="path-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="path-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="path-title">Add a music path</h2>
+                <button type="button" class="btn-ghost" data-close="path-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">Pick a mounted folder. Open a subfolder when the library is not the mount itself.</p>
+                <label>Mount <select id="path-mount"></select></label>
+                <div class="path-browser-bar">
+                    <button type="button" class="btn-ghost" data-action="path-up">Up</button>
+                    <span id="path-current" class="mono"></span>
+                </div>
+                <div id="path-index" class="path-index" aria-label="Jump to folder"></div>
+                <div id="path-dirs" class="path-dirs"></div>
+                <label class="choice" id="path-media-row">Media type
+                    <select id="path-media">
+                        <option value="music">Music</option>
+                        <option value="movies">Movies</option>
+                        <option value="tv">TV shows</option>
+                    </select>
+                </label>
+                <div id="path-music-options">
+                    <label class="choice">This folder contains
+                        <select id="path-kind">
+                            <option value="artists">Many artists</option>
+                            <option value="artist">One artist</option>
+                        </select>
+                    </label>
+                    <p class="muted">Many artists: each subfolder is an artist. One artist: this folder is the artist and the folders inside are albums.</p>
+                </div>
+                <p><button type="button" data-action="use-path">Use this folder</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="video-art-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="video-art-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="video-art-title">Artwork</h2>
+                <button type="button" class="btn-ghost" data-close="video-art-modal">Close</button>
+            </div>
+            <div class="art-workspace">
+            <div id="video-art-compare" class="art-compare hidden">
+                <div class="art-compare-stage">
+                    <div class="art-compare-frame">
+                        <img id="video-compare-current" alt="Current artwork">
+                        <img id="video-compare-candidate" alt="Selected artwork">
+                    </div>
+                    <label><span id="video-compare-label">Compare</span> <input id="video-compare-slider" type="range" min="0" max="100" value="50" aria-label="Compare the current artwork and the highlighted artwork"></label>
+                </div>
+            </div>
+            <div class="art-split" data-art-split role="separator" aria-orientation="vertical" aria-label="Resize the comparison" title="Drag to resize the comparison"></div>
+            <div class="modal-body" id="video-art-body"></div>
+            <input id="video-art-file" class="file-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif,.jpg,.jpeg,.png,.webp,.gif" tabindex="-1" aria-hidden="true">
+            </div>
+        </div>
+    </div>
+    <div id="tracks-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="tracks-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <div>
+                    <h2 id="tracks-title">Tracks</h2>
+                    <p class="muted">Unchecked tracks are dropped from this file. Chapters and attachments stay. At least one video track and one audio track must stay.</p>
+                </div>
+                <button type="button" class="btn-ghost" data-close="tracks-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div id="tracks-list"></div>
+                <p>
+                    <button type="button" id="tracks-confirm" data-action="video-tracks-save" disabled>Keep selected tracks</button>
+                </p>
+            </div>
+        </div>
+    </div>
+    <div id="saved-filter-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="saved-filter-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="saved-filter-title">Save filter</h2>
+                <button type="button" class="btn-ghost" data-close="saved-filter-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted" id="saved-filter-note"></p>
+                <label>Name <input id="saved-filter-name" type="text" maxlength="80" autocomplete="off"></label>
+                <label id="saved-filter-tag-row">Tag <input id="saved-filter-tag" type="text" maxlength="100" autocomplete="off" placeholder="Optional"></label>
+                <p><button type="button" data-action="saved-filter-confirm">Save</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="dovi-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="dovi-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="dovi-title">Convert Dolby Vision Profile 7</h2>
+                <button type="button" class="btn-ghost" data-close="dovi-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="dovi-text">This writes a new Name.p8.mkv next to the original. The new file is the base layer plus a Profile 8.1 RPU. Profile 7 FEL picture data stays in the original enhancement layer.</p>
+                <label class="choice"><input type="checkbox" id="dovi-remove-original"> Remove the original after the new file is created and deep scanned</label>
+                <p>
+                    <button type="button" class="btn-ghost" data-close="dovi-modal">Cancel</button>
+                    <button type="button" data-action="video-dovi-convert">Convert</button>
+                </p>
+            </div>
+        </div>
+    </div>
+    <div class="toast-stack">
+        <div id="toast-log" class="toast-log hidden" aria-label="Alerts">
+            <div class="toast-log-head">
+                <strong>Alerts</strong>
+                <button type="button" class="btn-ghost" data-action="clear-alerts">Clear</button>
+            </div>
+            <div id="toast-log-list"></div>
+        </div>
+        <div id="toast-pop" class="toast-pop hidden" role="status"></div>
+    </div>
+    {% for name in [
+        'core/ui-sync', 'core/constants', 'core/state', 'core/events', 'core/api', 'music/library', 'core/scan',
+        'music/tree', 'music/center', 'music/editor', 'music/match', 'music/artwork', 'music/artist-actions',
+        'music/batch', 'core/settings', 'core/folders', 'core/settings-tabs', 'core/video-settings', 'core/pattern-builder', 'core/music-pattern-builder', 'video/subtitles-find', 'core/about', 'core/outbound', 'core/panes', 'core/vgrid', 'core/restore', 'core/insights', 'core/automation', 'core/trakt', 'core/actions', 'core/keyboard', 'core/jobs', 'music/tools', 'music/lyrics-editor',
+        'core/layout', 'music/cells', 'core/menus', 'music/badges', 'core/palette', 'core/util',
+        'core/media', 'video/common', 'video/selection', 'video/scan', 'video/movies', 'video/sets', 'video/tv', 'video/edit', 'video/scrape', 'video/files', 'video/languages', 'video/tags', 'video/list-keys', 'video/sub_sync', 'video/view',
+        'core/live', 'boot'
+    ] %}
+    <script src="{{ url_for('static', filename='js/' ~ name ~ '.js') }}"></script>
+    {% endfor %}
+
+    <div id="lyrics-editor-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="lyrics-editor-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="lyrics-editor-title">Edit Synced Lyrics</h2>
+                <div class="modal-actions">
+                    <span id="lyrics-editor-status" class="muted" aria-live="polite"></span>
+                    <button type="button" id="lyrics-synced-btn" class="btn-auto-sync" data-lrc="synced" title="Save, mark these lyrics as synced and close">Sync OK</button>
+                    <button type="button" id="lyrics-save-btn" class="btn-primary">Save</button>
+                    <button type="button" class="btn-ghost" data-close="lyrics-editor-modal">Close</button>
+                </div>
+            </div>
+            <div class="modal-body" style="display:flex;flex-direction:column;gap:8px;min-height:400px;padding:12px 16px">
+                <div class="lrc-tools">
+                    <div class="lrc-tool-row" role="group" aria-label="Shift all lines">
+                        <span class="lrc-tool-label">Shift all</span>
+                        <button type="button" class="btn-ghost" data-lrc="shift" data-ms="-1000">&minus;1 s</button>
+                        <button type="button" class="btn-ghost" data-lrc="shift" data-ms="-100">&minus;100 ms</button>
+                        <button type="button" class="btn-ghost" data-lrc="shift" data-ms="100">+100 ms</button>
+                        <button type="button" class="btn-ghost" data-lrc="shift" data-ms="1000">+1 s</button>
+                        <input id="lyrics-shift" type="text" placeholder="-1.5 s or 300 ms" size="14" aria-label="Shift all lines by (seconds, or ms with an ms suffix)">
+                        <button type="button" class="btn-ghost" data-lrc="shift-typed">Apply</button>
+                    </div>
+                    <div class="lrc-tool-row" role="group" aria-label="Fit with anchors">
+                        <span class="lrc-tool-label">Fit</span>
+                        <select id="lyrics-fit-mode" aria-label="Fit mode" title="Linear: one offset, or offset and stretch. Piecewise: stretch between anchors. Steps: each anchor starts a stretch with its own constant offset.">
+                            <option value="linear">Linear</option>
+                            <option value="piecewise">Piecewise</option>
+                            <option value="steps">Steps</option>
+                        </select>
+                        <button type="button" class="btn-ghost" data-lrc="anchor" title="The selected line starts here: set it to the current playback position (M)">Mark at playhead</button>
+                        <button type="button" class="btn-ghost" data-lrc="fit-apply" id="lyrics-fit-apply" disabled>Apply fit</button>
+                        <button type="button" class="btn-ghost" data-lrc="fit-clear" id="lyrics-fit-clear" disabled>Clear anchors</button>
+                    </div>
+                    <div id="lyrics-anchors" class="lrc-anchors muted"></div>
+                    <div class="lrc-tool-row">
+                        <button type="button" class="btn-ghost" data-lrc="undo" id="lyrics-undo" disabled>Undo</button>
+                        <button type="button" class="btn-ghost" data-lrc="restore" id="lyrics-restore" disabled title="Put back the lyrics as they were before the last save">Restore previous save</button>
+                        <input id="lyrics-find" type="search" placeholder="Find a line" size="16" aria-label="Find a line">
+                        <button type="button" class="btn-ghost" data-lrc="find">Next</button>
+                    </div>
+                </div>
+                <p class="muted" style="margin:0;font-size:0.8rem">Space = stamp current playback time · Shift+Space = stamp and go back · ↑/↓ = select line · ←/→ = nudge ±100 ms · M = mark anchor · Enter = edit text · Ctrl+Z = undo · double-click = play from line</p>
+                <div id="lyrics-lines" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:6px;min-height:300px" role="listbox" aria-label="LRC lines" tabindex="0"></div>
+            </div>
+        </div>
+    </div>
+    <div id="shortcuts-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="shortcuts-title">Keyboard Shortcuts Cheat Sheet</h2>
+                <button type="button" class="btn-ghost" data-close="shortcuts-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="shortcuts-grid">
+                    <div class="shortcuts-group">
+                        <h4>Navigation &amp; Global</h4>
+                        <dl class="shortcuts-list">
+                            <div><dt><kbd>Ctrl</kbd>+<kbd>K</kbd></dt><dd>Open Command Palette</dd></div>
+                            <div><dt><kbd>?</kbd></dt><dd>Keyboard Shortcuts Cheat Sheet</dd></div>
+                            <div><dt><kbd>/</kbd></dt><dd>Focus Library Search / Filter</dd></div>
+                            <div><dt><kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>4</kbd></dt><dd>Switch media tabs (Music, Movies, Sets, TV)</dd></div>
+                            <div><dt><kbd>←</kbd> / <kbd>→</kbd></dt><dd>Switch media tabs (when tab bar focused)</dd></div>
+                            <div><dt><kbd>Esc</kbd></dt><dd>Close active modal, menu, or zoom view</dd></div>
+                        </dl>
+                    </div>
+                    <div class="shortcuts-group">
+                        <h4>Library List &amp; Selection</h4>
+                        <dl class="shortcuts-list">
+                            <div><dt><kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Move selection up / down in library list</dd></div>
+                            <div><dt><kbd>Enter</kbd></dt><dd>Open / expand selected item</dd></div>
+                            <div><dt><kbd>Space</kbd></dt><dd>Toggle checkbox on focused row</dd></div>
+                            <div><dt><kbd>Shift</kbd>+Click</dt><dd>Range-select rows</dd></div>
+                            <div><dt><kbd>Ctrl</kbd>+<kbd>A</kbd></dt><dd>Select all visible items</dd></div>
+                        </dl>
+                    </div>
+                    <div class="shortcuts-group">
+                        <h4>Music &amp; Track Inspector</h4>
+                        <dl class="shortcuts-list">
+                            <div><dt><kbd>Ctrl</kbd>+<kbd>S</kbd></dt><dd>Save track tags / NFO edits</dd></div>
+                            <div><dt><kbd>P</kbd></dt><dd>Play / pause audio preview</dd></div>
+                            <div><dt>Right-click</dt><dd>Open context menu on artist, album, or track</dd></div>
+                        </dl>
+                    </div>
+                    <div class="shortcuts-group">
+                        <h4>Synced Lyrics Editor</h4>
+                        <dl class="shortcuts-list">
+                            <div><dt><kbd>Space</kbd></dt><dd>Stamp current playback time &amp; advance</dd></div>
+                            <div><dt><kbd>Shift</kbd>+<kbd>Space</kbd></dt><dd>Stamp current playback time &amp; step back</dd></div>
+                            <div><dt><kbd>←</kbd> / <kbd>→</kbd></dt><dd>Nudge timestamp ±100 ms</dd></div>
+                            <div><dt><kbd>M</kbd></dt><dd>Mark fit anchor at playhead</dd></div>
+                            <div><dt><kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>Undo timestamp change</dd></div>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="create-set-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="create-set-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="create-set-title">Create Movie Set</h2>
+                <button type="button" class="btn-ghost" data-close="create-set-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <label class="field">Set name
+                    <input id="create-set-name" type="text" placeholder="e.g. The Matrix Collection" autocomplete="off">
+                </label>
+                <label class="field">TMDB Collection ID (optional)
+                    <input id="create-set-tmdb" type="text" placeholder="e.g. 2344" autocomplete="off">
+                </label>
+                <label class="field">Overview (optional)
+                    <textarea id="create-set-overview" rows="4" placeholder="Collection overview…"></textarea>
+                </label>
+                <p class="vactions">
+                    <button type="button" class="btn-ghost" data-close="create-set-modal">Cancel</button>
+                    <button type="button" data-action="video-create-set-save">Create set</button>
+                </p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

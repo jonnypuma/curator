@@ -1,0 +1,17 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+
+# GitHub's Download ZIP and release source archives follow export-ignore.
+# These stay in the repository. They are left out of the install archive.
+tests/ export-ignore
+"Curator specification.yml" export-ignore
+*-mediainfo.xml export-ignore
+docker-compose.yml export-ignore
+app/html/ export-ignore
+app/_fixture_build.py export-ignore
+app/movies.json export-ignore
+app/tmm.json export-ignore
+app/tvShows.json export-ignore
+app/screenshot.png export-ignore

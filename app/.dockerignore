@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+.git
+.venv
+.env
+config
+html
+_fixture_build.py
+movies.json
+tmm.json
+tvShows.json
+screenshot.png
