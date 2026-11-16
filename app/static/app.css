@@ -4354,6 +4354,11 @@ label.noise-field textarea { width: 100%; box-sizing: border-box; resize: vertic
 .vset-card strong.vset-title { overflow: visible; white-space: normal; overflow-wrap: anywhere; text-overflow: unset; }
 .vset-card small { color: var(--text-muted); font-size: 11px; }
 .vset-card:hover img { outline: 2px solid var(--accent); }
+/* Buttons drawn as cards keep their own light text, so they must not take the global button hover (a light accent
+   fill made the white title unreadable). They show hover with an outline or a faint tint instead. */
+.vset-card:hover:not(:disabled) { background: none; }
+.discog button:hover:not(:disabled),
+.pick-result:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 14%, var(--bg-surface)); border-color: var(--accent); }
 .vset-card.is-missing { cursor: default; }
 .vset-card.is-missing img, .vset-card.is-missing .vposter { opacity: 0.55; filter: grayscale(0.6); }
 .vset-card.is-missing:hover img { outline: none; }
