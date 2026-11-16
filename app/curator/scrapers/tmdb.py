@@ -404,8 +404,23 @@ def pick(hits, title, year):
         if same and (not year or not hit["year"] or abs(int(hit["year"]) - int(year)) <= 1):
             return hit
     if len(hits) == 1 and (not year or not hits[0]["year"] or abs(int(hits[0]["year"]) - int(year)) <= 1):
-        return hits[0]
+        # A lone result is only taken when its name resembles the title. Search is fuzzy and returns something
+        # for almost any words, such as another show for a documentary folder.
+        if _alike(wanted, hits[0]["title"]) or _alike(wanted, hits[0].get("original_title")):
+            return hits[0]
     return None
+
+
+def _alike(wanted, name):
+    """True when one name holds the other once case and punctuation are folded, or most of the characters agree."""
+    other = _fold(name)
+    if not wanted or not other:
+        return False
+    if wanted in other or other in wanted:
+        return True
+    from difflib import SequenceMatcher
+
+    return SequenceMatcher(None, wanted, other).ratio() >= 0.75
 
 
 def _fold(text):

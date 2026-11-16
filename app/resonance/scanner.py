@@ -1,6 +1,8 @@
+import contextlib
 import logging
 import os
 import re
+import threading
 import time
 from collections import Counter
 from datetime import datetime
@@ -62,7 +64,7 @@ def _album_targets(albums, roots):
         raw = item.strip()
         if not os.path.isdir(raw):
             continue
-        real = os.path.realpath(raw)
+        real = album_folder(os.path.realpath(raw))
         if not any(inside(root, real) or _same_path(root, real) for root in roots):
             continue
         key = os.path.normcase(real)
@@ -103,15 +105,42 @@ def _scan_selected_albums(progress, targets, roots, settings, mode, force):
     lookup_ids = []
     seen = []
     artists = []
-    progress.update(0, len(targets), "Scanning selected albums", "delta")
+    # One artist's albums one after the other, so the artist-level work runs once, after its last album.
+    targets = sorted(targets, key=lambda path: os.path.normcase(_artist_folder(path)))
+    last_of_artist = {}
+    for position, path in enumerate(targets):
+        last_of_artist[os.path.normcase(_artist_folder(path))] = position
+    # Progress counts tracks, not albums: a scan of one box set otherwise sits at 0% until the whole set is read.
+    sizes = [_count_audio(path) for path in targets]
+    total = max(1, sum(sizes))
+    read = {"done": 0, "album": 0, "shown": 0.0}
+    progress.update(0, total, "Scanning selected albums", "delta")
     for index, album_path in enumerate(targets, start=1):
         _checkpoint()
         artist_path = _artist_folder(album_path)
         name = os.path.basename(album_path.rstrip(os.sep))
-        progress.update(index - 1, len(targets), f"Scanning {name}", "delta")
-        artist_id, album_paths, album_errors, stats, album_failures = _scan_artist(
-            artist_path, settings, mode, progress, only_album=album_path, file_index=file_index
-        )
+        size = sizes[index - 1]
+        read["album"] = 0
+
+        def tick(name=name, size=size):
+            read["done"] += 1
+            read["album"] += 1
+            now = time.monotonic()
+            if now - read["shown"] >= 0.5 or read["album"] >= size:
+                read["shown"] = now
+                progress.update(min(read["done"], total), total, f"Reading {name}: {min(read['album'], size)} of {size} tracks", "delta")
+
+        progress.update(read["done"], total, f"Reading {name}: 0 of {size} tracks", "delta")
+        _track_tick.fn = tick
+        try:
+            with progress.timed("Read albums"):
+                artist_id, album_paths, album_errors, stats, album_failures = _scan_artist(
+                    artist_path, settings, mode, progress, only_album=album_path, file_index=file_index,
+                    artist_extras=last_of_artist.get(os.path.normcase(artist_path)) == index - 1,
+                )
+        finally:
+            _track_tick.fn = None
+        read["done"] = sum(sizes[:index])
         errors += album_errors
         changed_files += stats["changed"]
         unchanged_files += stats["unchanged"]
@@ -122,18 +151,33 @@ def _scan_selected_albums(progress, targets, roots, settings, mode, force):
             artists.append(artist_path)
         for failure in album_failures:
             progress.issue(f"Failed: {failure['path']}: {failure['error']}")
-        progress.update(index, len(targets), f"Scanning {name}", "delta")
+        progress.update(read["done"], total, f"Read {name}", "delta")
+    # Every stage below works on the chosen albums only (and, for artist steps, their artists), never the library.
+    with progress.timed("Old disc entries"):
+        dropped = _drop_nested_albums(seen)
+    if dropped:
+        progress.log(f"Removed {dropped} old album entr{'y' if dropped == 1 else 'ies'} for disc folders of the scanned albums")
     selected_ids = _ids_for_paths(seen)
     scope_ids = selected_ids if mode in {"full", "deep"} else lookup_ids
-    looked_up_labels = _rematch(progress, roots, scope_ids, mode=mode, force=force)
-    _fill_stored_mb_metadata(progress, roots, mode, scope_ids)
+    with progress.timed("MusicBrainz and AcoustID"):
+        looked_up_labels = _rematch(progress, roots, scope_ids, mode=mode, force=force)
+    with progress.timed("MusicBrainz details"):
+        _fill_stored_mb_metadata(progress, roots, mode, scope_ids)
+    with progress.timed("Countries, duplicates and upgrades"):
+        _record_notes(selected_ids)
     if mode in {"full", "deep"} and artists:
-        _sidecar_summary(progress, artists)
-        _refresh_discographies(progress, artists)
+        with progress.timed("Sidecar count"):
+            _sidecar_summary(progress, artists, selected_ids)
+        with progress.timed("Discography"):
+            _refresh_discographies(progress, artists, selected_ids)
     if load_settings().get("fill_missing_during_scan", True) is not False:
-        _fill_missing_metadata(progress, roots, scope_ids, skipped_albums if mode == "incremental" else None)
-        _fill_missing_artwork(progress, roots, scope_ids, skipped_albums if mode == "incremental" else None)
-    _nfos_from_scan(progress, roots, mode, None if mode == "deep" else scope_ids)
+        with progress.timed("Missing metadata"):
+            _fill_missing_metadata(progress, roots, scope_ids, skipped_albums if mode == "incremental" else None)
+        with progress.timed("Missing artwork"):
+            _fill_missing_artwork(progress, roots, scope_ids, skipped_albums if mode == "incremental" else None)
+    # A scan of chosen albums writes only their files, also in a deep scan with Rewrite all on.
+    with progress.timed(".nfo files"):
+        _nfos_from_scan(progress, roots, mode, selected_ids if mode == "deep" else scope_ids, only=True)
     message = f"Indexed {len(seen)} albums"
     if mode in {"incremental", "full"}:
         message += f", {unchanged_files} unchanged, {changed_files} changed/new, {len(looked_up_labels)} albums looked up"
@@ -145,7 +189,11 @@ def _scan_selected_albums(progress, targets, roots, settings, mode, force):
     try:
         from resonance import webhooks
 
-        webhooks.fire("scan")
+        # Only the artists of the chosen albums: without folders a player scans its whole music library.
+        names = [os.path.basename(path.rstrip(os.sep)) for path in seen]
+        webhooks.fire("scan", folders=artists or seen, items=names)
+        progress.log(f"Music library update queued for {len(artists or seen)} artist folder{'s' if len(artists or seen) != 1 else ''}.",
+                     message="Music library update queued")
     except Exception:
         logger.info("music library update after scan failed", exc_info=True)
     return message
@@ -234,9 +282,21 @@ def scan(job_id, force=False, mode="incremental", roots=None, verbose=False, alb
     looked_up_labels = []
     empty_folders = []
     failures = []
+    # What the artists and albums looked like before the scan, for the client library refresh at the end.
+    from curator import scan_refresh
+
+    # A scan of chosen albums reads only those albums and their artists, not every album in the library.
+    with progress.timed("Player refresh snapshot"):
+        refresh_before = scan_refresh.snapshot("music", albums=targets or None) if scan_refresh.active("music") else None
     try:
         if targets:
-            return _scan_selected_albums(progress, targets, roots, settings, mode, force)
+            message = _scan_selected_albums(progress, targets, roots, settings, mode, force)
+            if refresh_before is not None and message != "Scan cancelled":
+                with progress.timed("Player refresh check"):
+                    scan_refresh.after_scan("music", roots, refresh_before, progress.log, albums=targets)
+            progress.end_stage()
+            progress.log_timings()
+            return message
         for root in roots:
             if not os.path.isdir(root):
                 failures.append({"path": root, "error": "path is missing"})
@@ -487,7 +547,7 @@ def scan(job_id, force=False, mode="incremental", roots=None, verbose=False, alb
                 elif mode == "full":
                     from resonance.library import store_missing_release_fields
 
-                    store_missing_release_fields()
+                    store_missing_release_fields(roots)
                     looked_up = _merge_ids(lookup_ids, _missing_album_ids(roots))
                     looked_up_labels = _rematch(progress, roots, looked_up, mode="full", force=force)
                 else:
@@ -524,7 +584,7 @@ def scan(job_id, force=False, mode="incremental", roots=None, verbose=False, alb
                     )
                     break
                 raise
-        _sidecar_summary(progress, roots)
+        _sidecar_summary(progress, roots, lookup_ids if mode == "incremental" else None)
         _fill_stored_mb_metadata(progress, roots, mode, lookup_ids if mode == "incremental" else None)
         if mode == "incremental":
             _refresh_discographies(progress, roots, lookup_ids)
@@ -536,14 +596,13 @@ def scan(job_id, force=False, mode="incremental", roots=None, verbose=False, alb
             left_alone = skipped_albums if mode == "incremental" else None
             _fill_missing_metadata(progress, roots, changed_ids, left_alone)
             _fill_missing_artwork(progress, roots, changed_ids, left_alone)
-        from resonance.library import store_missing_countries
-        from resonance.upgrade import refresh_stored
-
-        progress.log("Filling blank release countries from tags already stored", message="Recording release countries")
-        store_missing_countries()
-        progress.log("Recording duplicates, upgrade copies, and original years", message="Recording catalogue notes")
-        refresh_stored()
+        # An incremental scan records countries, duplicates, upgrades and original years for the albums it added or
+        # read again (and their copies); full and deep scans look at every album.
+        _record_catalogue_notes(progress, list(lookup_ids) if mode == "incremental" else None)
         _nfos_from_scan(progress, roots, mode, looked_up if mode != "deep" else None)
+        from curator.video import playlists
+
+        playlists.refresh(progress.log, media="music")
         message = f"Indexed {len(seen_albums)} albums"
         if mode in {"incremental", "full"}:
             message += (
@@ -564,11 +623,21 @@ def scan(job_id, force=False, mode="incremental", roots=None, verbose=False, alb
         try:
             from resonance import webhooks
 
-            webhooks.fire("scan")
-            progress.log("Music library update queued.", message="Music library update queued")
+            if mode == "incremental" and not lookup_ids:
+                progress.log("Music library update skipped: nothing was added or changed.")
+            elif mode == "incremental":
+                folders = _album_folders(lookup_ids)
+                webhooks.fire("scan", folders=folders)
+                progress.log(f"Music library update queued for {len(folders)} album folders.", message="Music library update queued")
+            else:
+                webhooks.fire("scan")
+                progress.log("Music library update queued.", message="Music library update queued")
         except Exception:
             logger.info("music library update after scan failed", exc_info=True)
             progress.log("Music library update was not queued.")
+        if refresh_before is not None:
+            scan_refresh.after_scan("music", roots, refresh_before, progress.log)
+        progress.end_stage()
         return message
     finally:
         _save_scan_issues(
@@ -588,6 +657,17 @@ def scan(job_id, force=False, mode="incremental", roots=None, verbose=False, alb
         )
 
 
+def _span(seconds):
+    """1.2s, 2m 05s, 1h 03m."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    whole = int(round(seconds))
+    if whole < 3600:
+        return f"{whole // 60}m {whole % 60:02d}s"
+    return f"{whole // 3600}h {(whole % 3600) // 60:02d}m"
+
+
 class _Progress:
     def __init__(self, job_id, verbose=False):
         self.job_id = job_id
@@ -599,6 +679,30 @@ class _Progress:
         self.library_counts = {}
         self._flushed = 0.0
         self.paced = False
+        self.timings = []
+
+    def timed(self, name):
+        """Add the time a block takes to the scan's "Time per step" line."""
+        progress = self
+
+        class _Timer:
+            def __enter__(self):
+                self.began = time.monotonic()
+
+            def __exit__(self, *exc):
+                progress.timings.append((name, time.monotonic() - self.began))
+                return False
+
+        return _Timer()
+
+    def log_timings(self):
+        """One line with each step of a tenth of a second or more, slowest first."""
+        totals = {}
+        for name, seconds in self.timings:
+            totals[name] = totals.get(name, 0.0) + seconds
+        steps = sorted(((name, spent) for name, spent in totals.items() if spent >= 0.1), key=lambda item: -item[1])
+        if steps:
+            self.log("Time per step: " + " · ".join(f"{name} {spent:.1f}s" for name, spent in steps))
 
     def stored_log(self):
         # Keep the live box on recent lines. Replaying the oldest empty folders
@@ -615,7 +719,27 @@ class _Progress:
             ]
         return "\n".join(head)
 
+    # The stage names the progress bar shows (static/js/core/scan.js PHASE_LABELS).
+    STAGE_LABELS = {"directory": "Directory walk", "delta": "Changed files", "musicbrainz": "MusicBrainz",
+                    "sidecars": "Sidecar audit", "metadata": "Metadata", "artwork": "Artwork", "nfo": "Write .nfo"}
+
+    def _stage(self, phase):
+        """When the scan moves to another stage, write how long the one it leaves took."""
+        if not phase or phase == getattr(self, "_stage_name", None):
+            return
+        self.end_stage()
+        self._stage_name, self._stage_began = phase, time.monotonic()
+
+    def end_stage(self):
+        name = getattr(self, "_stage_name", None)
+        self._stage_name = None
+        if name:
+            spent = time.monotonic() - self._stage_began
+            if spent >= 0.1:
+                self.log(f"{self.STAGE_LABELS.get(name, name)} took {_span(spent)}")
+
     def update(self, processed, total, message, phase):
+        self._stage(phase)
         if self.paced:
             from resonance import scan_pace
 
@@ -633,6 +757,7 @@ class _Progress:
     def log(self, line, phase=None, message=None):
         if self.verbose:
             logger.info("scan: %s", line)
+        self._stage(phase)
         self.lines.append(line)
         if self.paced and phase:
             from resonance import scan_pace
@@ -713,6 +838,71 @@ def _same_path(left, right):
     return os.path.normcase(left_real) == os.path.normcase(right_real)
 
 
+def _record_notes(album_ids):
+    """Release countries, duplicate and upgrade marks and original years for these albums (and their copies) only."""
+    if not album_ids:
+        return
+    try:
+        from resonance.library import store_missing_countries
+        from resonance.upgrade import refresh_stored
+
+        store_missing_countries(album_ids)
+        refresh_stored(album_ids)
+    except Exception:
+        logger.exception("could not record the catalogue notes for the scanned albums")
+
+
+def _drop_nested_albums(album_paths):
+    """Remove album rows inside a scanned album folder that no longer hold a track. Returns how many went.
+
+    They are what a disc folder of a box set left behind when it was once scanned as an album of its own: the box set
+    scan has since taken its tracks. An artist row on such a folder that is left with no album goes too. Rows only,
+    never a file."""
+    removed = 0
+    for path in album_paths or []:
+        # Only a real album folder: a folder of loose tracks is the artist folder, whose albums sit inside it.
+        if not path or not _same_path(album_folder(os.path.join(path, "_")), path):
+            continue
+        rows = db.fetchall(
+            "SELECT id FROM albums WHERE path LIKE %s ESCAPE '\\' "
+            "AND NOT EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = albums.id)",
+            (like_prefix(path),),
+        )
+        if rows:
+            db.execute("DELETE FROM albums WHERE id = ANY(%s::uuid[])", (db.uuid_array([row["id"] for row in rows]),))
+            removed += len(rows)
+        db.execute(
+            "DELETE FROM artists WHERE (path = %s OR path LIKE %s ESCAPE '\\') "
+            "AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id = artists.id)",
+            (path, like_prefix(path)),
+        )
+    return removed
+
+
+def album_folder(path):
+    """The album folder a folder belongs to, as a full scan sees it.
+
+    A full scan takes each child of an artist folder as one album and reads its disc and wrapper folders into it. A scan of
+    one folder (a Lidarr import or retag, a selected album) must do the same, or a disc folder of a box set becomes an album
+    of its own and the box set its artist. Under a root of many artists the album is two levels down, under a one-artist
+    root one level. An artist folder that holds only CD1, CD2 ... folders is itself the album. Outside every music root the
+    path is returned as it is."""
+    real = os.path.realpath(path) if path and os.path.exists(path) else os.path.normpath(path or "")
+    root = _release_root(real)
+    if not root:
+        return real
+    base = os.path.realpath(root) if os.path.exists(root) else os.path.normpath(root)
+    parts = [part for part in os.path.relpath(real, base).split(os.sep) if part and part != "."]
+    depth = 1 if path_kind(root) == "artist" else 2
+    if len(parts) < depth:
+        return real
+    album = os.path.join(base, *parts[:depth])
+    artist = os.path.dirname(album)
+    if DISC_ONLY.match(os.path.basename(album)) and not _same_path(artist, base) and _grouped_discs(artist):
+        return artist
+    return album
+
+
 def _release_root(path):
     from resonance.paths import inside
 
@@ -738,10 +928,14 @@ def scan_release(job_id, album_path, artist_path=None):
     root = _release_root(album_path)
     if not root:
         raise AppError(f"Album folder is outside the music library: {album_path}", 400)
+    album_path = album_folder(album_path)       # a disc folder of a box set is part of the box set
+    # An artist folder equal to the album folder (a box set handed over as its own artist, from a call that named
+    # one disc folder) is not taken as given: the folders around the album decide.
     if not (
         artist_path
         and os.path.isdir(artist_path)
-        and (inside(artist_path, album_path) or _same_path(artist_path, album_path))
+        and inside(artist_path, album_path)
+        and not _same_path(artist_path, album_path)
         and (inside(root, artist_path) or _same_path(root, artist_path))
     ):
         parent = os.path.dirname(album_path.rstrip(os.sep))
@@ -780,6 +974,9 @@ def scan_release(job_id, album_path, artist_path=None):
             message = f"Lidarr found no album at {album_name}"
             progress.log(message, message=message)
             return message
+        scanned = list(_album_paths or [album_path])
+        _drop_nested_albums(scanned)
+        scanned_ids = _ids_for_paths(scanned)
         looked_up_labels = _rematch(progress, [root], lookup_ids, mode="incremental")
         _fill_stored_mb_metadata(progress, [root], "incremental", lookup_ids)
         fill_missing = settings.get("fill_missing_during_scan", True) is not False
@@ -787,13 +984,7 @@ def scan_release(job_id, album_path, artist_path=None):
             skipped = int(stats.get("skipped_albums") or 0)
             _fill_missing_metadata(progress, [root], lookup_ids, skipped)
             _fill_missing_artwork(progress, [root], lookup_ids, skipped)
-        from resonance.library import store_missing_countries
-        from resonance.upgrade import refresh_stored
-
-        progress.log("Filling blank release countries from tags already stored", message="Recording release countries")
-        store_missing_countries()
-        progress.log("Recording duplicates, upgrade copies, and original years", message="Recording catalogue notes")
-        refresh_stored()
+        _record_catalogue_notes(progress, scanned_ids)
         _nfos_from_scan(progress, [root], "incremental", lookup_ids)
         fingerprinted = 0
         lyrics_written = 0
@@ -811,7 +1002,8 @@ def scan_release(job_id, album_path, artist_path=None):
         message += f", fingerprinted {fingerprinted} tracks, lyrics written for {lyrics_written} tracks"
         if errors:
             message += f", {errors} errors"
-        progress.log(message, phase="artwork" if fill_missing else "sidecars", message=message)
+        progress.end_stage()
+        progress.log(message, message=message)
         return message
     finally:
         _save_scan_issues(
@@ -974,17 +1166,18 @@ def _same_mtime(row, stamp):
     return (int(row.get("mtime_ns") or 0), int(row.get("file_size") or 0)) == (int(stamp[0]), int(stamp[1]))
 
 
-def _scan_artist(artist_path, settings, mode, progress=None, only_album=None, file_index=None):
-    albums = _album_directories(artist_path)
-    loose_audio = _audio_files(artist_path)
-    if loose_audio and not albums:
-        albums = [artist_path]
+def _scan_artist(artist_path, settings, mode, progress=None, only_album=None, file_index=None, artist_extras=True):
+    """Index an artist folder, or one album in it (only_album). artist_extras False leaves out the artist-level work
+    (website, artist artwork, the name from tags), for a scan that has more albums of this artist still to read."""
     if only_album:
-        wanted = os.path.realpath(only_album) if os.path.exists(only_album) else os.path.normpath(only_album)
-        picked = [path for path in albums if _same_path(path, wanted)]
-        if not picked and os.path.isdir(wanted):
-            picked = [wanted]
-        albums = picked
+        # Straight to the one album (a disc folder resolved to its album). Listing every album of the artist first, and
+        # looking inside each for audio, cost a directory listing per album over a network share.
+        wanted = album_folder(only_album)
+        albums = [wanted] if os.path.isdir(wanted) else []
+    else:
+        albums = _album_directories(artist_path)
+        if _audio_files(artist_path) and not albums:
+            albums = [artist_path]
     skipped = []
     if mode == "incremental" and file_index is not None and not only_album:
         pending = []
@@ -1065,12 +1258,15 @@ def _scan_artist(artist_path, settings, mode, progress=None, only_album=None, fi
             """,
             (db.text_array(sorted(set(genres))), artist_id),
         )
-    _remember_artist_website(artist_id, artist_path, skipped + albums)
-    _record_local_artwork(None, artist_id, artist_path, artist=True)
-    _restore_selected_artist_art(artist_id)
-    # SPEED 8: only refresh artist name when something actually changed
-    if stats["changed"] > 0 or not skipped:
-        _refresh_artist_name(artist_path)
+    if artist_extras:
+        timer = progress.timed("Artist folder (website, artwork, name)") if hasattr(progress, "timed") else contextlib.nullcontext()
+        with timer:
+            _remember_artist_website(artist_id, artist_path, skipped + albums)
+            _record_local_artwork(None, artist_id, artist_path, artist=True)
+            _restore_selected_artist_art(artist_id)
+            # SPEED 8: only refresh artist name when something actually changed
+            if stats["changed"] > 0 or not skipped:
+                _refresh_artist_name(artist_path)
     return artist_id, album_paths, errors, stats, failures
 
 
@@ -1171,8 +1367,17 @@ def _scan_album(artist_id, artist_path, album_path, settings, mode, reread=False
             )
         else:
             conn.execute("DELETE FROM tracks WHERE album_id = %s", (album_id,))
+        # Unchanged tracks only follow their album: one statement for all of them, not one each.
+        # (named so it does not overwrite the unchanged count this function returns)
+        same_files = [item["file_path"] for item in collected if item.get("unchanged")]
+        if same_files:
+            conn.execute(
+                "UPDATE tracks SET album_id = %s WHERE file_path = ANY(%s::text[]) AND album_id <> %s",
+                (album_id, db.text_array(same_files), album_id),
+            )
         for item in collected:
-            _upsert_track(conn, album_id, item, release_group)
+            if not item.get("unchanged"):
+                _upsert_track(conn, album_id, item, release_group)
         stats = conn.execute(
             """
             SELECT COUNT(*)::int AS total_tracks,
@@ -1183,13 +1388,16 @@ def _scan_album(artist_id, artist_path, album_path, settings, mode, reread=False
             (album_id,),
         ).fetchone()
         from resonance.paths import path_role
-        from resonance.quality import album_score
+        from resonance.quality import album_audio, album_score
 
+        audio = album_audio(collected)
         conn.execute(
             """
             UPDATE albums
             SET total_tracks = %s, total_discs = %s, duration_seconds = %s,
-                path_role = %s, quality_rank = %s, cue_image = %s, updated_at = NOW()
+                path_role = %s, quality_rank = %s, cue_image = %s,
+                audio_format = %s, audio_lossless = %s, audio_bit_depth = %s,
+                audio_sample_rate = %s, audio_bitrate = %s, updated_at = NOW()
             WHERE id = %s
             """,
             (
@@ -1199,6 +1407,11 @@ def _scan_album(artist_id, artist_path, album_path, settings, mode, reread=False
                 path_role(album_path),
                 album_score(collected),
                 _is_cue_image(album_path),
+                audio["format"],
+                audio["lossless"],
+                audio["bit_depth"],
+                audio["sample_rate"],
+                audio["bitrate"],
                 album_id,
             ),
         )
@@ -1598,6 +1811,7 @@ def _upsert_album(
 
 
 def _upsert_track(conn, album_id, item, release_group):
+    """Write one track: an insert, or an update of the row with the same file path, in one statement."""
     if item.get("unchanged"):
         conn.execute(
             "UPDATE tracks SET album_id = %s WHERE file_path = %s AND album_id <> %s",
@@ -1609,7 +1823,6 @@ def _upsert_track(conn, album_id, item, release_group):
         raw = dict(raw)
         raw["_instrumental"] = True
     group = item["musicbrainz_release_group_id"] or release_group
-    existing = conn.execute("SELECT id FROM tracks WHERE file_path = %s", (item["file_path"],)).fetchone()
     params = (
         album_id,
         item["title"],
@@ -1632,34 +1845,6 @@ def _upsert_track(conn, album_id, item, release_group):
         item.get("file_size"),
         item["file_path"],
     )
-    if existing:
-        conn.execute(
-            """
-            UPDATE tracks SET
-                album_id = %s,
-                title = %s,
-                artist_name = %s,
-                album_name = %s,
-                genre = %s,
-                year = %s,
-                disc_number = %s,
-                track_number = %s,
-                duration_seconds = %s,
-                file_format = %s,
-                sample_rate = %s,
-                bit_depth = %s,
-                bitrate = %s,
-                lyrics_type = %s,
-                musicbrainz_track_id = %s,
-                musicbrainz_release_group_id = %s,
-                tags = %s,
-                mtime_ns = %s,
-                file_size = %s
-            WHERE file_path = %s
-            """,
-            params,
-        )
-        return
     conn.execute(
         """
         INSERT INTO tracks (
@@ -1668,6 +1853,30 @@ def _upsert_track(conn, album_id, item, release_group):
             musicbrainz_track_id, musicbrainz_release_group_id, tags, mtime_ns, file_size, file_path
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (file_path) DO UPDATE SET
+            album_id = EXCLUDED.album_id,
+            title = EXCLUDED.title,
+            artist_name = EXCLUDED.artist_name,
+            album_name = EXCLUDED.album_name,
+            genre = EXCLUDED.genre,
+            year = EXCLUDED.year,
+            disc_number = EXCLUDED.disc_number,
+            track_number = EXCLUDED.track_number,
+            duration_seconds = EXCLUDED.duration_seconds,
+            file_format = EXCLUDED.file_format,
+            sample_rate = EXCLUDED.sample_rate,
+            bit_depth = EXCLUDED.bit_depth,
+            bitrate = EXCLUDED.bitrate,
+            lyrics_type = EXCLUDED.lyrics_type,
+            musicbrainz_track_id = EXCLUDED.musicbrainz_track_id,
+            musicbrainz_release_group_id = EXCLUDED.musicbrainz_release_group_id,
+            tags = EXCLUDED.tags,
+            -- A replaced file is not judged by the old file's audit (Corrupt, FLAC OK, Upscaled).
+            audio_flag = CASE WHEN tracks.file_size IS DISTINCT FROM EXCLUDED.file_size
+                                OR tracks.mtime_ns IS DISTINCT FROM EXCLUDED.mtime_ns
+                              THEN NULL ELSE tracks.audio_flag END,
+            mtime_ns = EXCLUDED.mtime_ns,
+            file_size = EXCLUDED.file_size
         """,
         params,
     )
@@ -2131,13 +2340,41 @@ def _collect_nested(directory, disc_hint, mode, depth):
     return items
 
 
+# A scan of chosen albums sets fn on its thread, so each track read moves its progress bar.
+_track_tick = threading.local()
+
+
+def _count_audio(path, depth=AUDIO_NEST_DEPTH):
+    """Audio files in an album folder and its disc and wrapper folders, as the scan will read them."""
+    count = len(_audio_files(path))
+    if depth <= 0:
+        return count
+    try:
+        children = os.listdir(path)
+    except OSError:
+        return count
+    for name in children:
+        child = os.path.join(path, name)
+        if not name.startswith(".") and name.lower() not in SIDECAR_DIRS and os.path.isdir(child):
+            count += _count_audio(child, depth - 1)
+    return count
+
+
 def _tracks_from_files(directory, disc_hint, mode):
     items = []
-    for index, path in enumerate(_audio_files(directory), start=1):
+    paths = _audio_files(directory)
+    # One query for the folder's stored tracks, not one per file.
+    stored = {}
+    if mode != "deep" and paths:
+        stored = {row["file_path"]: row for row in db.fetchall("SELECT * FROM tracks WHERE file_path = ANY(%s)", (list(paths),))}
+    for index, path in enumerate(paths, start=1):
         _checkpoint()
+        tick = getattr(_track_tick, "fn", None)
+        if tick:
+            tick()
         stamp = _file_stamp(path)
         if mode != "deep":
-            existing = db.fetchone("SELECT * FROM tracks WHERE file_path = %s", (path,))
+            existing = stored.get(path)
             if existing and _same_mtime(existing, stamp):
                 items.append(_item_from_row(existing, stamp))
                 continue
@@ -2764,8 +3001,57 @@ def _refresh_discographies(progress, roots, album_ids=None):
     progress.log(f"Discography: updated {updated}, left {len(artists) - updated}", phase="musicbrainz")
 
 
-def _sidecar_summary(progress, roots):
+def _album_folders(album_ids):
+    """The folders of these albums, for a library update that only scans what changed."""
+    if not album_ids:
+        return []
+    rows = db.fetchall("SELECT path FROM albums WHERE id = ANY(%s::uuid[]) AND COALESCE(path, '') <> ''",
+                       (db.uuid_array(list(album_ids)),))
+    return sorted({row["path"] for row in rows})
+
+
+def _record_catalogue_notes(progress, album_ids):
+    """Release countries, duplicates, upgrade copies and original years, with a time of their own in the log (they used
+    to count toward the Artwork stage). album_ids None is the whole library."""
+    from resonance.library import store_missing_countries
+    from resonance.upgrade import refresh_stored
+
+    end_stage = getattr(progress, "end_stage", None)
+    if callable(end_stage):
+        end_stage()
+    started = time.monotonic()
+    progress.log("Filling blank release countries from tags already stored", message="Recording release countries")
+    store_missing_countries(album_ids)
+    progress.log("Recording duplicates, upgrade copies, and original years", message="Recording catalogue notes")
+    refresh_stored(album_ids)
+    spent = time.monotonic() - started
+    if spent >= 0.1:
+        progress.log(f"Countries, duplicates and upgrades took {_span(spent)}")
+
+
+def _sidecar_summary(progress, roots, album_ids=None):
+    """Count the .nfo and cover files. An incremental scan counts only the albums it added or read again."""
     progress.update(0, 1, "Sidecar audit", "sidecars")
+    if album_ids is not None:
+        ids = db.uuid_array(list(album_ids))
+        row = db.fetchone(
+            """
+            SELECT
+                (SELECT COUNT(*)::int FROM artists WHERE has_nfo = TRUE
+                     AND id IN (SELECT artist_id FROM albums WHERE id = ANY(%s::uuid[]))) AS artist_nfo,
+                (SELECT COUNT(*)::int FROM albums WHERE has_nfo = TRUE AND id = ANY(%s::uuid[])) AS album_nfo,
+                (SELECT COUNT(*)::int FROM albums WHERE has_artwork = TRUE AND id = ANY(%s::uuid[])) AS covers
+            """,
+            (ids, ids, ids),
+        ) if album_ids else {"artist_nfo": 0, "album_nfo": 0, "covers": 0}
+        if row:
+            progress.log(
+                f"Sidecars for {len(album_ids)} new or changed albums: {row['artist_nfo']} artist NFO, "
+                f"{row['album_nfo']} album NFO, {row['covers']} folder.jpg",
+                phase="sidecars",
+                message="Sidecar audit",
+            )
+        return
     clauses = " OR ".join(["path LIKE %s ESCAPE '\\'"] * len(roots))
     params = [like_prefix(root) for root in roots]
     row = db.fetchone(
@@ -2978,15 +3264,21 @@ def _fill_missing_metadata(progress, roots, album_ids=None, skipped=None):
         phase="metadata",
         message=_with_skip("Missing metadata", skipped),
     )
-    done = 0
-    filled = 0
-    for artist in artists:
+    counts = {"done": 0, "filled": 0}
+    count_lock = threading.Lock()
+
+    def tick(filled_one=False):
+        with count_lock:
+            counts["done"] += 1
+            counts["filled"] += 1 if filled_one else 0
+            return counts["done"]
+
+    def one_artist(artist):
         from resonance.jobs import cancelled as scan_cancelled
         from resonance.memory import wait as wait_for_memory
 
         wait_for_memory(progress.log, stop=scan_cancelled)
         _checkpoint()
-        done += 1
         label = artist.get("name") or "Artist"
         try:
             found = profile.scrape(str(artist["id"]))
@@ -2994,14 +3286,12 @@ def _fill_missing_metadata(progress, roots, album_ids=None, skipped=None):
             raise
         except Exception as exc:
             progress.log(f"Metadata: {label}: {exc}")
-            progress.update(done, total, _with_skip(f"Metadata {label}", skipped), "metadata")
+            progress.update(tick(), total, _with_skip(f"Metadata {label}", skipped), "metadata")
             progress.note_library("metadata")
-            continue
+            return
         outcome = _store_missing_artist(artist, found, longest)
         note = _metadata_note(outcome)
         if note:
-            if outcome.get("biography") in {"saved", "replaced"} or outcome.get("fields"):
-                filled += 1
             progress.log(f"Metadata: {label}: {note}")
         else:
             progress.log(f"Metadata: {label}: nothing new")
@@ -3009,17 +3299,20 @@ def _fill_missing_metadata(progress, roots, album_ids=None, skipped=None):
             "UPDATE artists SET biography_checked_at = NOW(), metadata_checked_at = NOW() WHERE id = %s",
             (artist["id"],),
         )
-        progress.update(done, total, _with_skip(f"Metadata {label}", skipped), "metadata")
+        saved = bool(note) and (outcome.get("biography") in {"saved", "replaced"} or bool(outcome.get("fields")))
+        progress.update(tick(saved), total, _with_skip(f"Metadata {label}", skipped), "metadata")
         progress.note_library("metadata")
+
     review_order = metadata_sources("review")
     desc_order = metadata_sources("descriptors")
-    for album in albums:
+
+    def one_album(album):
         _checkpoint()
-        done += 1
         label = f"{album.get('artist_name') or 'Artist'} — {album.get('title') or 'Album'}"
+        saved = False
         try:
             if _store_missing_album(album, review_order, desc_order, lastfm, clean_text):
-                filled += 1
+                saved = True
                 progress.log(f"Metadata: {label}: metadata saved")
                 _write_scanned_album_nfo(album)
             else:
@@ -3030,13 +3323,36 @@ def _fill_missing_metadata(progress, roots, album_ids=None, skipped=None):
             progress.log(f"Metadata: {label}: {exc}")
         else:
             db.execute("UPDATE albums SET review_checked_at = NOW() WHERE id = %s", (album["id"],))
-        progress.update(done, total, _with_skip(f"Metadata {label}", skipped), "metadata")
+        progress.update(tick(saved), total, _with_skip(f"Metadata {label}", skipped), "metadata")
         progress.note_library("metadata")
+
+    # Several artists and albums at once: each site keeps its own request limit across threads (sources/pace.py), so
+    # this overlaps the waits on different sites without asking any one of them faster.
+    _side_by_side(one_artist, artists)
+    _side_by_side(one_album, albums)
+    filled = counts["filled"]
     progress.log(
         f"Metadata: filled {filled}, left {total - filled} still empty.",
         phase="metadata",
         message=_with_skip("Metadata", skipped),
     )
+
+
+METADATA_WORKERS = 3
+
+
+def _side_by_side(work, items, workers=METADATA_WORKERS):
+    """Run work on each item, a few at a time. A cancelled scan stops it; the first ScanCancelled is raised."""
+    items = list(items or [])
+    if len(items) <= 1 or workers <= 1:
+        for item in items:
+            work(item)
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(workers, len(items)), thread_name_prefix="metadata") as pool:
+        for _ in pool.map(work, items):
+            pass
 
 
 def _metadata_note(outcome):
@@ -3128,17 +3444,19 @@ def _store_missing_artist(artist, found, longest=False):
     return {"biography": outcome, "fields": filled}
 
 
-def _nfos_from_scan(progress, roots, mode, album_ids):
+def _nfos_from_scan(progress, roots, mode, album_ids, only=False):
     """Write album.nfo after the scan has finished storing metadata.
 
     A missing file is always written. A new or changed album that already has a
     MusicBrainz id is rewritten so the file matches the database. Rewrite all
-    replaces every artist and album file under the scanned folders.
+    replaces every artist and album file under the scanned folders. only keeps every
+    step to album_ids, for a scan of chosen albums: Rewrite all then rewrites just those.
     """
     from resonance.library import write_album_nfo, write_artist_nfo
     from resonance.paths import mount_writable
 
-    rewrite = load_settings().get("scan_rewrite_nfo") is True
+    # Rewrite all is for full and deep scans. An incremental scan only writes the albums it found new or changed.
+    rewrite = load_settings().get("scan_rewrite_nfo") is True and mode in {"full", "deep"}
     roots = [root for root in roots or [] if root]
     if not roots and not album_ids:
         progress.log("NFO: nothing to write", phase="nfo", message="Write .nfo")
@@ -3146,7 +3464,7 @@ def _nfos_from_scan(progress, roots, mode, album_ids):
     clauses = " OR ".join(["al.path LIKE %s ESCAPE '\\'"] * len(roots)) if roots else ""
     params = [like_prefix(root) for root in roots]
     where = f"({clauses})" if clauses else "TRUE"
-    if album_ids is not None and not rewrite:
+    if album_ids is not None and (only or not rewrite):
         if not album_ids:
             progress.log("NFO: nothing to write", phase="nfo", message="Write .nfo")
             return
@@ -3186,6 +3504,8 @@ def _nfos_from_scan(progress, roots, mode, album_ids):
         progress.log("NFO: nothing to write", phase="nfo", message="Write .nfo")
         return
     written = 0
+    same = 0
+    artists_written = 0
     artists_done = set()
     progress.update(0, len(due), "Write .nfo", "nfo")
     for index, album in enumerate(due, start=1):
@@ -3200,18 +3520,22 @@ def _nfos_from_scan(progress, roots, mode, album_ids):
             )
             if artist_due and album.get("artist_path") and mount_writable(album["artist_path"]):
                 try:
-                    write_artist_nfo(artist_id)
+                    if (write_artist_nfo(artist_id) or {}).get("changed", True):
+                        artists_written += 1
                 except Exception as exc:
                     progress.log(f"Could not write artist.nfo: {label}: {exc}")
         if not album.get("path") or not mount_writable(album["path"]):
             continue
         try:
-            write_album_nfo(str(album["id"]))
-            written += 1
+            if (write_album_nfo(str(album["id"])) or {}).get("changed", True):
+                written += 1
+            else:
+                same += 1
         except Exception as exc:
             progress.log(f"Could not write album.nfo: {label}: {exc}")
-    note = " Existing files were replaced." if rewrite and written else ""
-    progress.log(f"NFO: {written} album files written.{note}", phase="nfo", message="Write .nfo")
+    unchanged = f", {same} already up to date" if same else ""
+    artists = f", {artists_written} artist files written" if artists_written else ""
+    progress.log(f"NFO: {written} album files written{unchanged}{artists}.", phase="nfo", message="Write .nfo")
 
 
 def _write_scanned_album_nfo(album):

@@ -1385,8 +1385,7 @@ def deploy_missing(album_id, scope="album", only_types=None):
             continue
         if _asset_present(album["id"], None, asset_type, present_album, None):
             continue
-        if any(row["is_selected"] for row in group):
-            continue
+        # A row marked selected whose file is gone does not count: the image is missing, so it is saved again.
         best = preferred_artwork(group, cfg)
         try:
             select(best["id"], refresh_scores=False)

@@ -24,7 +24,9 @@ def _typed(value):
 
 @router.post("/radarr/test")
 def radarr_test(body: Connection):
-    return {"message": radarr.test(_typed(body.url), _typed(body.key))}
+    from curator import arr_versions
+
+    return {"message": radarr.test(_typed(body.url), _typed(body.key)), "versions": arr_versions.all_versions()}
 
 
 @router.post("/radarr/options")

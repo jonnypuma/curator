@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from PIL import Image
 
 from curator.scrapers.http import ScrapeError
-from curator.video import naming, writes
+from curator.video import art_shape, naming, writes
 
 logger = logging.getLogger(__name__)
 PNG_KINDS = {"clearlogo", "clearart", "discart", "characterart"}
@@ -75,12 +75,16 @@ async def save_bytes(data, url, base, kind):
     return path
 
 
-async def fetch(client, ranked, base, kind, existing, policy, tries=3):
-    """Returns the written path, or None when nothing changed. base is the path without the extension."""
+async def fetch(client, ranked, base, kind, existing, policy, tries=3, replace=False):
+    """Returns the written path, or None when nothing changed. base is the path without the extension.
+
+    Overwrite replaces an image only with one that has more pixels. replace skips that test, for an item that was
+    just matched to another title, where the old image belongs to the wrong one.
+    """
     if existing and os.path.exists(existing):
         if policy != "overwrite":
             return None
-        existing_size = await asyncio.to_thread(image_size, existing)
+        existing_size = None if replace else await asyncio.to_thread(image_size, existing)
     else:
         existing, existing_size = None, None
     for candidate in ranked[:tries]:
@@ -96,6 +100,10 @@ async def fetch(client, ranked, base, kind, existing, policy, tries=3):
             with Image.open(io.BytesIO(data)) as image:
                 size, fmt = image.size, image.format
         except Exception:
+            continue
+        if art_shape.wrong(kind, size):
+            # A site listed it under the wrong type (a fanart among the posters): the next candidate is tried.
+            logger.info("art skipped for %s: %s", candidate["url"], art_shape.describe(kind, size))
             continue
         if existing_size and not better(size, existing_size):
             return None
@@ -125,7 +133,7 @@ def _existing_named(folder, stem):
     return None
 
 
-async def extras(client, ranked, folder, prefix, kind, policy, count=10):
+async def extras(client, ranked, folder, prefix, kind, policy, count=10, replace=False):
     """Save further images as extrafanart/fanartN or extrathumbs/thumbN.
 
     ranked should already exclude the image used as the main fanart or landscape. A file already in
@@ -142,7 +150,7 @@ async def extras(client, ranked, folder, prefix, kind, policy, count=10):
         if existing and policy != "overwrite":
             continue
         writes.ensure_dir(folder)
-        path = await fetch(client, [candidate], os.path.join(folder, f"{prefix}{slot}"), kind, existing, policy, tries=1)
+        path = await fetch(client, [candidate], os.path.join(folder, f"{prefix}{slot}"), kind, existing, policy, tries=1, replace=replace)
         if path:
             saved.append(path)
     return saved

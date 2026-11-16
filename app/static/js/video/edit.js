@@ -22,6 +22,7 @@ const VIDEO_EDIT_FIELDS = {
         ["scrape_language", "Scrape language", "locale"],
         ["genres", "Genres", "list"], ["countries", "Countries", "list"], ["studios", "Studios", "list"],
         ["directors", "Directors", "list"], ["writers", "Writers", "list"], ["tags", "Tags", "list"], ["trailer", "Trailer"],
+        ["ids", "Provider ids", "ids"],
     ],
     show: [
         ["title", "Title"], ["original_title", "Original title"], ["sort_title", "Sort title"], ["year", "Year", "number"],
@@ -33,18 +34,20 @@ const VIDEO_EDIT_FIELDS = {
         ["genres", "Genres", "list"], ["studios", "Networks", "list"], ["countries", "Countries", "list"],
         ["directors", "Directors", "list"], ["tags", "Tags", "list"],
         ["episode_order", "Episode order", "order"],
+        ["ids", "Provider ids", "ids"],
     ],
     season: [
-        ["title", "Title"], ["season_name", "Season name"], ["plot", "Plot", "area"], ["premiered", "Premiered", "date"], ["year", "Year", "number"], ["trailer", "Trailer"],
+        ["season_number", "Season number", "number"], ["title", "Title"], ["season_name", "Season name"], ["plot", "Plot", "area"], ["premiered", "Premiered", "date"], ["year", "Year", "number"], ["trailer", "Trailer"],
     ],
     episode: [
-        ["title", "Title"], ["plot", "Plot", "area"], ["aired", "Aired", "date"], ["runtime_minutes", "Runtime (minutes)", "number"],
+        ["title", "Title"], ["season_number", "Season number", "number"], ["episode_number", "Episode number", "number"], ["plot", "Plot", "area"], ["aired", "Aired", "date"], ["runtime_minutes", "Runtime (minutes)", "number"],
         ["mpaa", "Certification", "cert"], ["scrape_language", "Scrape language", "locale"],
         ["source_format", "Source format", "source"], ["release_group", "Release group"], ["edition", "Edition", "edition"], ["is_hybrid", "Hybrid", "bool"],
         ["rating", "Rating (0-10)", "decimal"], ["votes", "Votes", "number"], ["user_rating", "User rating (0-10)", "decimal"],
         ["display_season", "Display season", "number"], ["display_episode", "Display episode", "number"],
         ["resume_position", "Resume position (seconds)", "seconds"], ["resume_total", "Resume length (seconds)", "seconds"],
         ["directors", "Directors", "list"], ["writers", "Writers", "list"],
+        ["ids", "Provider ids", "ids"],
     ],
     set: [
         ["name", "Title"], ["overview", "Overview", "area"],
@@ -126,9 +129,16 @@ function videoEditUrl(kind, id) {
     return `/api/v1/${path}/${encodeURIComponent(id)}`;
 }
 
+function idsText(item) {
+    const values = typeof providerIdValues === "function" ? providerIdValues(item) : (item.ids || {});
+    const pairs = values instanceof Map ? [...values.entries()] : Array.isArray(values) ? values : Object.entries(values);
+    return pairs.map(([key, id]) => `${key}=${id}`).join(", ");
+}
+
 function editValue(item, field, type) {
     const value = item[field];
     if (type === "list") return (value || []).join(", ");
+    if (type === "ids") return idsText(item);
     if (value === null || value === undefined) return "";
     return String(value);
 }
@@ -228,6 +238,7 @@ async function refreshVideoMediaInfo(kind, ids) {
     const list = (Array.isArray(ids) ? ids : [ids]).filter(Boolean);
     const data = await api("/api/v1/mediainfo", { method: "POST", body: { kind, ids: list } });
     notify(data.message || "Media info updated.", data.updated ? "success" : "info");
+    if (data.updated) await Promise.all(list.map((id) => refreshProbedRows(kind, id)));
     if (kind === "movie" && state.video.movieId && list.includes(state.video.movieId)) return openMovie(state.video.movieId);
     if (kind === "episode" && state.video.tvSel && state.video.tvSel.type === "episode" && list.includes(state.video.tvSel.id)) return openEpisode(state.video.tvSel.id);
 }
@@ -241,8 +252,103 @@ async function generateEpisodeThumb(id) {
     return data;
 }
 
-async function refreshVideoRatings(kind, id) {
-    const data = await api(`/api/v1/ratings/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, { method: "POST", body: {} });
+// One item is updated on the spot. Several go to the server as one job (local IMDb data first), with progress in the
+// jobs list and a note when it finishes; the lists and the open item reload by themselves.
+const RATING_SOURCES_KEY = "curator.ratingSources";
+
+// The window that asks which sources an Update ratings run may use. groups: [{kind, ids}].
+async function openRatingsModal(groups, asJob) {
+    const picked = (groups || []).filter((group) => group && group.ids && group.ids.length);
+    if (!picked.length) return;
+    const modal = document.getElementById("ratings-modal");
+    const box = document.getElementById("ratings-sources");
+    const total = picked.reduce((sum, group) => sum + group.ids.length, 0);
+    state.ratingsPick = { groups: picked, asJob: !!asJob };
+    document.getElementById("ratings-summary").textContent = `${total} item${total === 1 ? "" : "s"} picked`;
+    box.innerHTML = `<p class="muted">Loading…</p>`;
+    modal.classList.remove("hidden");
+    let options = [];
+    try {
+        options = (await api(`/api/v1/ratings/sources?kind=${encodeURIComponent(picked[0].kind)}`)).sources || [];
+    } catch (error) {
+        box.innerHTML = `<p class="muted">The sources could not be loaded.</p>`;
+        return;
+    }
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(RATING_SOURCES_KEY) || "null"); } catch (error) { saved = null; }
+    const usable = options.filter((option) => option.available).map((option) => option.key);
+    const wanted = Array.isArray(saved) && saved.some((key) => usable.includes(key)) ? saved : usable;
+    box.innerHTML = options.map((option) => `<label class="choice${option.available ? "" : " is-off"}">
+            <input type="checkbox" data-rating-source="${escapeHtml(option.key)}" ${option.available && wanted.includes(option.key) ? "checked" : ""} ${option.available ? "" : "disabled"}>
+            <span>${escapeHtml(option.label)}${option.available ? "" : ` <span class="muted">· ${escapeHtml(option.reason)}</span>`}</span>
+        </label>`).join("");
+    if (!box._bound) {
+        box._bound = true;
+        box.addEventListener("change", syncRatingsRun);
+        const all = document.getElementById("ratings-all");
+        if (all) {
+            all.addEventListener("change", () => {
+                document.querySelectorAll("#ratings-sources [data-rating-source]:not(:disabled)").forEach((item) => { item.checked = all.checked; });
+                syncRatingsRun();
+            });
+        }
+    }
+    syncRatingsRun();
+}
+
+function ratingSourcesPicked() {
+    return [...document.querySelectorAll("#ratings-sources [data-rating-source]:checked")].map((box) => box.dataset.ratingSource);
+}
+
+function syncRatingsRun() {
+    const button = document.getElementById("ratings-run");
+    if (button) button.disabled = !ratingSourcesPicked().length;
+    // The master box follows the boxes that can be ticked: on when all are, dash when only some are.
+    const all = document.getElementById("ratings-all");
+    if (all) {
+        const usable = [...document.querySelectorAll("#ratings-sources [data-rating-source]:not(:disabled)")];
+        const on = usable.filter((item) => item.checked).length;
+        all.disabled = !usable.length;
+        all.checked = usable.length > 0 && on === usable.length;
+        all.indeterminate = on > 0 && on < usable.length;
+    }
+}
+
+// The narrowing conditions ticked in the window, or null when none is.
+function ratingFilterPicked() {
+    const out = {};
+    document.querySelectorAll("#ratings-filter [data-rf]").forEach((box) => {
+        if (!box.checked) return;
+        const key = box.dataset.rf;
+        if (key === "unrated") { out.unrated = true; return; }
+        const field = document.querySelector(`#ratings-filter [data-rf-n="${key}"]`);
+        const number = field && field.value !== "" ? Number(field.value) : NaN;
+        if (Number.isFinite(number)) out[key === "below" ? "rating_below" : key] = number;
+    });
+    return Object.keys(out).length ? out : null;
+}
+
+async function ratingsRun() {
+    const pick = state.ratingsPick;
+    const sources = ratingSourcesPicked();
+    if (!pick || !sources.length) return;
+    try { localStorage.setItem(RATING_SOURCES_KEY, JSON.stringify(sources)); } catch (error) { /* a per-browser convenience */ }
+    const narrowed = ratingFilterPicked();
+    document.getElementById("ratings-modal").classList.add("hidden");
+    // A filter is applied by the server for each item, so even one item goes as a job.
+    for (const group of pick.groups) await refreshVideoRatings(group.kind, group.ids, pick.asJob || !!narrowed, sources, narrowed);
+}
+
+async function refreshVideoRatings(kind, ids, asJob, sources, narrowed) {
+    const list = (Array.isArray(ids) ? ids : [ids]).filter(Boolean);
+    if (list.length > 1 || (asJob && list.length)) {
+        const batch = await api("/api/v1/ratings", { method: "POST", body: { kind, ids: list, sources: sources || null, rating_filter: narrowed || null } });
+        if (batch.duplicate) notify("That ratings update is already waiting.", "info");
+        else if (batch.queued) notify(`Ratings update for ${list.length} ${list.length === 1 ? "item" : "items"} queued.`, "info");
+        return batch;
+    }
+    const id = list[0];
+    const data = await api(`/api/v1/ratings/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, { method: "POST", body: { sources: sources || null } });
     notify(data.message || "Ratings updated.", "success");
     if (kind === "movie") return openMovie(id);
     if (kind === "show") return openShow(id);
@@ -263,7 +369,8 @@ async function openVideoEdit(kind, id) {
         item = show && (show.seasons || []).find((season) => season.id === id);
         if (!item) throw new Error("Open the season, then edit it");
         const names = (show && show.season_names) || {};
-        item = { ...item, season_name: names[String(item.season_number)] || "" };
+        item = { ...item, season_name: names[String(item.season_number)] || "",
+                 episode_total: ((show && show.episodes) || []).filter((episode) => episode.season_id === id).length };
     } else {
         item = await api(videoEditUrl(kind, id));
     }
@@ -308,7 +415,7 @@ async function openVideoEdit(kind, id) {
         } else {
             const attrs = type === "number" ? `type="number" step="1"` : type === "decimal" ? `type="number" step="0.1" min="0" max="10"` : type === "seconds" ? `type="number" step="0.001" min="0"` : `type="text"`;
             const extra = field === "release_group" ? ` maxlength="40" placeholder="FraMeSToR"` : "";
-            input = `<input ${attrs} data-edit-field="${field}" value="${escapeHtml(value)}"${extra}${type === "list" ? ` placeholder="Comma separated"` : ""}${type === "date" ? ` placeholder="YYYY-MM-DD"` : ""}>`;
+            input = `<input ${attrs} data-edit-field="${field}" value="${escapeHtml(value)}"${extra}${type === "list" ? ` placeholder="Comma separated"` : ""}${type === "date" ? ` placeholder="YYYY-MM-DD"` : ""}${type === "ids" ? ` placeholder="tmdb=1022, tvdb=2405, imdb=tt0111161"` : ""}>`;
         }
         return `<label class="vedit-row"><span>${escapeHtml(label)} ${pin}</span>${input}</label>`;
     }).join("");
@@ -318,11 +425,19 @@ async function openVideoEdit(kind, id) {
         <h2>Edit ${escapeHtml(heading)}</h2>
         ${filePathBlock(filePath)}
         <p class="muted">Edited fields are locked, so scrapes keep your values. The padlock next to a field unlocks it again.</p>
-        <form id="video-edit-form" class="vedit">${rows}</form>
+        <form id="video-edit-form" class="vedit">${rows}${kind === "season" ? seasonRenumberRow(item) : ""}</form>
         <p class="vactions"><button type="button" data-action="video-edit-save">Save</button>
             <button type="button" class="btn-ghost" data-action="video-edit-cancel">Cancel</button></p>
     </section></article>`;
     bindCertCountry(center);
+}
+
+// Shown with the season number. Ticked, a changed number is also given to the episodes of this season.
+function seasonRenumberRow(item) {
+    const count = Number(item.episode_total) || 0;
+    const label = count ? `Also change the season number of its ${count} episode${count === 1 ? "" : "s"}` : "Also change the season number of its episodes";
+    return `<label class="vedit-row" id="season-renumber-row"><span>${escapeHtml(label)}</span>
+        <input type="checkbox" data-renumber-episodes checked></label>`;
 }
 
 function changedEditFields() {
@@ -353,14 +468,55 @@ async function saveVideoEdit() {
         notify("Nothing changed.", "info");
         return closeVideoEdit();
     }
-    const data = await api(`/api/v1/items/${edit.kind}/${encodeURIComponent(edit.id)}`, { method: "PATCH", body: { fields } });
+    const renumber = document.querySelector("#video-edit-form [data-renumber-episodes]");
+    const body = { fields };
+    if (renumber) body.renumber_episodes = renumber.checked;
+    let data;
+    try {
+        data = await api(`/api/v1/items/${edit.kind}/${encodeURIComponent(edit.id)}`, { method: "PATCH", body });
+    } catch (error) {
+        // The number belongs to another season: warn, and merge into it when the user agrees.
+        if (edit.kind !== "season" || !/already exists in this show/.test(error.message || "")) throw error;
+        return askDanger("Merge the seasons?", `${error.message}. Merge this season into it? Its episodes move to that season and this season is removed.`,
+            "Merge seasons", async () => {
+                const merged = await api(`/api/v1/items/${edit.kind}/${encodeURIComponent(edit.id)}`, { method: "PATCH", body: { ...body, merge_seasons: true } });
+                return finishVideoEdit(edit, fields, merged);
+            }, true);
+    }
+    return finishVideoEdit(edit, fields, data);
+}
+
+// After a saved edit: report the .nfo and Sonarr, patch the list, and open the item again.
+// Undo Fix Match (curator/video/match_undo.py): the item goes back to how it was before its last Fix Match.
+function undoFixMatch(kind, id) {
+    const noun = kind === "show" ? "show" : "movie";
+    askDanger(`Undo the Fix Match of this ${noun}?`,
+        `The metadata, ${kind === "show" ? "seasons, episodes, " : ""}artwork and .nfo files from before the Fix Match come back. Artwork and .nfo files the Fix Match added go to the recycle bin. Video files are not touched.`,
+        "Undo Fix Match", async () => {
+            const data = await api("/api/v1/match/undo", { method: "POST", body: { kind, id } });
+            if (typeof applyPeerFlags === "function") applyPeerFlags(data.peers);
+            notify(`Fix Match undone: ${data.files_back} file${data.files_back === 1 ? "" : "s"} put back, ${data.files_binned} new one${data.files_binned === 1 ? "" : "s"} to the recycle bin.`, "success");
+            state.video.stale[kind === "show" ? "tv" : "movies"] = true;
+            if (typeof loadVideo === "function") await loadVideo(kind === "show" ? "tv" : "movies", { keepScroll: true, quiet: true });
+            return kind === "show" ? openShow(id) : openMovie(id);
+        }, false);
+}
+
+async function finishVideoEdit(edit, fields, data) {
     if (data.nfo_error) notify(`Saved, but the .nfo was not written: ${data.nfo_error}`, "warning");
-    else notify("Saved.", "info");
+    else notify(data.sonarr ? "Saved. Sonarr was asked to rescan the show." : "Saved.", "info");
     const kind = edit.kind;
     const savedId = edit.id;
     const showId = edit.item.show_id;
     state.videoEdit = null;
-    patchVideoRows(kind, [savedId], fields);
+    const { ids: _ids, season_number: renumberedSeason, episode_number: renumberedEpisode, ...patch } = fields;
+    const renumbered = renumberedSeason !== undefined ? renumberedSeason : renumberedEpisode;
+    patchVideoRows(kind, [savedId], patch);
+    if (renumbered !== undefined && showId) {
+        // Seasons and episodes move around, so the show is read again instead of patching rows.
+        await showDetail(showId, true);
+        if (typeof renderTvTree === "function" && state.media === "tv") renderTvTree();
+    }
     if (kind === "movie" && (Object.prototype.hasOwnProperty.call(fields, "set_name") || Object.prototype.hasOwnProperty.call(fields, "set_overview"))) {
         state.video.stale.sets = true;
     }
@@ -496,7 +652,7 @@ function batchEditIds(kind) {
     if (kind === "movie") return [...selectionChecked("movie")];
     if (kind === "album") return [...selectionChecked("album")];
     const prefix = `${kind}:`;
-    return [...selectionChecked("tv")].filter((key) => String(key).startsWith(prefix)).map((key) => key.slice(prefix.length));
+    return tvScopedKeys().filter((key) => String(key).startsWith(prefix)).map((key) => key.slice(prefix.length));
 }
 
 function batchFieldControl(field, type, kind) {
@@ -668,6 +824,7 @@ const VIDEO_EDIT_ACTIONS = {
     "batch-edit-save": () => runAction(saveBatchEdit, "Saving…"),
     "video-unlock-field": (action) => runAction(() => unlockVideoField(action.dataset.field, action)),
     "video-match": (action) => openFixMatch(action.dataset.kind, action.dataset.id),
+    "video-match-undo": (action) => undoFixMatch(action.dataset.kind, action.dataset.id),
     "video-scrape-one": (action) => openVideoScrapeModal("selected", { media: scrapeMediaFor(action.dataset.kind), ids: [action.dataset.id] }),
     "video-nfo-one": (action) => runAction(() => writeVideoNfo(action.dataset.kind, [action.dataset.id])),
     "video-scrape-set": (action) => openVideoScrapeModal("selected", { media: "sets", ids: [action.dataset.id] }),
@@ -726,6 +883,7 @@ async function setDefaultTrack(action) {
         },
     });
     notify(data.message || "Default track saved.", "success");
+    await refreshProbedRows(action.dataset.kind, action.dataset.id);
     if (action.dataset.kind === "movie") return openMovie(action.dataset.id, true);
     return openEpisode(action.dataset.id, true);
 }
@@ -749,10 +907,28 @@ function setTrackLanguage(action) {
     );
 }
 
+// A track or media info change rewrites what the list shows for the item (unknown audio, health, resolution),
+// and for a show or season the counts built from its episodes. Read those rows again.
+async function refreshProbedRows(kind, id) {
+    if (!state.video) return;
+    try {
+        if (kind === "episode") {
+            const showId = typeof tvShowIdFor === "function" ? tvShowIdFor("episode", id) : "";
+            if (showId && state.video.showDetails && state.video.showDetails.has(showId)) await showDetail(showId, true);
+            if (state.media === "tv") await loadVideo("tv", { keepScroll: true, quiet: true });
+        } else if (state.media === "movies") {
+            await loadVideo("movies", { keepScroll: true, quiet: true });
+        }
+    } catch (error) {
+        // The page still shows the old pill until the next refresh; the change itself was saved.
+    }
+}
+
 async function writeTrackLanguage(change) {
     holdCenterScroll();
     const data = await api("/api/v1/tracks/language", { method: "POST", body: change });
     notify(data.message || "Language saved.", "success");
+    await refreshProbedRows(change.kind, change.id);
     if (change.kind === "movie") return openMovie(change.id, true);
     return openEpisode(change.id, true);
 }

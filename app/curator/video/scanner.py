@@ -10,6 +10,7 @@ folder was read and the movie or show folder is gone. A folder that cannot be re
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import logging
 import os
@@ -75,6 +76,11 @@ def _load_initial_media_state(media):
             if not isinstance(res, dict):
                 res = {}
             with _lock:
+                # The saved scan is only shown until a scan of this media starts. A scan that is already running
+                # keeps its own state: replacing it dropped the live totals and the next count failed.
+                if (_media_states[media].get("status") == "running"
+                        or (_state.get("status") == "running" and _state.get("media") == media)):
+                    return
                 _media_states[media].update({
                     "status": row.get("status") or "completed",
                     "media": media,
@@ -90,6 +96,8 @@ def _load_initial_media_state(media):
         if latest and latest.get("text"):
             lines = latest["text"].splitlines()
             with _lock:
+                if _state.get("status") == "running" and _state.get("media") == media:
+                    return
                 _media_logs[media].clear()
                 _media_logs[media].extend(lines[-LOG_LINES:])
     except Exception:
@@ -232,6 +240,8 @@ def removed_ids(media):
 
 
 def _begin(media, mode, roots, force=False, reset_cancel=True, interrupt=False, origin="manual"):
+    # Read the saved state now, before this scan's state exists, so it can never land on top of it later.
+    _load_initial_media_state(media)
     with _lock:
         if _state["status"] == "running" and not force:
             return False
@@ -246,8 +256,9 @@ def _begin(media, mode, roots, force=False, reset_cancel=True, interrupt=False, 
             "status": "running", "media": media, "mode": mode, "roots": list(roots), "phase": "walk",
             "message": "Reading folders", "processed": 0, "total": 0,
             "folders_done": 0, "folders_total": 0, "files_done": 0, "files_total": 0,
-            "started_at": datetime.now().isoformat(timespec="seconds"), "finished_at": None, "id": None,
+            "started_at": datetime.now().astimezone().isoformat(timespec="seconds"), "finished_at": None, "id": None,
             "trailers_alongside": False, "trailers_done": False, "interrupt": bool(interrupt), "origin": origin,
+            "timings": "",
             "result": {"added": 0, "updated": 0, "unchanged": 0, "removed": 0, "probed": 0, "probe_failed": 0,
                        "failures": [], "unmatched": [], "empty": [], "failure_count": 0, "unmatched_count": 0,
                        "empty_count": 0},
@@ -506,6 +517,7 @@ class _Job:
         self.seen = threading.Lock()
         self.last_push = 0.0
         self._changed = set()
+        self._changed_episodes = set()
         self._changed_lock = threading.Lock()
         self.extras = []
         self._replaced_movies = set()
@@ -513,11 +525,46 @@ class _Job:
         self.during_import = False
         self.stopped = False
         self.verbose = False
+        self.timings = []
+
+    @contextlib.contextmanager
+    def timed(self, name):
+        """Add the time this block takes to the scan's "Time per step" line."""
+        began = time.monotonic()
+        try:
+            yield
+        finally:
+            self.timings.append((name, time.monotonic() - began))
+
+    def log_timings(self):
+        """One line with the time of every step that took a tenth of a second or more, slowest first.
+
+        A step run once per file (probing runs a few files at a time) is summed, with how many times it ran."""
+        totals = {}
+        for name, seconds in self.timings:
+            spent, count = totals.get(name, (0.0, 0))
+            totals[name] = (spent + seconds, count + 1)
+        steps = sorted(((name, spent, count) for name, (spent, count) in totals.items() if spent >= 0.1), key=lambda item: -item[1])
+        if steps:
+            text = " · ".join(f"{name} {spent:.1f}s" + (f" ({count}×)" if count > 1 else "") for name, spent, count in steps)
+            self.log("Time per step: " + text)
+            with _lock:
+                _state["timings"] = text
 
     def note_changed(self, item_id):
         if item_id:
             with self._changed_lock:
                 self._changed.add(str(item_id))
+
+    def note_changed_episode(self, episode_id):
+        """An episode this scan added or read again. note_changed() records only its show."""
+        if episode_id:
+            with self._changed_lock:
+                self._changed_episodes.add(str(episode_id))
+
+    def changed_episode_ids(self):
+        with self._changed_lock:
+            return list(self._changed_episodes)
 
     def note_extra(self, show_id, season, episode, path):
         with self.seen:
@@ -560,50 +607,41 @@ class _Job:
 
     def count(self, key, step=1):
         with _lock:
-            _state["result"][key] = _state["result"].get(key, 0) + step
+            result = _state.setdefault("result", {})
+            result[key] = int(result.get(key) or 0) + step
             if self.media in _media_states:
-                _media_states[self.media]["result"][key] = _media_states[self.media]["result"].get(key, 0) + step
+                m_result = _media_states[self.media].setdefault("result", {})
+                m_result[key] = int(m_result.get(key) or 0) + step
+
+    def _note(self, count_key, list_key, item):
+        """Add one to a total and keep the item in its list, for the live scan and its media's saved view.
+
+        A total or list that is missing (an older saved result) starts at zero instead of failing the scan."""
+        targets = [_state.setdefault("result", {})]
+        if self.media in _media_states:
+            targets.append(_media_states[self.media].setdefault("result", {}))
+        for result in targets:
+            result[count_key] = int(result.get(count_key) or 0) + 1
+            found = result.get(list_key)
+            if not isinstance(found, list):
+                found = result[list_key] = []
+            if len(found) < LIST_LIMIT:
+                found.append(item)
 
     def fail(self, path, error):
         self.log(f"Failed: {path}: {error}")
         with _lock:
-            result = _state["result"]
-            result["failure_count"] += 1
-            if len(result["failures"]) < LIST_LIMIT:
-                result["failures"].append({"path": path, "error": str(error)})
-            if self.media in _media_states:
-                m_result = _media_states[self.media]["result"]
-                m_result["failure_count"] += 1
-                if len(m_result["failures"]) < LIST_LIMIT:
-                    m_result["failures"].append({"path": path, "error": str(error)})
+            self._note("failure_count", "failures", {"path": path, "error": str(error)})
 
     def unmatched(self, path):
         self.log(f"No season and episode number: {path}")
         with _lock:
-            result = _state["result"]
-            result["unmatched_count"] += 1
-            if len(result["unmatched"]) < LIST_LIMIT:
-                result["unmatched"].append(path)
-            if self.media in _media_states:
-                m_result = _media_states[self.media]["result"]
-                m_result["unmatched_count"] += 1
-                if len(m_result["unmatched"]) < LIST_LIMIT:
-                    m_result["unmatched"].append(path)
+            self._note("unmatched_count", "unmatched", path)
 
     def note_empty(self, path):
         self.log(f"Empty folder: {path}")
         with _lock:
-            result = _state["result"]
-            result["empty_count"] = result.get("empty_count", 0) + 1
-            found = result.setdefault("empty", [])
-            if len(found) < LIST_LIMIT:
-                found.append(path)
-            if self.media in _media_states:
-                m_result = _media_states[self.media]["result"]
-                m_result["empty_count"] = m_result.get("empty_count", 0) + 1
-                m_found = m_result.setdefault("empty", [])
-                if len(m_found) < LIST_LIMIT:
-                    m_found.append(path)
+            self._note("empty_count", "empty", path)
 
     def progress(self, message=None, processed=None, total=None, phase=None, force=False,
                  folders_done=None, folders_total=None, files_done=None, files_total=None):
@@ -739,24 +777,33 @@ def _execute_scan(media, mode, roots, targets=None, season_id=None, episode_id=N
         job.log("Verbose log is on. Each file is written here and to the container log.")
     final, message = "completed", ""
     limited = bool(targets) or bool(season_id) or bool(episode_id)
+    # What the items looked like before the scan, so the last step can refresh the ones whose metadata, artwork or
+    # ratings changed on the players. A webhook import sends its own library update.
+    from curator import scan_refresh
+
+    # A scan of chosen folders (an import) reads only those movies or shows, not the whole library folder.
+    folders = list(targets) if targets and not season_id and not episode_id else None
+    with job.timed("Player refresh snapshot"):
+        refresh_before = (scan_refresh.snapshot(media, roots, folders=folders) if folders else scan_refresh.snapshot(media, roots))             if not interrupt and scan_refresh.active(media) else None
     try:
-        if episode_id:
-            _scan_one_episode(job, episode_id)
-        elif season_id:
-            _scan_one_season(job, season_id)
-        elif targets:
-            groups = _group_targets(roots, targets)
-            scan_targets = _scan_movie_targets if media == "movies" else _scan_tv_targets
-            if not groups:
-                job.log("None of the selected folders are inside a library folder")
-            for root, paths in groups.items():
-                if job.cancelled:
-                    break
-                scan_targets(job, root, paths)
-        elif media == "movies":
-            _scan_movies(job, roots)
-        else:
-            _scan_tv(job, roots)
+        with job.timed("Read files"):
+            if episode_id:
+                _scan_one_episode(job, episode_id)
+            elif season_id:
+                _scan_one_season(job, season_id)
+            elif targets:
+                groups = _group_targets(roots, targets)
+                scan_targets = _scan_movie_targets if media == "movies" else _scan_tv_targets
+                if not groups:
+                    job.log("None of the selected folders are inside a library folder")
+                for root, paths in groups.items():
+                    if job.cancelled:
+                        break
+                    scan_targets(job, root, paths)
+            elif media == "movies":
+                _scan_movies(job, roots)
+            else:
+                _scan_tv(job, roots)
         if not job.cancelled and media == "tv" and limited and mode == "deep" and not episode_id:
             from curator.video import scrape
 
@@ -766,36 +813,76 @@ def _execute_scan(media, mode, roots, targets=None, season_id=None, episode_id=N
             else:
                 job.log("Missing episodes: no show was found for this scan")
         if not job.cancelled:
-            _log_saved_artwork(job, roots, targets, season_id, episode_id)
+            with job.timed("Artwork notes"):
+                _log_saved_artwork(job, roots, targets, season_id, episode_id)
         if not job.cancelled and not limited:
-            _fill_and_trailers(job, roots)
+            with job.timed("Metadata, artwork and trailers"):
+                _fill_and_trailers(job, roots)
             if not job.cancelled:
-                _subtitles_from_scan(job, roots)
+                with job.timed("Artwork shape"):
+                    _fix_art_shapes_from_scan(job, roots)
+            if not job.cancelled:
+                with job.timed("Clean artwork"):
+                    _clean_art_from_scan(job, roots)
+            if not job.cancelled:
+                with job.timed("Subtitles"):
+                    _subtitles_from_scan(job, roots)
+            if not job.cancelled:
+                with job.timed("Original language"):
+                    _original_language_from_scan(job)
         # A scan of one episode or season cannot change the trailer or theme song of anything else.
         # This runs before the saved filters so "Missing trailer" tags see what is on disk now.
         if not job.cancelled and (not limited or targets):
-            try:
-                from curator.video import local_extras
+            from curator.video import local_extras
 
-                local_extras.refresh(media, targets=targets or None)
+            try:
+                with job.timed("Trailers and themes on disk"):
+                    if mode == "incremental":
+                        # Only the movies and shows this scan added or read again; the rest kept their files.
+                        changed = job.changed_ids()
+                        if changed:
+                            local_extras.refresh(media, ids=changed)
+                    else:
+                        local_extras.refresh(media, targets=targets or None)
             except Exception as exc:
                 job.log(f"Could not check trailers and theme songs on disk: {exc}")
         if not job.cancelled and not season_id and not episode_id:
             from curator.video import saved_filters
 
             try:
-                saved_filters.apply_scan_tags(job, roots, targets)
+                with job.timed("Saved filter tags"):
+                    saved_filters.apply_scan_tags(job, roots, targets)
             except Exception as exc:
                 job.log(f"Could not apply saved filter tags: {exc}")
+            from curator.video import config as video_config, playlists
+
+            with job.timed("Playlists"):
+                playlists.refresh(job.log, media=media)
+            if video_config.current().get("collections_after_scan") and video_config.current().get("collections_players"):
+                from curator import collections_sync
+
+                if collections_sync.start():
+                    job.log("Collections: pushing movie sets and tagged filters to the players.")
             if media == "tv":
                 try:
-                    _generate_missing_ep_thumbs(job, roots)
+                    with job.timed("Episode thumbnails"):
+                        _generate_missing_ep_thumbs(job, roots)
                 except Exception as exc:
                     job.log(f"Episode thumb generation failed: {exc}")
-            _nfos_from_scan(job, roots, targets)
+            with job.timed(".nfo files"):
+                _nfos_from_scan(job, roots, targets)
         if not job.cancelled:
-            _refresh_replaced(job)
-        _note_copies(job)
+            with job.timed("Replaced files"):
+                _refresh_replaced(job)
+        with job.timed("Duplicate and upgrade marks"):
+            _note_copies(job)
+        if not job.cancelled and refresh_before is not None:
+            with job.timed("Player refresh check"):
+                if folders:
+                    scan_refresh.after_scan(media, roots, refresh_before, job.log, folders=folders)
+                else:
+                    scan_refresh.after_scan(media, roots, refresh_before, job.log)
+        job.log_timings()
         if job.cancelled:
             final, message = "cancelled", "Scan stopped. Items already read were kept."
     except probe.Cancelled:
@@ -809,17 +896,37 @@ def _execute_scan(media, mode, roots, targets=None, season_id=None, episode_id=N
     _finish_scan(media, final, message, result, job=job)
 
 
+def _scan_items(media, job):
+    """The items a scan added or read again, named for the Jobs panel's Recent list. Never raises."""
+    from curator import job_history
+
+    try:
+        if media == "tv":
+            episodes = job.changed_episode_ids()
+            shows = job.changed_ids()
+            if episodes and len(episodes) <= job_history.ITEMS_KEPT:
+                return job_history.items_result(store.item_names("episode", episodes), len(episodes))
+            return job_history.items_result(store.item_names("show", shows), len(shows))
+        if media == "movies":
+            movies = job.changed_ids()
+            return job_history.items_result(store.item_names("movie", movies), len(movies))
+    except Exception:
+        logger.exception("could not name the scanned items")
+    return {}
+
+
 def _finish_scan(media, final, message, result, job=None):
     if final == "completed" and not message:
         message = _summary(media, result)
     if job:
         job.log(message)
+        result = dict(result or {}, **_scan_items(media, job))
     from resonance import scan_pace
 
     scan_pace.finish(final == "completed")
     with _lock:
         _state.update({"status": final, "message": message, "phase": "done",
-                       "finished_at": datetime.now().isoformat(timespec="seconds")})
+                       "finished_at": datetime.now().astimezone().isoformat(timespec="seconds")})
         job_id = _state["id"]
         lines = list(_log)
         if media in _media_states:
@@ -829,6 +936,10 @@ def _finish_scan(media, final, message, result, job=None):
         store.finish_job(job_id, final, message, result)
     except Exception:
         logger.exception("could not record the scan result")
+    if final == "completed" and media in ("movies", "tv") and int(result.get("removed") or 0) > 0:
+        from curator import library_queue
+
+        library_queue.request_clean("Clean after the scan removed missing files")
     try:
         from curator import outbound
 
@@ -948,601 +1059,30 @@ def _under_clause(column, folders):
     return "(" + " OR ".join(clauses) + ")", params
 
 
-def _log_saved_artwork(job, roots, targets=None, season_id=None, episode_id=None):
-    """Log the .nfo files and artwork stored while folders and files were read."""
-    from resonance import db
-
-    roots = [root for root in roots if root]
-    if not roots:
-        job.log("Saved artwork: no library folder")
-        return
-    folders = _artwork_folders(roots, targets, season_id, episode_id)
-    if folders is not None and not folders:
-        job.log("Saved artwork: none")
-        return
-    limit, limit_params = ("", [])
-    if folders:
-        limit, limit_params = _under_clause("path" if job.media == "movies" else "h.path", folders)
-        limit = " AND " + limit
-    if job.media == "movies":
-        nfos = db.fetchone(
-            f"""
-            SELECT count(*) FILTER (WHERE nfo_path IS NOT NULL)::int AS nfo
-            FROM movies
-            WHERE root = ANY(%s){limit}
-            """,
-            (roots, *limit_params),
-        ) or {}
-        rows = db.fetchall(
-            f"""
-            SELECT art.key, count(*)::int AS n
-            FROM movies m
-            CROSS JOIN LATERAL jsonb_each_text(COALESCE(m.artwork, '{{}}'::jsonb)) AS art(key, value)
-            WHERE m.root = ANY(%s){limit.replace("path", "m.path")}
-              AND btrim(art.value) <> ''
-            GROUP BY art.key
-            """,
-            (roots, *limit_params),
-        )
-    else:
-        show_limit = limit.replace("h.path", "path")
-        nfos = db.fetchone(
-            f"""
-            SELECT
-                (SELECT count(*)::int FROM tv_shows WHERE root = ANY(%s){show_limit} AND nfo_path IS NOT NULL) AS show_nfo,
-                (SELECT count(*)::int FROM tv_seasons s
-                    JOIN tv_shows h ON h.id = s.show_id
-                    WHERE h.root = ANY(%s){limit} AND s.nfo_path IS NOT NULL) AS season_nfo,
-                (SELECT count(*)::int FROM tv_episodes e
-                    JOIN tv_shows h ON h.id = e.show_id
-                    WHERE h.root = ANY(%s){limit} AND e.nfo_path IS NOT NULL) AS episode_nfo
-            """,
-            (roots, *limit_params, roots, *limit_params, roots, *limit_params),
-        ) or {}
-        rows = db.fetchall(
-            f"""
-            SELECT art.key, count(*)::int AS n
-            FROM (
-                SELECT h.artwork
-                FROM tv_shows h
-                WHERE h.root = ANY(%s){limit}
-                UNION ALL
-                SELECT s.artwork
-                FROM tv_seasons s
-                JOIN tv_shows h ON h.id = s.show_id
-                WHERE h.root = ANY(%s){limit}
-                UNION ALL
-                SELECT e.artwork
-                FROM tv_episodes e
-                JOIN tv_shows h ON h.id = e.show_id
-                WHERE h.root = ANY(%s){limit}
-            ) items
-            CROSS JOIN LATERAL jsonb_each_text(COALESCE(items.artwork, '{{}}'::jsonb)) AS art(key, value)
-            WHERE btrim(art.value) <> ''
-            GROUP BY art.key
-            """,
-            (roots, *limit_params, roots, *limit_params, roots, *limit_params),
-        )
-    job.log(_artwork_report(job.media, nfos, _bucket_artwork(rows)))
-
-
-def _refresh_replaced(job):
-    """Download artwork that is still missing, then write the new release into the .nfo."""
-    movies, episodes = job.replaced()
-    if not movies and not episodes:
-        return
-    from curator.video import config, exports, scrape
-
-    cfg = config.current()
-    scrape.fill_replaced_artwork(job, movies, episodes)
-    if job.cancelled:
-        return
-    written = 0
-    for movie_id in movies:
-        if job.cancelled:
-            return
-        try:
-            if exports.write_movie(movie_id, cfg, "overwrite"):
-                written += 1
-        except Exception as exc:
-            job.log(f"Could not write .nfo: {exc}")
-    for show_id, episode_ids in episodes.items():
-        if job.cancelled:
-            return
-        try:
-            written += len(exports.write_show(show_id, cfg, "overwrite", episode_ids, True) or [])
-        except Exception as exc:
-            job.log(f"Could not write .nfo: {exc}")
-    if written:
-        job.count("nfo", written)
-        job.log(f"NFO: rewrote {written} after a replaced file")
-
-
-def _shows_just_scanned(targets, season_id):
-    """Show ids a folder or season deep scan just walked, and the one season when that is all it walked."""
-    if season_id:
-        season = store.season_row(season_id)
-        if not season:
-            return [], None
-        return [str(season["show_id"])], {int(season["season_number"])}
-    return store.show_ids_by_path(targets or []), None
-
-
-def _trailers_enabled(job, cfg):
-    if job.media == "tv":
-        return bool(cfg.get("scan_download_tv_trailers"))
-    return bool(cfg.get("scan_download_trailers"))
-
-
-def _themes_enabled(job, cfg):
-    if job.media == "tv":
-        return bool(cfg.get("scan_download_tv_themes"))
-    return bool(cfg.get("scan_download_themes"))
-
-
-def _subtitles_enabled(job, cfg):
-    return bool(cfg.get("subs_download_tv" if job.media == "tv" else "subs_download_movies"))
-
-
-def _subtitle_units(job, roots, db):
-    """Movie or episode ids this scan covers: new and changed ones for an incremental scan, otherwise every one."""
-    if job.media == "movies":
-        if job.mode == "incremental":
-            ids = job.changed_ids()
-            if not ids:
-                return []
-            rows = db.fetchall("SELECT id FROM movies WHERE id = ANY(%s::uuid[]) AND COALESCE(path, '') <> ''", (ids,))
-        else:
-            rows = db.fetchall("SELECT id FROM movies WHERE root = ANY(%s) AND COALESCE(path, '') <> ''", (list(roots),))
-        return [("movie", str(row["id"])) for row in rows]
-    if job.mode == "incremental":
-        show_ids = job.changed_ids()
-        if not show_ids:
-            return []
-        rows = db.fetchall(
-            "SELECT id FROM tv_episodes WHERE show_id = ANY(%s::uuid[]) AND COALESCE(path, '') <> '' "
-            "ORDER BY season_number, episode_number", (show_ids,),
-        )
-    else:
-        rows = db.fetchall(
-            "SELECT e.id FROM tv_episodes e JOIN tv_shows s ON s.id = e.show_id "
-            "WHERE s.root = ANY(%s) AND COALESCE(e.path, '') <> '' ORDER BY s.sort_title, e.season_number, e.episode_number",
-            (list(roots),),
-        )
-    return [("episode", str(row["id"])) for row in rows]
-
-
-def _subtitles_from_scan(job, roots):
-    """Download missing subtitles from OpenSubtitles.com for the wanted languages."""
-    from curator.video import config, opensubs
-    from resonance import db
-    from resonance.errors import AppError
-
-    cfg = config.current()
-    if not _subtitles_enabled(job, cfg):
-        return
-    if not opensubs.can_download(cfg):
-        job.log("Subtitles: set the OpenSubtitles API key, username and password in Settings to download them")
-        return
-    units = _subtitle_units(job, roots, db)
-    if not units:
-        job.log("Subtitles: nothing to look up")
-        return
-    saved = failed = 0
-    remaining = None
-    job.progress(message=f"Subtitles 0/{len(units)}", processed=0, total=len(units), phase="subtitles", force=True)
-    for index, (kind, item_id) in enumerate(units, start=1):
-        if job.cancelled:
-            return
-        job.progress(message=f"Subtitles {index}/{len(units)}", processed=index, total=len(units), phase="subtitles")
-        try:
-            got, left = opensubs.auto_item(cfg, kind, item_id, job.log)
-            saved += got
-            if left is not None:
-                remaining = left
-        except opensubs.QuotaError as exc:
-            job.log(f"Subtitles: {exc}. The rest wait for the next scan")
-            break
-        except AppError as exc:
-            failed += 1
-            job.log(f"Subtitles: {exc}")
-            if exc.status == 401:
-                break
-    job.count("subtitles", saved)
-    if failed:
-        job.count("subtitle_failed", failed)
-    job.log(f"Subtitles: {saved} saved" + (f". {remaining} OpenSubtitles download{'s' if remaining != 1 else ''} left today" if remaining is not None else ""))
-
-
-def _fill_and_trailers(job, roots):
-    """Look up metadata and artwork, and download trailers and theme songs during that same stretch."""
-    from curator.video import config
-
-    cfg = config.current()
-    job.scan_trailers = _trailers_enabled(job, cfg)
-    job.scan_themes = _themes_enabled(job, cfg)
-    thread = None
-    if job.scan_trailers and cfg.get("scan_fill_missing", True):
-        thread = threading.Thread(
-            target=_trailers_from_scan, args=(job, roots), kwargs={"alongside": True},
-            name="scan-trailers", daemon=True,
-        )
-        thread.start()
-    theme_thread = None
-    if job.scan_themes and cfg.get("scan_fill_missing", True):
-        theme_thread = threading.Thread(
-            target=_themes_from_scan, args=(job, roots), kwargs={"alongside": True},
-            name="scan-themes", daemon=True,
-        )
-        theme_thread.start()
-    _fill_from_scan(job, roots)
-    if thread:
-        thread.join()
-    elif job.scan_trailers and not job.cancelled:
-        _trailers_from_scan(job, roots)
-    if theme_thread:
-        theme_thread.join()
-    elif job.scan_themes and not job.cancelled:
-        _themes_from_scan(job, roots)
-
-
-def _fill_from_scan(job, roots):
-    """Same idea as the music scan: local files first, then missing metadata and artwork."""
-    from curator.video import config, scrape
-
-    cfg = config.current()
-    if not cfg.get("scan_fill_missing", True):
-        job.log("Metadata and artwork during a scan are off in Settings")
-        return
-    if job.mode == "incremental":
-        ids = job.changed_ids()
-    elif job.mode == "deep":
-        ids = store.ids_in(job.media, roots, "all")
-    else:
-        ids = list(dict.fromkeys([*store.ids_with_gaps(job.media, roots, cfg), *job.changed_ids()]))
-    scrape.fill_during_scan(job, ids, limited=bool(cfg.get("scan_limited_art")))
-
-
-def _trailers_from_scan(job, roots, alongside=False):
-    """Download YouTube trailers that are already known and not on disk yet.
-
-    alongside keeps the lookup progress on screen. Several trailers download at once.
-    """
-    from curator.video import config, trailers
-    from resonance import db
-    from resonance.errors import AppError
-
-    cfg = config.current()
-    if not _trailers_enabled(job, cfg):
-        return
-    units = _trailer_units(job, roots, db)
-    if job.cancelled:
-        return
-    if not units:
-        job.log("Trailers: nothing to download")
-        if not alongside:
-            job.progress(message="Trailers: nothing to download", phase="trailers", force=True)
-        return
-    saved = skipped = 0
-    counts = threading.Lock()
-    workers = max(1, min(len(units), int(cfg.get("concurrency") or 4)))
-    if alongside:
-        with _lock:
-            _state["trailers_alongside"] = True
-            _state["trailers_done"] = False
-    if not alongside:
-        job.progress(message=f"Trailers 0/{len(units)}", processed=0, total=len(units), phase="trailers", force=True)
-    else:
-        job.log(f"Trailers: downloading {len(units)} while the lookup runs")
-
-    def one(index_unit):
-        nonlocal saved, skipped
-        index, unit = index_unit
-        if job.cancelled:
-            return
-        kind, item_id = unit[0], unit[1]
-        show_id = unit[2] if len(unit) > 2 else None
-        if not alongside:
-            job.progress(message=f"Trailers {index}/{len(units)}", processed=index, total=len(units), phase="trailers")
-        try:
-            with activity.holding() as hold:
-                hold(item_id, show_id)
-                path = trailers.download(kind, item_id, cfg, job.log, quiet_skip=True)
-        except AppError as exc:
-            job.log(str(exc))
-            job.count("trailer_failed")
-            return
-        with counts:
-            if path:
-                saved += 1
-                job.count("trailers")
-            else:
-                skipped += 1
-
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="trailer") as pool:
-        list(pool.map(one, enumerate(units, start=1)))
-    if alongside:
-        with _lock:
-            _state["trailers_alongside"] = False
-            _state["trailers_done"] = True
-    job.log(f"Trailers: {saved} saved, {skipped} already on disk or without a YouTube link")
-
-
-def _trailer_units(job, roots, db):
-    if job.media == "movies":
-        if job.mode == "incremental":
-            ids = job.changed_ids()
-            if not ids:
-                return []
-            rows = db.fetchall(
-                "SELECT id FROM movies WHERE id = ANY(%s::uuid[]) AND COALESCE(trailer, '') <> ''",
-                (ids,),
-            )
-        else:
-            rows = db.fetchall(
-                "SELECT id FROM movies WHERE root = ANY(%s) AND COALESCE(trailer, '') <> ''",
-                (list(roots),),
-            )
-        return [("movie", str(row["id"])) for row in rows]
-    if job.mode == "incremental":
-        show_ids = job.changed_ids()
-        if not show_ids:
-            return []
-        shows = db.fetchall(
-            "SELECT id FROM tv_shows WHERE id = ANY(%s::uuid[]) AND COALESCE(trailer, '') <> ''",
-            (show_ids,),
-        )
-        seasons = db.fetchall(
-            "SELECT id, show_id FROM tv_seasons WHERE show_id = ANY(%s::uuid[]) AND COALESCE(trailer, '') <> ''",
-            (show_ids,),
-        )
-    else:
-        shows = db.fetchall(
-            "SELECT id FROM tv_shows WHERE root = ANY(%s) AND COALESCE(trailer, '') <> ''",
-            (list(roots),),
-        )
-        seasons = db.fetchall(
-            """
-            SELECT x.id, x.show_id FROM tv_seasons x
-            JOIN tv_shows s ON s.id = x.show_id
-            WHERE s.root = ANY(%s) AND COALESCE(x.trailer, '') <> ''
-            """,
-            (list(roots),),
-        )
-    return [("show", str(row["id"])) for row in shows] + [
-        ("season", str(row["id"]), str(row["show_id"])) for row in seasons
-    ]
-
-
-def _themes_from_scan(job, roots, alongside=False):
-    """Download theme songs (theme.mp3) for movies or shows that do not have one on disk yet."""
-    from curator.video import config, trailers
-    from resonance import db
-    from resonance.errors import AppError
-
-    cfg = config.current()
-    if not _themes_enabled(job, cfg):
-        return
-    units = _theme_units(job, roots, db)
-    if job.cancelled:
-        return
-    if not units:
-        job.log("Theme songs: nothing to download")
-        if not alongside:
-            job.progress(message="Theme songs: nothing to download", phase="themes", force=True)
-        return
-    saved = skipped = 0
-    counts = threading.Lock()
-    workers = max(1, min(len(units), int(cfg.get("concurrency") or 4)))
-    if not alongside:
-        job.progress(message=f"Theme songs 0/{len(units)}", processed=0, total=len(units), phase="themes", force=True)
-    else:
-        job.log(f"Theme songs: checking {len(units)} while the lookup runs")
-
-    def one(index_unit):
-        nonlocal saved, skipped
-        index, unit = index_unit
-        if job.cancelled:
-            return
-        kind, item_id = unit[0], unit[1]
-        if not alongside:
-            job.progress(message=f"Theme songs {index}/{len(units)}", processed=index, total=len(units), phase="themes")
-        try:
-            with activity.holding() as hold:
-                hold(item_id)
-                path = trailers.download_theme(kind, item_id, cfg, job.log, quiet_skip=True)
-        except AppError as exc:
-            job.log(str(exc))
-            job.count("theme_failed")
-            return
-        with counts:
-            if path:
-                saved += 1
-                job.count("themes")
-            else:
-                skipped += 1
-
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="theme") as pool:
-        list(pool.map(one, enumerate(units, start=1)))
-    job.log(f"Theme songs: {saved} saved, {skipped} already on disk")
-
-
-def _theme_units(job, roots, db):
-    if job.media == "movies":
-        if job.mode == "incremental":
-            ids = job.changed_ids()
-            if not ids:
-                return []
-            rows = db.fetchall("SELECT id FROM movies WHERE id = ANY(%s::uuid[])", (ids,))
-        else:
-            rows = db.fetchall("SELECT id FROM movies WHERE root = ANY(%s)", (list(roots),))
-        return [("movie", str(row["id"])) for row in rows]
-    if job.mode == "incremental":
-        show_ids = job.changed_ids()
-        if not show_ids:
-            return []
-        shows = db.fetchall("SELECT id FROM tv_shows WHERE id = ANY(%s::uuid[])", (show_ids,))
-    else:
-        shows = db.fetchall("SELECT id FROM tv_shows WHERE root = ANY(%s)", (list(roots),))
-    return [("show", str(row["id"])) for row in shows]
-
-
-def _generate_missing_ep_thumbs(job, roots):
-    """Generate episode thumbnails using ffmpeg for episodes that have no thumb file.
-
-    Enabled by the scan_generate_ep_thumb setting (default: on).
-    Samples from ~40% into the file, skips black frames.
-    """
-    import shutil as _shutil
-    import subprocess as _subprocess
-    import tempfile as _tempfile
-    from curator.video import config
-    from resonance import db
-
-    cfg = config.current()
-    if not cfg.get("scan_generate_ep_thumb", True):
-        return
-    if not _shutil.which("ffmpeg") or not _shutil.which("ffprobe"):
-        job.log("Episode thumb generation skipped: ffmpeg not found")
-        return
-
-    rows = db.fetchall(
-        """
-        SELECT e.id, e.path, e.season_number, e.episode_number,
-               e.artwork
-        FROM tv_episodes e
-        JOIN tv_shows s ON s.id = e.show_id
-        WHERE s.root = ANY(%s)
-          AND e.path IS NOT NULL
-          AND e.path NOT LIKE 'missing://%%'
-          AND e.path NOT LIKE 'wanted://%%'
-          AND e.status IS DISTINCT FROM 'IGNORED'
-        ORDER BY e.path
-        """,
-        [db.text_array(roots)],
-    )
-    need_thumb = []
-    for row in rows:
-        art = row.get("artwork") or {}
-        if art.get("thumb") and os.path.isfile(str(art["thumb"])):
-            continue
-        path = str(row.get("path") or "")
-        if not path or not os.path.isfile(path):
-            continue
-        folder = os.path.dirname(path)
-        stem = os.path.splitext(os.path.basename(path))[0]
-        season_num = row.get("season_number")
-        ep_num = row.get("episode_number")
-        if season_num is not None and ep_num is not None:
-            ep_mark = naming.episode_mark(season_num, ep_num)
-            thumb_name = f"{stem}-{ep_mark}-thumb.jpg" if ep_mark else f"{stem}-thumb.jpg"
-        else:
-            thumb_name = f"{stem}-thumb.jpg"
-        thumb_path = os.path.join(folder, thumb_name)
-        if os.path.isfile(thumb_path):
-            continue
-        need_thumb.append((row, path, thumb_path))
-
-    if not need_thumb:
-        return
-
-    job.progress(message=f"Generating episode thumbs 0/{len(need_thumb)}", processed=0, total=len(need_thumb), phase="nfo", force=True)
-    for index, (row, vid_path, thumb_path) in enumerate(need_thumb, start=1):
-        if job.cancelled:
-            break
-        try:
-            # Get duration
-            probe_result = _subprocess.run(
-                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", vid_path],
-                capture_output=True, text=True, timeout=30
-            )
-            import json as _json
-            probe_data = _json.loads(probe_result.stdout or "{}")
-            duration = float((probe_data.get("format") or {}).get("duration") or 0)
-            if duration < 30:
-                continue
-            min_pos = max(30, duration * 0.05)
-            seek_start = max(0, duration * 0.40 - 60)
-            with _tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                tmp_path = tmp.name
-            try:
-                result = _subprocess.run(
-                    ["ffmpeg", "-y", "-v", "error",
-                     "-ss", str(seek_start), "-i", vid_path,
-                     "-t", "120",
-                     "-vf", r"select=gt(scene\,0.05),scale=1280:-2",
-                     "-frames:v", "1", "-q:v", "2", tmp_path],
-                    capture_output=True, timeout=60
-                )
-                if result.returncode != 0 or not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) == 0:
-                    _subprocess.run(
-                        ["ffmpeg", "-y", "-v", "error",
-                         "-ss", str(min(max(duration * 0.40, min_pos), duration * 0.90)),
-                         "-i", vid_path,
-                         "-vf", "scale=1280:-2",
-                         "-frames:v", "1", "-q:v", "2", tmp_path],
-                        capture_output=True, timeout=30
-                    )
-                if os.path.isfile(tmp_path) and os.path.getsize(tmp_path) > 0:
-                    import shutil as _sh2
-                    _sh2.move(tmp_path, thumb_path)
-                    store.set_artwork("tv_episodes", row["id"], {**(row.get("artwork") or {}), "thumb": thumb_path})
-            finally:
-                if os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-        except Exception as exc:
-            job.log(f"Episode thumb: {os.path.basename(vid_path)}: {exc}")
-        job.progress(message=f"Generating episode thumbs {index}/{len(need_thumb)}", processed=index, total=len(need_thumb), phase="nfo")
-
-
-def _nfos_from_scan(job, roots, targets=None):
-    """Write an .nfo for anything that does not have one. Optionally replace the ones that do."""
-    from curator.video import config, exports
-
-    cfg = config.current()
-    rewrite = bool(cfg.get("scan_rewrite_nfo"))
-    policy = "overwrite" if rewrite else "missing"
-    ids = store.ids_for_nfo(job.media, roots, targets or None, rewrite)
-    if job.cancelled:
-        return
-    if not ids:
-        job.log("NFO: nothing to write")
-        job.progress(message="NFO", processed=1, total=1, phase="nfo", force=True)
-        return
-    label = "Rewriting .nfo" if rewrite else "Writing missing .nfo"
-    written = 0
-    job.progress(message=f"{label} 0/{len(ids)}", processed=0, total=len(ids), phase="nfo", force=True)
-    for index, item_id in enumerate(ids, start=1):
-        if job.cancelled:
-            return
-        job.progress(message=f"{label} {index}/{len(ids)}", processed=index, total=len(ids), phase="nfo")
-        try:
-            with activity.holding() as hold:
-                hold(item_id)
-                made = exports.write_movie(item_id, cfg, policy) if job.media == "movies" else exports.write_show(item_id, cfg, policy)
-        except Exception as exc:
-            job.log(f"Could not write .nfo: {exc}")
-            continue
-        made = [made] if isinstance(made, str) else list(made or [])
-        if made:
-            written += len(made)
-            job.count("nfo", len(made))
-    note = " Existing files were replaced." if rewrite and written else ""
-    job.log(f"NFO: {written} written.{note}")
-
-
-def _note_copies(job):
-    from curator.video import copies
-
-    try:
-        count = copies.refresh_movies() if job.media == "movies" else copies.refresh_episodes()
-        if count:
-            job.log(f"Catalogue: {count} items have a higher-quality copy")
-    except Exception as exc:
-        job.log(f"Could not record duplicates and upgrades: {exc}")
+from curator.video.scan_stages import (  # noqa: E402,F401  kept in scan_stages.py; every old name still works
+    COPIES_SEED_LIMIT,
+    _fill_and_trailers,
+    _fill_from_scan,
+    _generate_missing_ep_thumbs,
+    _log_saved_artwork,
+    _nfos_from_scan,
+    _note_copies,
+    _note_copies_incremental,
+    _original_language_from_scan,
+    _clean_art_from_scan,
+    _fix_art_shapes_from_scan,
+    _refresh_replaced,
+    _shows_just_scanned,
+    _subtitle_units,
+    _subtitles_enabled,
+    _subtitles_from_scan,
+    _theme_units,
+    _themes_enabled,
+    _themes_from_scan,
+    _trailer_units,
+    _trailers_enabled,
+    _trailers_from_scan,
+)
 
 
 def _write_log(media, lines):
@@ -1691,6 +1231,14 @@ def _loose_nfo_arrived(unit, previous):
     return any(os.path.isfile(os.path.join(folder, name)) for name in names)
 
 
+def _stale_part_movie(previous, files):
+    """A stored multi-disc movie that still carries a disc folder's name as its title, or lists other files."""
+    if naming.part_dir_number(str(previous.get("title") or "").strip()) is not None:
+        return True
+    old = [path for path in (previous.get("parts") or []) if path]
+    return bool(old and files and not _same_paths(old, files))
+
+
 def _movie_can_skip(job, unit, known_files, known_movies):
     """An incremental or full scan leaves this movie alone. Deep never skips."""
     if job.mode == "deep":
@@ -1702,6 +1250,8 @@ def _movie_can_skip(job, unit, known_files, known_movies):
         return False
     previous = _previous_movie(unit, known_movies)
     if previous is None or not _nfo_same(previous):
+        return False
+    if _stale_part_movie(previous, files):
         return False
     if _loose_nfo_arrived(unit, previous):
         return False
@@ -1716,11 +1266,37 @@ def _files_without_episodes(files, rows):
     return [os.path.join(folder, name) for folder, name, _season in files if os.path.join(folder, name) not in stored]
 
 
+def _pinned_numbers(rows):
+    """{path: [(season, episode)]} for episodes whose season number was set by hand. A scan keeps those numbers."""
+    pinned = {}
+    for row in rows or []:
+        if row.get("path") and "season_number" in (row.get("locked_fields") or []):
+            pinned.setdefault(row["path"], []).append((row.get("season_number"), row.get("episode_number")))
+    return {path: sorted(pairs) for path, pairs in pinned.items()}
+
+
+def _sonarr_disagrees(show, previous, rows):
+    """True when Sonarr numbers a stored episode file differently from the way it is stored."""
+    from curator import sonarr
+
+    wanted = sonarr.episode_numbers(show, (previous or {}).get("tvdb_id"))
+    if not wanted:
+        return False
+    stored = {}
+    for row in rows or []:
+        if row.get("path"):
+            stored.setdefault(row["path"], []).append((row.get("season_number"), row.get("episode_number")))
+    pinned = _pinned_numbers(rows)
+    return any(sorted(pairs) != wanted[path] for path, pairs in stored.items() if path in wanted and path not in pinned)
+
+
 def _show_can_skip(job, show, previous, files, known_files, rows):
     """True when every episode file, the show .nfo, and the show folders are unchanged."""
     if job.mode == "deep" or not previous:
         return False
     if _files_without_episodes(files, rows):
+        return False
+    if _sonarr_disagrees(show, previous, rows):
         return False
     if not _nfo_same(previous):
         return False
@@ -1789,7 +1365,8 @@ def _probe_file(job, path, kind, known_files, folder_names):
     if summary is None and (job.mode == "deep" or changed or retry or disc_name or iso_pending):
         label = "Reading the disc name" if name_only else "Probing"
         job.log(f"{label} {os.path.basename(path)}")
-        summary = probe.analyze(path, _probe_token(job), open_iso=open_iso)
+        with job.timed("Probing video files"):
+            summary = probe.analyze(path, _probe_token(job), open_iso=open_iso, timed=job.timed)
         job.count("probed")
         if summary.get("probe_error"):
             job.count("probe_failed")
@@ -1801,7 +1378,8 @@ def _probe_file(job, path, kind, known_files, folder_names):
             info = naming.subtitle_info(video_name, real)
             if info:
                 external.append(info)
-    file_id = store.save_file(path, kind, size, mtime, summary, external)
+    with job.timed("Saving file details"):
+        file_id = store.save_file(path, kind, size, mtime, summary, external)
     return file_id, changed or summary is not None
 
 
@@ -2000,6 +1578,9 @@ def _guarded(job, worker, unit):
     except probe.Cancelled:
         job.stopped = True
         return
+    except FileNotFoundError:
+        # Deleted or moved while the scan ran. Not a failure: the next scan sees the folder as it is now.
+        job.log(f"Gone during the scan: {unit.get('path') or ''}")
     except Exception as exc:
         logger.exception("scan item failed: %s", unit.get("path"))
         job.fail(unit.get("path") or "", f"{type(exc).__name__}: {exc}" if job.verbose else exc)
@@ -2275,7 +1856,9 @@ def _movie_units(job, root, start=None, on_ready=None, on_folder=None):
             use_folder = exclusive or (not folder_taken and _prefers_folder(dirpath, files))
             if use_folder:
                 folder_taken = True
-            unit = {"root": root, "folder": dirpath, "path": dirpath if use_folder else files[0],
+            # Several parts in one disc folder are one movie in the release folder. A lone disc folder stays as it is.
+            unit_folder = _release_folder(dirpath, root) if use_folder and len(files) > 1 else dirpath
+            unit = {"root": root, "folder": unit_folder, "path": unit_folder if use_folder else files[0],
                     "files": files, "disc": None, "own": dirpath != root and use_folder}
             units.append(unit)
             ready.append(unit)
@@ -2283,6 +1866,31 @@ def _movie_units(job, root, start=None, on_ready=None, on_folder=None):
         if len(units) % 200 == 0:
             job.progress(message=f"Reading folders: {len(units)} movies found")
     return units
+
+
+def _release_folder(dirpath, root):
+    """The movie's own folder. A disc folder (CD1, Disc 2) belongs to the release folder above it.
+
+    Without this a movie whose parts sit in one CD1 folder was filed, and named, as "CD1".
+    """
+    if naming.part_dir_number(os.path.basename(os.path.normpath(dirpath))) is None:
+        return dirpath
+    parent = os.path.dirname(os.path.normpath(dirpath))
+    same = lambda left, right: os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+    if not parent or same(parent, root) or not os.path.normcase(os.path.normpath(parent)).startswith(
+            os.path.normcase(os.path.normpath(root))):
+        return dirpath
+    return parent
+
+
+def _release_targets(targets, root):
+    """Scan targets with each disc folder replaced by its release folder, so every part is seen together."""
+    out = []
+    for target in targets:
+        folder = _release_folder(target, root) if os.path.isdir(target) else target
+        if folder not in out:
+            out.append(folder)
+    return out
 
 
 def _movie_name(unit):
@@ -2483,7 +2091,8 @@ def _process_movie_held(job, unit, known_files, known_movies, listings, hold):
         else:
             file_changed = file_changed or changed
     unchanged = (previous is not None and not file_changed and previous["nfo_path"] == nfo_path
-                 and previous["nfo_mtime"] == nfo_time and previous["file_id"] == file_id)
+                 and previous["nfo_mtime"] == nfo_time and previous["file_id"] == file_id
+                 and not _stale_part_movie(previous, unit["files"]))
     if job.mode == "incremental" and unchanged:
         if (previous["artwork"] or {}) != art:
             store.set_artwork("movies", previous["id"], art)
@@ -2535,6 +2144,9 @@ def _process_movie_held(job, unit, known_files, known_movies, listings, hold):
         values["certifications"] = data["certifications"]
     if replaced:
         kept_metadata(previous, values)
+    if naming.part_dir_number(str(values.get("title") or "").strip()) is not None:
+        # "CD2" is a disc folder, not the movie: an earlier scan, or an .nfo written from it, left it as the title.
+        values["title"] = parsed["title"]
     store.claim_wanted_movie(ids.get("tmdb"), unit["path"], folder)
     movie_id, inserted = store.save_movie(values)
     hold(movie_id)
@@ -2724,6 +2336,8 @@ def _scan_movie_targets(job, root, targets):
     if not _has_entries(root):
         job.fail(root, "The movie folder is empty or not mounted")
         return
+    # A row filed under a CD1 folder is rescanned from the release folder above it, where every part is visible.
+    targets = _release_targets(targets, root)
     _count_for_deep(job, [(target, root) for target in targets if os.path.isdir(target)], tv=False)
     known_files = store.known_files([root])
     known_movies = store.known_movies([root])
@@ -2856,11 +2470,35 @@ def _episode_files(job, show):
     return found, empty
 
 
-def _episode_numbers(job, folder, name, folder_season, names):
+def _sonarr_numbered(parsed, pairs):
+    """parsed with Sonarr's (season, episode) pairs in place of the ones read from the file name."""
+    parts = []
+    for season, number in pairs:
+        if parts and parts[-1]["season"] == season:
+            parts[-1]["episodes"].append(number)
+        else:
+            parts.append({"season": season, "episodes": [number]})
+    return {"season": parts[0]["season"], "episodes": parts[0]["episodes"], "parts": parts,
+            "title": (parsed or {}).get("title")}
+
+
+def _episode_numbers(job, folder, name, folder_season, names, sonarr_pairs=None):
     parsed = naming.parse_episode(name, folder_season)
+    renumber = {}
+    if sonarr_pairs:
+        before = naming.episode_pairs(parsed) if parsed else []
+        if before != sonarr_pairs:
+            if parsed and len(before) == len(sonarr_pairs):
+                renumber = dict(zip(before, sonarr_pairs))
+            parsed = _sonarr_numbered(parsed, sonarr_pairs)
+            parsed["sonarr_renumbered"] = True
     stem = os.path.splitext(name)[0]
     combined = _first_existing(folder, names, [f"{stem}.nfo"])
     blocks = nfo.read_episodes(combined) if combined else []
+    for block in blocks:
+        moved = renumber.get((block.get("season"), block.get("episode")))
+        if moved:
+            block["season"], block["episode"] = moved
     if parsed is None:
         numbered = [block for block in blocks if block.get("season") is not None and block.get("episode") is not None]
         if not numbered:
@@ -2979,6 +2617,20 @@ def _save_one_season(job, show, show_id, season, folder, season_nfo, names, fold
 def _save_loose_seasons(job, show, show_id, names, folders, values, data, occupied, only_changed=False):
     """Read a season .nfo that has no episode files beside it."""
     loose = _loose_season_nfos(show, names, occupied)
+    if loose:
+        # A season .nfo left behind for a season that Sonarr does not have (episodes were renumbered) stays unread,
+        # and the empty season it made earlier is removed.
+        from curator import sonarr
+
+        ids = (values or {}).get("ids") or (data or {}).get("ids") or {}
+        listed = sonarr.known_seasons(show, ids.get("tvdb"))
+        if listed:
+            stale = [item[0] for item in loose if item[0] not in listed]
+            if stale:
+                dropped = store.drop_empty_seasons(show_id, stale)
+                if dropped:
+                    job.log(f"Removed empty season{'s' if len(dropped) != 1 else ''} {', '.join(str(n) for n in dropped)}: Sonarr has no such season")
+                loose = [item for item in loose if item[0] in listed]
     if only_changed and loose:
         stored = store.season_nfo_index(show_id)
         loose = [item for item in loose if _stored_nfo_differs(stored.get(item[0]), item[2])]
@@ -3027,7 +2679,7 @@ def _scan_show_held(job, root, show, known_files, units, hold, file_list=None):
         for folder in empty_folders:
             job.note_empty(folder)
     if file_list is None:
-        job.fail(show, "Could not read all episode files in show")
+        _show_unreadable(job, show)
         return None
     store.claim_wanted_show(ids.get("tvdb"), ids.get("tmdb"), show)
     show_id, inserted = store.save_show(values)
@@ -3038,6 +2690,12 @@ def _scan_show_held(job, root, show, known_files, units, hold, file_list=None):
     episodes = []
     folders = {}
     known_now = store.known_episodes(show_id)
+    from curator import sonarr
+
+    sonarr_numbers = sonarr.episode_numbers(show, ids.get("tvdb"))
+    pinned = _pinned_numbers(known_now.values())
+    sonarr_numbers = {**sonarr_numbers, **pinned}
+    renumbered = 0
     for folder, name, folder_season in file_list:
         path = os.path.join(folder, name)
         parsed_guess = naming.parse_episode(name, folder_season)
@@ -3058,12 +2716,17 @@ def _scan_show_held(job, root, show, known_files, units, hold, file_list=None):
                 folders.pop(folder, None)
         if folder not in folders:
             folders[folder] = artwork.listing(folder)
-        parsed_episode, nfo_paths, blocks = _episode_numbers(job, folder, name, folder_season, folders[folder])
+        parsed_episode, nfo_paths, blocks = _episode_numbers(
+            job, folder, name, folder_season, folders[folder], sonarr_numbers.get(path))
         if parsed_episode is None:
             job.unmatched(path)
             continue
+        if parsed_episode.get("sonarr_renumbered") and path not in pinned:
+            renumbered += 1
         episodes.append({"path": path, "folder": folder, "name": name, "parsed": parsed_episode,
                          "nfo_paths": nfo_paths, "blocks": blocks, "folder_season": folder_season})
+    if renumbered:
+        job.log(f"{values['title']}: {renumbered} file{'s' if renumbered != 1 else ''} numbered the way Sonarr numbers them, not by file name")
     season_ids = {}
     season_dirs = {}
     for episode in episodes:
@@ -3196,6 +2859,7 @@ def _process_episode_held(job, unit, hold):
         if key in replaced_keys:
             job.note_replaced_episode(unit["show_id"], episode_id)
         job.note_changed(unit["show_id"])
+        job.note_changed_episode(episode_id)
         job.count("added" if inserted else "updated")
         if index == 0:
             verb = "Added" if inserted else "Updated"
@@ -3204,12 +2868,20 @@ def _process_episode_held(job, unit, hold):
         store.apply_release_names(file_id, release_facts)
 
 
+def _show_unreadable(job, show):
+    """A show folder whose files could not all be listed. One deleted while the scan ran is only logged."""
+    if not os.path.isdir(show):
+        job.log(f"Gone during the scan: {show}")
+        return
+    job.fail(show, "Could not read all episode files in show")
+
+
 def _take_show(job, root, show, known_shows, known_files, episode_index, stream):
     """Leave an unchanged show listed, or parse it and hand its changed episodes to the workers."""
     previous = known_shows.get(show)
     file_list, empty_folders = _episode_files(job, show)
     if file_list is None:
-        job.fail(show, "Could not read all episode files in show")
+        _show_unreadable(job, show)
         return None, set()
     for folder in empty_folders:
         job.note_empty(folder)
@@ -3454,8 +3126,17 @@ def _scan_one_episode(job, episode_id):
     job.progress(message=f"Reading {code}", force=True)
     _scan_show(job, root, show["path"], known_shows, known_files, units)
     path = os.path.normcase(episode["path"])
-    kept = [unit for unit in units if os.path.normcase(unit["path"]) == path]
-    job.log(f"{job.mode.capitalize()} scan of {show['title']} {code}: {os.path.basename(episode['path'])}")
+    if os.path.isfile(episode["path"]):
+        kept = [unit for unit in units if os.path.normcase(unit["path"]) == path]
+        job.log(f"{job.mode.capitalize()} scan of {show['title']} {code}: {os.path.basename(episode['path'])}")
+    else:
+        # A placeholder for a file that is not there: look for the file that carries this number, by its name or by Sonarr.
+        want = (int(episode["season_number"]), int(episode["episode_number"]))
+        kept = [unit for unit in units if want in naming.episode_pairs(unit["parsed"])]
+        job.log(f"{job.mode.capitalize()} scan of {show['title']} {code}: no file stored, looking for one in the show folder")
+        if not kept:
+            job.log(f"No file in the show folder is numbered {code}, by its name or by Sonarr")
+            return
     if not kept:
         job.log("That episode file is not in the show folder any more")
         return

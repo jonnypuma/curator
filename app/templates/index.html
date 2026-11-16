@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="curator-build" content="{{ page_build }}">
     <title>Curator Media Manager</title>
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
     <link rel="alternate icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
@@ -47,11 +48,15 @@
             </button>
             <button type="button" role="tab" class="media-tab" data-media="sets" aria-selected="false" title="Movie sets">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="12" height="14" rx="1.5"/><path d="M7 7V4.5A1.5 1.5 0 0 1 8.5 3h11A1.5 1.5 0 0 1 21 4.5v12a1.5 1.5 0 0 1-1.5 1.5H15"/></svg>
-                <span>Sets</span>
+                <span>Movie sets</span>
             </button>
             <button type="button" role="tab" class="media-tab" data-media="tv" aria-selected="false" title="TV shows">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m8 2 4 5 4-5"/></svg>
-                <span>TV Shows</span>
+                <span>TV shows</span>
+            </button>
+            <button type="button" role="tab" class="media-tab" data-media="musicvideos" aria-selected="false" title="Music videos">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="15" height="14" rx="2"/><path d="m17 10 5-3v10l-5-3"/></svg>
+                <span>Music videos</span>
             </button>
             </nav>
             <button type="button" id="queue-pill" class="pill queue-pill hidden" title="Webhook queue" data-action="queue-open"></button>
@@ -100,6 +105,20 @@
                     <option value="candle">Candlelit Library</option>
                 </select>
             </label>
+            <span class="tools-wrap">
+                <button type="button" class="icon-btn" data-action="tools-toggle" title="Tools" aria-label="Tools" aria-haspopup="true" aria-expanded="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2.4-.6-.6-2.4z"/></svg>
+                </button>
+                <div id="tools-menu" class="scan-menu hidden" role="menu">
+                    <button type="button" class="group-item" role="menuitem" data-action="tools-wishlist">Upgrade wishlist</button>
+                    <button type="button" class="group-item" role="menuitem" data-action="tools-cleanup">Bulk duplicate cleanup…</button>
+                    <button type="button" class="group-item" role="menuitem" data-action="tools-journeys">Follow imports</button>
+                    <button type="button" class="group-item" role="menuitem" data-action="tools-history">Activity history</button>
+                    <button type="button" class="group-item" role="menuitem" data-action="tools-disk">Disk space</button>
+                    <button type="button" class="group-item" role="menuitem" data-action="tools-orphans">Orphan report</button>
+                    <button type="button" class="group-item" role="menuitem" data-action="tools-trash">Recycle bin</button>
+                </div>
+            </span>
             <button type="button" class="icon-btn" data-action="insights-open" title="Library analytics" aria-label="Library analytics">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v18h18"/><path d="M8 17v-5M13 17V8M18 17v-8"/></svg>
             </button>
@@ -117,6 +136,28 @@
         <button type="button" data-pane-tab="right" aria-pressed="false" class="pane-music">Details</button>
     </nav>
     <main>
+        <section id="musicvideos-stage" class="musicvideos-stage" aria-label="Music videos">
+            <div class="musicvideos-main">
+                <div class="job-actions">
+                    <input id="musicvideos-filter" type="search" placeholder="Filter by artist, title, album or year" autocomplete="off">
+                    <label class="choice"><input type="checkbox" id="musicvideos-dupes"> Duplicates only</label>
+                    <label class="choice"><input type="checkbox" id="musicvideos-corrupt"> Corrupt only</label>
+                </div>
+                <div class="job-actions">
+                    <button type="button" class="btn-ghost" data-action="musicvideos-scan" data-mode="incremental">Scan</button>
+                    <button type="button" class="btn-ghost" data-action="musicvideos-scan" data-mode="full">Full scan</button>
+                    <button type="button" class="btn-ghost" data-action="musicvideos-lookup" title="Fill a blank album, genre or plot from TheAudioDB">Look up blanks</button>
+                    <button type="button" class="btn-ghost" data-action="musicvideos-nfo">Write .nfo</button>
+                    <button type="button" class="btn-ghost" data-action="musicvideos-check" title="Decode the first and last minute of the videos shown">Quick integrity check</button>
+                    <button type="button" class="btn-ghost" data-action="musicvideos-check-full" title="Decode the whole of each video shown">Full integrity check</button>
+                    <button type="button" class="btn-ghost" data-action="insights-export" title="Save the shown list as CSV or XML (format in Settings, Files)">Export</button>
+                    <button type="button" class="btn-danger" data-action="cleanup-open">Bulk duplicate cleanup…</button>
+                </div>
+                <p id="musicvideos-status" class="scan-status"></p>
+                <div id="musicvideos-list"></div>
+            </div>
+            <aside id="musicvideos-detail" class="musicvideos-detail"></aside>
+        </section>
         <section id="video-stage" class="video-stage">
             <div id="video-left" class="video-left">
                 <div class="video-toolbar">
@@ -218,6 +259,7 @@
                                     <option value="type-live">Live</option>
                                     <option value="type-compilation">Compilations</option>
                                     <option value="new">New / unprocessed only</option>
+                                    <option value="latest">Latest added (30 days)</option>
                                     <option value="gold">100% matched (MusicBrainz)</option>
                                     <option value="silver">Partially matched</option>
                                     <option value="unmatched">Unmatched</option>
@@ -231,6 +273,7 @@
                                     <option value="duplicates">Duplicates</option>
                                     <option value="upgrade">Upgrade available</option>
                                     <option value="prune-held">Not found, kept by prune safety</option>
+                                    <option value="corrupt">Corrupt files (Audit audio)</option>
                                     <option value="locked">Locked</option>
                                     <option value="case-folders">Folders that differ only by capital letters</option>
                                     <option value="missing-releases">Studio albums in the discography that are not on disk</option>
@@ -269,6 +312,7 @@
                 <div class="music-ribbon-row">
                     <div id="music-ribbons" class="video-ribbons music-ribbons" role="toolbar" aria-label="Music quick filters"></div>
                     <div class="music-ribbon-tools">
+                        <button type="button" class="link" id="music-columns-btn" data-action="music-col-columns" aria-expanded="false" title="Choose the columns of the list">Columns</button>
                         <button type="button" class="link" data-action="expand-all">Expand all</button>
                         <button type="button" class="link" data-action="insights-export" title="Save the shown list as CSV or XML (format in Settings, Files)">Export</button>
                         <button type="button" class="icon-btn view-toggle-btn" id="music-view-toggle" data-action="music-view-toggle" title="Switch to Poster Grid view" aria-label="Switch to Poster Grid view">
@@ -278,8 +322,11 @@
                         <span class="size-toggle hidden" role="group" aria-label="Card size" data-size-toggle="music"><button type="button" class="btn-ghost" data-action="grid-size" data-grid-size="small" aria-pressed="false" title="Small cards">S</button><button type="button" class="btn-ghost" data-action="grid-size" data-grid-size="medium" aria-pressed="true" title="Medium cards">M</button><button type="button" class="btn-ghost" data-action="grid-size" data-grid-size="large" aria-pressed="false" title="Large cards, with badges">L</button></span>
                     </div>
                 </div>
+                <div id="music-columns-menu" class="video-columns-menu hidden"></div>
+                <div id="music-col-filter" class="video-col-filter hidden"></div>
             </div>
             <div class="tree-pane">
+                <div id="music-head" class="mm-head hidden" role="rowgroup"></div>
                 <div class="pane-content" id="tree"><div class="tree-loading" role="status"><span class="activity-spin" aria-hidden="true"></span><span>Loading...</span></div></div>
                 <div id="filter-overlay" class="filter-overlay hidden" role="status" aria-live="polite">
                     <span class="activity-spin" aria-hidden="true"></span>
@@ -417,8 +464,7 @@
                                 <button type="button" data-action="batch-rescan-mode" data-mode="deep" class="active">Deep</button>
                             </div>
                         </div>
-                        <button type="button" class="btn-ghost btn-remove" data-action="batch-forget" title="Removes the checked albums from the library. The files stay on disk.">Remove from library</button>
-                        <button type="button" class="btn-ghost btn-remove" data-action="batch-delete" title="Deletes the checked album folders and the files inside them.">Delete from disk</button>
+                        <button type="button" class="title-delete batch-trash" data-action="batch-delete" title="Remove the checked albums - from the library (files stay) or from disk" aria-label="Remove the checked albums"></button>
                     </div>
                     <div class="select-row select-row-more">
                         <button type="button" class="btn-ghost" data-action="batch-edit-fields" title="Set the same genres, label, edition, and other shared fields on every checked album.">Edit fields…</button>
@@ -519,6 +565,22 @@
             </div>
         </div>
     </div>
+    <div id="trash-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="trash-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="trash-title">Recycle bin</h2>
+                <button type="button" class="btn-ghost" data-close="trash-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="trash-summary" class="muted"></p>
+                <div id="trash-list"></div>
+                <div class="job-actions">
+                    <button type="button" class="btn-ghost" data-action="trash-reload">Refresh</button>
+                    <button type="button" id="trash-empty" class="btn-danger" data-action="trash-empty">Empty recycle bin</button>
+                </div>
+            </div>
+        </div>
+    </div>
     <div id="danger-modal" class="modal modal-alert hidden" role="dialog" aria-modal="true" aria-labelledby="danger-title">
         <div class="modal-content">
             <div class="modal-header">
@@ -576,6 +638,23 @@
             <div class="modal-body" id="settings-body"></div>
             <div class="settings-footer">
                 <button type="button" id="save-settings" data-action="save-settings">Save settings</button>
+            </div>
+        </div>
+    </div>
+    <div id="setup-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+        <div class="modal-content modal-wide setup-content">
+            <div class="modal-header">
+                <h2 id="setup-title">Set up Curator</h2>
+                <button type="button" class="btn-ghost" data-action="setup-close" title="Close the wizard. Run it again from Settings, About.">Close</button>
+            </div>
+            <nav id="setup-progress" class="setup-progress" aria-label="Setup steps"></nav>
+            <p id="setup-status" class="settings-status" aria-live="polite"></p>
+            <div class="modal-body" id="setup-body"></div>
+            <div class="settings-footer setup-footer">
+                <button type="button" class="btn-ghost" id="setup-back" data-action="setup-back">Back</button>
+                <span class="setup-footer-gap"></span>
+                <button type="button" class="btn-ghost" id="setup-skip" data-action="setup-skip" title="Go to the next step without saving this one">Skip</button>
+                <button type="button" id="setup-next" data-action="setup-next">Start</button>
             </div>
         </div>
     </div>
@@ -839,7 +918,8 @@
                 <div class="stepper" id="video-scan-steps">
                     <span data-phase="walk">Folders and files</span>
                     <span data-phase="lookup">Metadata and artwork</span>
-                    <span data-phase="trailers">Trailers</span>
+                    <span data-phase="cleanart">Clean artwork</span>
+                    <span data-phase="trailers">Trailers and subtitles</span>
                     <span data-phase="nfo">Write .nfo</span>
                 </div>
                 <div class="scan-meter">
@@ -862,30 +942,6 @@
                 <p><button type="button" id="video-scan-start" data-action="video-scan-start">Start scan</button>
                 <button type="button" id="video-apply-match" class="btn-ghost hidden" data-action="video-apply-match">Apply match</button></p>
                 </div>
-            </div>
-        </div>
-    </div>
-    <div id="scan-history-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="scan-history-title">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2 id="scan-history-title">Saved scans</h2>
-                <button type="button" class="btn-ghost" data-close="scan-history-modal">Close</button>
-            </div>
-            <div class="modal-body" id="scan-history-list"></div>
-        </div>
-    </div>
-    <div id="scan-report-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="scan-report-title">
-        <div class="modal-content modal-wide">
-            <div class="modal-header">
-                <h2 id="scan-report-title">Scan report</h2>
-                <button type="button" class="btn-ghost" data-close="scan-report-modal">Close</button>
-            </div>
-            <div class="modal-body">
-                <div class="job-actions">
-                    <button type="button" class="btn-ghost" data-action="scan-report-copy">Copy</button>
-                    <button type="button" class="btn-ghost" data-action="scan-report-export">Export</button>
-                </div>
-                <pre id="scan-report-body" class="console"></pre>
             </div>
         </div>
     </div>
@@ -981,6 +1037,10 @@
                 <p class="muted">Leave these off to use Overwrite metadata and Overwrite artwork for this library under Settings. Turn one on to replace that for this scrape. An image is replaced only when the new one is larger.</p>
                 <label class="choice"><input type="checkbox" id="video-scrape-rewrite-nfo"> Rewrite .nfo files this time</label>
                 <p class="muted">On replaces each .nfo this scrape writes. A .nfo.bak is kept when that backup option is on. Off writes an .nfo only when one is missing. It starts from Rewrite .nfo files at the end of a scan.</p>
+                <div class="log-toolbar">
+                    <span class="section-label">Scrape log</span>
+                    <button type="button" class="btn-ghost" data-action="scrape-history">Saved scrapes</button>
+                </div>
                 <pre id="video-scrape-log" class="console">Idle.</pre>
             </div>
             <div class="modal-footer">
@@ -989,6 +1049,30 @@
                     <p id="video-scrape-status" class="scan-status" role="status">Ready.</p>
                     <button type="button" id="video-scrape-start" data-action="video-scrape-start">Start scrape</button>
                 </div>
+            </div>
+        </div>
+    </div>
+    <div id="scan-history-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="scan-history-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="scan-history-title">Saved scans</h2>
+                <button type="button" class="btn-ghost" data-close="scan-history-modal">Close</button>
+            </div>
+            <div class="modal-body" id="scan-history-list"></div>
+        </div>
+    </div>
+    <div id="scan-report-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="scan-report-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="scan-report-title">Scan report</h2>
+                <button type="button" class="btn-ghost" data-close="scan-report-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="job-actions">
+                    <button type="button" class="btn-ghost" data-action="scan-report-copy">Copy</button>
+                    <button type="button" class="btn-ghost" data-action="scan-report-export">Export</button>
+                </div>
+                <pre id="scan-report-body" class="console"></pre>
             </div>
         </div>
     </div>
@@ -1037,8 +1121,144 @@
                     <label>Library <select id="insights-media"><option value="all">All libraries</option><option value="music">Music</option><option value="movies">Movies</option><option value="tv">TV shows</option></select></label>
                     <label>Path <select id="insights-root"><option value="">All paths</option></select></label>
                     <span id="insights-totals" class="muted"></span>
+                    <span class="ins-tools muted">The library tools are in the Tools menu in the header.</span>
                 </div>
                 <div id="insights-body"></div>
+            </div>
+        </div>
+    </div>
+    <div id="cleanup-modal" class="modal modal-alert hidden" role="dialog" aria-modal="true" aria-labelledby="cleanup-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="cleanup-title">Bulk duplicate cleanup</h2>
+                <button type="button" class="btn-ghost" data-close="cleanup-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div id="cleanup-warning" class="danger-warn" role="alert"></div>
+                <p class="muted">Keeps the best copy of each movie, episode and album, and among copies of equal quality the one Radarr, Sonarr or Lidarr uses. A copy is left alone when the copy to keep is missing or corrupt, or when it is another edition, is locked, is marked Not duplicates, shares its file with another episode, or has tracks the kept album lacks.</p>
+                <div class="choice-row">
+                    <label class="choice"><input type="checkbox" data-cleanup-media="movies" checked> Movies</label>
+                    <label class="choice"><input type="checkbox" data-cleanup-media="tv" checked> TV shows</label>
+                    <label class="choice"><input type="checkbox" data-cleanup-media="music" checked> Music</label>
+                    <label class="choice"><input type="checkbox" data-cleanup-media="musicvideos" checked> Music videos</label>
+                    <label class="choice"><input type="checkbox" id="cleanup-upgrades"> Also delete weaker copies (Upgrade available)</label>
+                </div>
+                <div class="job-actions">
+                    <span id="cleanup-status" class="scan-status"></span>
+                    <button type="button" id="cleanup-preview" class="btn-ghost" data-action="cleanup-preview">Preview</button>
+                </div>
+                <div id="cleanup-list"></div>
+                <div class="job-actions">
+                    <button type="button" class="btn-ghost" data-close="cleanup-modal">Cancel</button>
+                    <button type="button" id="cleanup-confirm" class="btn-danger" data-action="cleanup-confirm" disabled>Delete copies</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="twin-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="twin-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="twin-title">Same show in several folders</h2>
+                <button type="button" class="btn-ghost" data-close="twin-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">These folders hold the same show. Delete removes a whole folder (to the recycle bin when it is on). Not duplicates hides the pill for that pair.</p>
+                <div id="twin-list"></div>
+            </div>
+        </div>
+    </div>
+    <div id="journeys-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="journeys-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="journeys-title">Follow imports</h2>
+                <button type="button" class="btn-ghost" data-close="journeys-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">Each item Radarr, Sonarr, Lidarr or Bazarr sends, each item restored from the recycle bin and each library update started here, from the webhook through the waiting queue, the scan, the scrape and the file jobs to each player's library update. Green is done, blue is running, amber is waiting, red failed and grey not reached yet. Point at a step for its detail. This window refreshes itself.</p>
+                <div class="jr-toolbar">
+                    <label class="choice"><input type="checkbox" data-action="journeys-active"> Only imports on their way</label>
+                    <span id="journeys-count" class="muted"></span>
+                    <button type="button" class="btn-ghost" data-action="journeys-refresh">Refresh</button>
+                    <button type="button" class="btn-ghost" data-action="journeys-clear">Clear finished</button>
+                </div>
+                <div id="journeys-list" class="jr-list"></div>
+            </div>
+        </div>
+    </div>
+    <div id="twin-artists-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="twin-artists-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="twin-artists-title">Same artist in several folders</h2>
+                <button type="button" class="btn-ghost" data-close="twin-artists-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">These folders hold the same artist: the same MusicBrainz id, or the same name once capitals and punctuation are ignored. Merge joins them (the window after this one shows what moves). Not duplicates hides the pill for that pair.</p>
+                <div id="twin-artists-list"></div>
+            </div>
+        </div>
+    </div>
+    <div id="wishlist-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="wishlist-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="wishlist-title">Upgrade wishlist</h2>
+                <button type="button" class="btn-ghost" data-close="wishlist-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="wishlist-targets" class="muted"></p>
+                <div class="job-actions">
+                    <input id="wishlist-filter" type="search" placeholder="Filter" autocomplete="off">
+                    <button type="button" id="wishlist-search-all" class="btn-ghost" data-action="wishlist-search-all">Search shown</button>
+                </div>
+                <div id="wishlist-list"></div>
+            </div>
+        </div>
+    </div>
+    <div id="history-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="history-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="history-title">Activity history</h2>
+                <button type="button" class="btn-ghost" data-close="history-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="job-actions">
+                    <input id="history-search" type="search" placeholder="Search titles, paths and reasons" autocomplete="off">
+                    <select id="history-action" aria-label="Action"></select>
+                </div>
+                <div id="history-list"></div>
+            </div>
+        </div>
+    </div>
+    <div id="disk-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="disk-title">
+        <div class="modal-content modal-wide insights-modal">
+            <div class="modal-header">
+                <h2 id="disk-title">Disk space</h2>
+                <button type="button" class="btn-ghost" data-close="disk-modal">Close</button>
+            </div>
+            <div class="modal-body"><div id="disk-body" class="ins-grid"></div></div>
+        </div>
+    </div>
+    <div id="orphans-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="orphans-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="orphans-title">Orphan report</h2>
+                <button type="button" class="btn-ghost" data-close="orphans-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">Files Sonarr or Lidarr keep but do not use, library files in an app's folder that the app does not know, app records whose file is gone, and stray files nothing lists. Delete moves the file to the recycle bin and asks the app to rescan.</p>
+                <div class="job-actions">
+                    <span id="orphans-status" class="scan-status"></span>
+                    <button type="button" class="btn-ghost" data-action="orphans-test">Test connections</button>
+                    <button type="button" id="orphans-scan" class="btn-ghost" data-action="orphans-scan">Check now</button>
+                </div>
+                <div id="orphans-test"></div>
+                <div id="orphans-list"></div>
+                <h3 class="kodi-report-title">Kodi</h3>
+                <p class="muted">Kodi's movies and episodes compared with the library, file by file, through the Kodi path rows under Settings, Integrations. Nothing changes until you press Clean or Scan in Kodi. Music is not included.</p>
+                <div class="job-actions">
+                    <span id="kodi-report-status" class="scan-status"></span>
+                    <button type="button" id="kodi-report-check" class="btn-ghost" data-action="orphans-kodi-check">Compare with Kodi</button>
+                </div>
+                <div id="kodi-report-list"></div>
             </div>
         </div>
     </div>
@@ -1135,10 +1355,11 @@
         <div class="modal-content modal-wide">
             <div class="modal-header">
                 <h2 id="queue-title">Queue</h2>
+                <button type="button" class="btn-ghost" data-action="journeys-open" title="Each import's path from the webhook to the player library update">Follow imports</button>
                 <button type="button" class="btn-ghost" data-close="queue-modal">Close</button>
             </div>
             <div class="modal-body">
-                <div id="queue-now" class="queue-now" aria-live="polite"></div>
+                <div id="queue-now" class="queue-now" aria-live="polite"><span class="queue-now-idle muted">Idle</span></div>
                 <div class="queue-tabs" role="tablist" aria-label="Queue">
                     <button type="button" class="is-active" data-action="queue-tab" data-tab="webhook" role="tab" aria-selected="true">Webhook Queue</button>
                     <button type="button" data-action="queue-tab" data-tab="scan" role="tab" aria-selected="false">Scan Queue</button>
@@ -1419,6 +1640,31 @@
             </div>
         </div>
     </div>
+    <div id="ratings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="ratings-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h2 id="ratings-title">Update ratings</h2>
+                    <p class="muted" id="ratings-summary"></p>
+                </div>
+                <button type="button" class="btn-ghost" data-close="ratings-modal">Cancel</button>
+            </div>
+            <div class="modal-body">
+                <label class="choice rating-all"><input type="checkbox" id="ratings-all" data-ratings-all> <span>Select / deselect all</span></label>
+                <div id="ratings-sources" class="rating-sources"><p class="muted">Loading…</p></div>
+                <p class="muted">Each ticked source is asked for its own score. The local IMDb data costs no request. Scores from sources you leave out are kept as they are.</p>
+                <fieldset class="rating-filter" id="ratings-filter">
+                    <legend>Only update items where the score stored for a ticked source has…</legend>
+                    <label class="choice"><input type="checkbox" data-rf="below"> a rating below <input type="number" data-rf-n="below" min="0" max="10" step="0.1" value="1"></label>
+                    <label class="choice"><input type="checkbox" data-rf="votes_below"> fewer than <input type="number" data-rf-n="votes_below" min="0" step="1" value="10"> votes</label>
+                    <label class="choice"><input type="checkbox" data-rf="votes_above"> more than <input type="number" data-rf-n="votes_above" min="0" step="1" value="1000"> votes</label>
+                    <label class="choice"><input type="checkbox" data-rf="unrated"> no score yet</label>
+                    <p class="muted">Nothing ticked updates every item. Ticking several updates an item that meets any of them. A missing score counts as below the limit and as fewer votes.</p>
+                </fieldset>
+                <p><button type="button" id="ratings-run" data-action="ratings-run">Update ratings</button></p>
+            </div>
+        </div>
+    </div>
     <div id="delete-copy-modal" class="modal modal-alert hidden" role="dialog" aria-modal="true" aria-labelledby="delete-copy-title">
         <div class="modal-content">
             <div class="modal-header">
@@ -1443,7 +1689,11 @@
                     <h2 id="language-title">Language defaults</h2>
                     <p class="muted">Search finds files from the probed tracks. Save sets the default inside MKV files on this page.</p>
                 </div>
-                <button type="button" class="btn-ghost" data-close="language-modal">Close</button>
+                <div class="lang-head-actions">
+                    <span id="lang-status" class="muted" aria-live="polite"></span>
+                    <button type="button" data-action="lang-save">Save all</button>
+                    <button type="button" class="btn-ghost" data-close="language-modal">Close</button>
+                </div>
             </div>
             <div class="modal-body">
                 <div class="lang-toolbar">
@@ -1457,7 +1707,6 @@
                     <label>Language
                         <select id="lang-lang"></select>
                     </label>
-                    <button type="button" data-action="lang-save">Save all</button>
                 </div>
                 <div class="lang-toolbar">
                     <label>Scope
@@ -1469,12 +1718,73 @@
                     <button type="button" data-action="lang-search">Search</button>
                 </div>
                 <p id="lang-note" class="muted"></p>
-                <p id="lang-status" class="muted"></p>
                 <div id="lang-list"></div>
                 <p id="lang-pager"></p>
             </div>
         </div>
     </div>
+    <div id="clean-fanart-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="clean-fanart-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="clean-fanart-title">Clean artwork</h2>
+                <button type="button" class="btn-ghost" data-close="clean-fanart-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="clean-fanart-scope"></p>
+                <fieldset class="clean-fanart-mode">
+                    <legend>Artwork types</legend>
+                    <div id="clean-fanart-types" class="art-type-boxes"></div>
+                    <label class="choice"><input type="checkbox" id="clean-fanart-fill" checked> Also download missing clean pictures: fanart or character art an item does not have, and extra fanart up to the Maximum extra fanart in Settings (clean pictures that are not there yet)</label>
+                    <p class="muted">The artwork that should carry no title or logo. A replaced picture becomes the one the artwork window marks Suggested for that type, and an item without that type gets it. Extra fanart: a picture that is there more than once keeps its largest copy, and one with a title or logo on it is swapped for a clean picture that is not there yet; what is taken out goes to the recycle bin. Any artwork with the wrong shape: every picture of the item (poster, fanart, banner, disc art and the rest; not logos or clear art, which come in every shape) whose file is the wrong shape for its type, such as a fanart saved as the poster, gets the picture the artwork window suggests for that type. For a show, its season artwork and every episode thumb are checked too. The files are checked on disk first, so an item whose pictures are all the right shape is not looked up. Pictures you picked or uploaded in the artwork window and locked items are left alone, and a replaced file stays in the artwork window, so it can be picked again.</p>
+                </fieldset>
+                <fieldset class="clean-fanart-mode" id="clean-fanart-fanart-modes">
+                    <legend>Replace</legend>
+                    <label class="choice"><input type="radio" name="clean-fanart-mode" value="cleanfanart" checked> Only pictures with a title or logo on them (the file matches a picture TMDB or Fanart.tv lists with a language)</label>
+                    <label class="choice"><input type="radio" name="clean-fanart-mode" value="cleanfanart_any"> That, and pictures that match nothing online (made or found elsewhere)</label>
+                    <label class="choice"><input type="radio" name="clean-fanart-mode" value="cleanfanart_suggested"> Any picture that is not the suggested one, also when it is listed as clean (TMDB lists many backdrops with the title on them without a language)</label>
+                </fieldset>
+                <div id="clean-fanart-players" class="player-boxes"></div>
+                <p class="muted">Kodi drops its cached copy of each replaced picture and shows the new one the next time the item is on screen; Plex, Emby and Jellyfin refresh the item. No rescan, and Kodi gets one request at a time. Leave a player unticked to update it later with Update artwork in players.</p>
+                <div class="job-actions"><button type="button" data-action="video-clean-fanart-start">Start</button></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="player-art-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="player-art-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="player-art-title">Update artwork in players</h2>
+                <button type="button" class="btn-ghost" data-close="player-art-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="player-art-scope"></p>
+                <p class="muted">Every picture of these items is sent again: Kodi drops its cached copies and shows the files the next time the items are on screen; Plex, Emby and Jellyfin refresh the items. No rescan, and Kodi gets one request at a time.</p>
+                <div id="player-art-players" class="player-boxes"></div>
+                <div class="job-actions"><button type="button" data-action="video-player-art-start">Start</button></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="update-banner" class="update-banner hidden" role="status">
+        <span>Curator was updated while this page was open. Reload to use the new version.</span>
+        <button type="button" data-action="page-reload">Reload</button>
+        <button type="button" class="btn-ghost" data-action="page-reload-later">Later</button>
+    </div>
+
+    <div id="webhook-call-modal" class="modal modal-wide hidden" role="dialog" aria-modal="true" aria-labelledby="webhook-call-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="webhook-call-title">Webhook call</h2>
+                <button type="button" class="btn-ghost" data-action="queue-copy-call">Copy</button>
+                <button type="button" class="btn-ghost" data-close="webhook-call-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <p id="webhook-call-note" class="muted"></p>
+                <pre id="webhook-call-body" class="webhook-call-body"></pre>
+            </div>
+        </div>
+    </div>
+
     <div id="duplicates-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="duplicates-title">
         <div class="modal-content modal-wide">
             <div class="modal-header">
@@ -1486,6 +1796,7 @@
             </div>
             <div class="modal-body">
                 <p id="duplicates-scan"><button type="button" data-action="scan-duplicates">Fingerprint tracks that have no hash yet</button></p>
+                <p><button type="button" class="btn-danger" data-action="cleanup-open">Bulk duplicate cleanup…</button></p>
                 <div id="duplicates-list"></div>
             </div>
         </div>
@@ -1525,6 +1836,7 @@
                         <option value="music">Music</option>
                         <option value="movies">Movies</option>
                         <option value="tv">TV shows</option>
+                        <option value="musicvideos">Music videos</option>
                     </select>
                 </label>
                 <div id="path-music-options">
@@ -1544,8 +1856,10 @@
         <div class="modal-content modal-wide">
             <div class="modal-header">
                 <h2 id="video-art-title">Artwork</h2>
+                <div id="video-art-players" class="player-boxes player-boxes-inline"></div>
                 <button type="button" class="btn-ghost" data-close="video-art-modal">Close</button>
             </div>
+            <div id="video-art-bulk" class="art-bulk hidden" aria-live="polite"></div>
             <div class="art-workspace">
             <div id="video-art-compare" class="art-compare hidden">
                 <div class="art-compare-stage">
@@ -1589,6 +1903,14 @@
                 <p class="muted" id="saved-filter-note"></p>
                 <label>Name <input id="saved-filter-name" type="text" maxlength="80" autocomplete="off"></label>
                 <label id="saved-filter-tag-row">Tag <input id="saved-filter-tag" type="text" maxlength="100" autocomplete="off" placeholder="Optional"></label>
+                <label id="saved-filter-playlist-row" class="choice"><input id="saved-filter-playlist" type="checkbox"> Kodi smart playlist (folder under Settings, Files)</label>
+                <div id="saved-filter-action-row" class="saved-filter-action">
+                    <label>Action <select id="saved-filter-action"><option value="">None</option><option value="scrape">Scrape what is missing</option><option value="integrity">Quick integrity check</option><option value="trailers">Download trailers</option></select></label>
+                    <label class="saved-filter-when">every <select id="saved-filter-every"><option value="day">day</option><option value="week">week</option></select></label>
+                    <label class="saved-filter-when" id="saved-filter-weekday-row" hidden>on <select id="saved-filter-weekday"><option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option><option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option></select></label>
+                    <label class="saved-filter-when">at <select id="saved-filter-hour"><option value="0">00:00</option><option value="1">01:00</option><option value="2">02:00</option><option value="3" selected>03:00</option><option value="4">04:00</option><option value="5">05:00</option><option value="6">06:00</option><option value="7">07:00</option><option value="8">08:00</option><option value="9">09:00</option><option value="10">10:00</option><option value="11">11:00</option><option value="12">12:00</option><option value="13">13:00</option><option value="14">14:00</option><option value="15">15:00</option><option value="16">16:00</option><option value="17">17:00</option><option value="18">18:00</option><option value="19">19:00</option><option value="20">20:00</option><option value="21">21:00</option><option value="22">22:00</option><option value="23">23:00</option></select></label>
+                    <p class="muted">The action runs for what the filter matches at that hour, as a job in the Jobs panel. The search box and a few ribbons only work on screen and are left out.</p>
+                </div>
                 <p><button type="button" data-action="saved-filter-confirm">Save</button></p>
             </div>
         </div>
@@ -1621,10 +1943,10 @@
     </div>
     {% for name in [
         'core/ui-sync', 'core/constants', 'core/state', 'core/events', 'core/api', 'music/library', 'core/scan',
-        'music/tree', 'music/center', 'music/editor', 'music/match', 'music/artwork', 'music/artist-actions',
-        'music/batch', 'core/settings', 'core/folders', 'core/settings-tabs', 'core/video-settings', 'core/pattern-builder', 'core/music-pattern-builder', 'video/subtitles-find', 'core/about', 'core/outbound', 'core/panes', 'core/vgrid', 'core/restore', 'core/insights', 'core/automation', 'core/trakt', 'core/actions', 'core/keyboard', 'core/jobs', 'music/tools', 'music/lyrics-editor',
+        'music/tree', 'music/columns', 'music/center', 'music/editor', 'music/match', 'music/artwork', 'music/artist-actions',
+        'music/batch', 'core/settings', 'core/folders', 'core/settings-tabs', 'core/video-settings', 'core/pattern-builder', 'core/music-pattern-builder', 'video/subtitles-find', 'core/about', 'core/trash', 'core/orphans', 'core/disk', 'core/musicvideos', 'core/cleanup', 'core/activity-history', 'core/wishlist', 'core/twins', 'core/compare', 'core/journeys', 'core/tools-menu', 'core/imdb-data', 'core/outbound', 'core/panes', 'core/vgrid', 'core/restore', 'core/insights', 'core/automation', 'core/trakt', 'core/setup', 'core/actions', 'core/keyboard', 'core/jobs', 'music/tools', 'music/lyrics-editor',
         'core/layout', 'music/cells', 'core/menus', 'music/badges', 'core/palette', 'core/util',
-        'core/media', 'video/common', 'video/selection', 'video/scan', 'video/movies', 'video/sets', 'video/tv', 'video/edit', 'video/scrape', 'video/files', 'video/languages', 'video/tags', 'video/list-keys', 'video/sub_sync', 'video/view',
+        'core/media', 'video/common', 'video/duplicates', 'video/selection', 'video/scan', 'video/movies', 'video/sets', 'video/tv', 'video/edit', 'video/scrape', 'video/files', 'video/languages', 'video/tags', 'video/list-keys', 'video/sub_sync', 'video/view',
         'core/live', 'boot'
     ] %}
     <script src="{{ url_for('static', filename='js/' ~ name ~ '.js') }}"></script>
@@ -1690,7 +2012,7 @@
                             <div><dt><kbd>Ctrl</kbd>+<kbd>K</kbd></dt><dd>Open Command Palette</dd></div>
                             <div><dt><kbd>?</kbd></dt><dd>Keyboard Shortcuts Cheat Sheet</dd></div>
                             <div><dt><kbd>/</kbd></dt><dd>Focus Library Search / Filter</dd></div>
-                            <div><dt><kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>4</kbd></dt><dd>Switch media tabs (Music, Movies, Sets, TV)</dd></div>
+                            <div><dt><kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>5</kbd></dt><dd>Switch media tabs (Music, Movies, Movie sets, TV shows, Music videos)</dd></div>
                             <div><dt><kbd>←</kbd> / <kbd>→</kbd></dt><dd>Switch media tabs (when tab bar focused)</dd></div>
                             <div><dt><kbd>Esc</kbd></dt><dd>Close active modal, menu, or zoom view</dd></div>
                         </dl>

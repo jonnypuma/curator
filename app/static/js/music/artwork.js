@@ -819,9 +819,12 @@ async function writeOpenNfo() {
         const artistId = source.id || state.artistId;
         if (artistId) {
             await api(`/api/artists/${artistId}/nfo`, { method: "POST", body: {} });
+            // The file is written when the call returns. Clear the purple pill now, before anything slow (the
+            // library reload can take a long time while a scan runs), so it never lingers after a good write.
+            clearArtistNfoStale(artistId);
             notify("Artist NFO written.", "info");
             if (state.artistId === artistId) await selectArtist(artistId);
-            else await loadLibrary();
+            else refreshLibraryItems([], [artistId]).catch(() => {});
             await showArtistNfoModal(artistId);
             return;
         }
@@ -832,10 +835,14 @@ async function writeOpenNfo() {
     if (source.subject === "album") {
         const albumId = source.id || (state.album && state.album.album && state.album.album.id);
         if (albumId && (!state.album || !state.album.album || state.album.album.id !== albumId)) {
-            await api(`/api/albums/${albumId}/nfo`, { method: "POST", body: {} });
+            const data = await api(`/api/albums/${albumId}/nfo`, { method: "POST", body: {} });
+            // The file is written when the call returns; use its answer to clear the purple pill straight away
+            // rather than waiting for a library reload, which can take a long time while a scan runs.
+            applyAlbumNfoStale(albumId, !!(data && data.album && data.album.nfo_stale));
+            renderTree();
             notify("Album NFO written.", "info");
-            await loadLibrary();
             await showAlbumNfoModal(albumId);
+            refreshLibraryItems([albumId]).catch(() => {});
             return;
         }
         await writeAlbumNfo();

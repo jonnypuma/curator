@@ -18,6 +18,7 @@ HOSTS = {
     "api.tvmaze.com": "tvmaze",
     "webservice.fanart.tv": "fanart",
     "graphql.anilist.co": "anilist",
+    "ofdb.cc": "ofdbcc",
     "musicbrainz.org": "musicbrainz",
     "ws.audioscrobbler.com": "lastfm",
     "api.acoustid.org": "acoustid",
@@ -25,8 +26,8 @@ HOSTS = {
 
 LABELS = {
     "tmdb": "TMDB", "tvdb": "TheTVDB", "omdb": "OMDb", "trakt": "Trakt", "tvmaze": "TVMaze",
-    "fanart": "Fanart.tv", "anilist": "AniList", "musicbrainz": "MusicBrainz", "lastfm": "Last.fm",
-    "acoustid": "AcoustID", "radarr": "Radarr", "sonarr": "Sonarr", "lidarr": "Lidarr", "bazarr": "Bazarr",
+    "fanart": "Fanart.tv", "anilist": "AniList", "ofdbcc": "Open Film Database", "musicbrainz": "MusicBrainz", "lastfm": "Last.fm",
+    "acoustid": "AcoustID", "theaudiodb": "TheAudioDB", "radarr": "Radarr", "sonarr": "Sonarr", "lidarr": "Lidarr", "bazarr": "Bazarr",
     "kodi": "Kodi", "emby": "Emby", "jellyfin": "Jellyfin", "plex": "Plex", "navidrome": "Navidrome",
 }
 

@@ -453,7 +453,7 @@ def _run_lidarr_item(item, notify_players=False):
         )
     except Exception:
         logger.exception("could not start Lidarr scan for %s", label)
-        return
+        return {"status": "failed", "message": "The scan could not start"}
     try:
         message = scanner.scan_release(row["id"], item["album"], item.get("artist"))
         status = "cancelled" if message == "Scan cancelled" else "completed"
@@ -483,6 +483,7 @@ def _run_lidarr_item(item, notify_players=False):
                 notify.request("music", folders=folders, items=items, message=f"Updated: {label}")
             except Exception:
                 logger.info("player notify failed after Lidarr scan for %s", label, exc_info=True)
+        return {"id": row["id"], "status": status, "message": message}
     except ScanCancelled:
         db.execute(
             """
@@ -492,6 +493,7 @@ def _run_lidarr_item(item, notify_players=False):
             """,
             (row["id"],),
         )
+        return {"id": row["id"], "status": "cancelled", "message": "Scan cancelled"}
     except Exception as exc:
         logger.exception("lidarr scan failed")
         db.execute(
@@ -502,11 +504,14 @@ def _run_lidarr_item(item, notify_players=False):
             """,
             (str(exc), row["id"]),
         )
+        return {"id": row["id"], "status": "failed", "message": str(exc)}
 
 
 def scan_lidarr_now(album_path, artist_path, label):
-    """Index one imported album on this thread. The paused library scan keeps its lock."""
-    _run_lidarr_item({"album": album_path, "artist": artist_path, "label": label or album_path})
+    """Index one imported album on this thread. The paused library scan keeps its lock.
+
+    Returns {"id", "status", "message"} of the scan job (status completed, cancelled or failed)."""
+    return _run_lidarr_item({"album": album_path, "artist": artist_path, "label": label or album_path})
 
 
 def current_job():

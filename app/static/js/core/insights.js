@@ -433,9 +433,10 @@ function bindInsights() {
 function exportIds(media) {
     if (media === "movies") return visibleMovies().map((movie) => movie.id);
     if (media === "sets") return visibleSets().map((set) => set.id);
+    if (media === "musicvideos") return musicVideosShown().map((item) => item.id);
     if (media === "music") {
-        const artists = typeof pendingArtists === "function" && typeof orderedArtists === "function"
-            ? pendingArtists(orderedArtists(state.artists || []))
+        const artists = typeof musicShownArtists === "function"
+            ? musicShownArtists()
             : (state.artists || []);
         return artists.flatMap((artist) => (artist.albums || []).map((album) => album.id));
     }
@@ -443,7 +444,8 @@ function exportIds(media) {
 }
 
 async function exportVideoList() {
-    const media = state.media === "tv" ? "tv" : state.media === "sets" ? "sets" : state.media === "music" ? "music" : "movies";
+    const media = state.media === "tv" ? "tv" : state.media === "sets" ? "sets" : state.media === "music" ? "music"
+        : state.media === "musicvideos" ? "musicvideos" : "movies";
     const ids = exportIds(media);
     if (!ids.length) {
         notify("Nothing to export. Clear the filter or the ribbons first.", "warning");

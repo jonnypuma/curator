@@ -11,7 +11,11 @@ LABELS = {
     "tmdb": "TMDB",
     "tvdb": "TheTVDB",
     "omdb": "OMDb",
+    "musicbrainz": "MusicBrainz",
+    "theaudiodb": "TheAudioDB",
 }
+# Free services with no key: the test only checks that the service answers (through the usual request pacing).
+KEYLESS = {"musicbrainz", "theaudiodb"}
 _FIELDS = {
     "lastfm": "lastfm_key",
     "fanart": "fanart_key",
@@ -20,8 +24,10 @@ _FIELDS = {
     "tvdb": "tvdb_key",
     "omdb": "omdb_key",
 }
-# A known MusicBrainz artist. The request only checks that Fanart.tv accepts the key.
+# A known MusicBrainz artist (The Beatles). The Fanart.tv request only checks that Fanart.tv accepts the key; the
+# MusicBrainz and TheAudioDB requests only check that the service answers for it.
 _FANART_ARTIST = "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+_KNOWN_ARTIST = _FANART_ARTIST
 
 
 def chosen_key(typed, saved, cleared=False):
@@ -70,13 +76,15 @@ def test_service(service, typed=None, cleared=False):
     label = LABELS.get(service)
     if not label:
         raise ValueError(service)
+    from resonance.connections import clear, note
+
+    if service in KEYLESS:
+        return _test_keyless(service, label)
     saved = ""
     text = str(typed or "").strip()
     if not (text and set(text) - {"*", "•"}) and not cleared:
         saved = (settings.load().get(_FIELDS[service]) or "").strip()
     key = chosen_key(typed, saved, cleared)
-    from resonance.connections import clear, note
-
     if not key:
         logger.info("connection test %s failed: no API key", label)
         note(service, f"{label} has no API key")
@@ -94,6 +102,44 @@ def test_service(service, typed=None, cleared=False):
         logger.info("connection test %s failed: rejected", label)
         note(service, f"{label} rejected the API key")
     return {"ok": bool(ok), "service": label}
+
+
+def _test_keyless(service, label):
+    from resonance.connections import clear, note
+
+    try:
+        ok = _CHECK[service]("")
+    except Exception as exc:
+        logger.info("connection test %s failed: %s", label, type(exc).__name__)
+        note(service, f"{label} connection test failed: {exc}")
+        return {"ok": False, "service": label}
+    if ok:
+        logger.info("connection test %s successful", label)
+        clear(service)
+    else:
+        logger.info("connection test %s failed: no answer", label)
+        note(service, f"{label} did not answer as expected")
+    return {"ok": bool(ok), "service": label}
+
+
+def musicbrainz_ok(status, body):
+    return 200 <= status < 300 and isinstance(body, dict) and body.get("id") == _KNOWN_ARTIST
+
+
+def theaudiodb_ok(status, body):
+    return 200 <= status < 300 and isinstance(body, dict) and "artists" in body
+
+
+def _musicbrainz(_key):
+    status, body = _fetch("get", f"https://musicbrainz.org/ws/2/artist/{_KNOWN_ARTIST}", params={"fmt": "json"})
+    return musicbrainz_ok(status, body)
+
+
+def _theaudiodb(_key):
+    from resonance.sources.audiodb import API
+
+    status, body = _fetch("get", f"{API}/artist-mb.php", params={"i": _KNOWN_ARTIST})
+    return theaudiodb_ok(status, body)
 
 
 def _lastfm(key):
@@ -162,4 +208,6 @@ _CHECK = {
     "tmdb": _tmdb,
     "tvdb": _tvdb,
     "omdb": _omdb,
+    "musicbrainz": _musicbrainz,
+    "theaudiodb": _theaudiodb,
 }

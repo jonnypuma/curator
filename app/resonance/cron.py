@@ -86,13 +86,8 @@ PRESETS_BY_ID = {preset["id"]: preset for preset in PRESETS}
 PRESETS_BY_CRON = {preset["cron"]: preset for preset in PRESETS}
 
 
-def get_timezone():
-    """Resolve the local timezone configured in CMM_TIMEZONE (or TZ) or system fallback.
-
-    CMM_TIMEZONE takes precedence over TZ so the app TZ setting and the cron TZ agree.
-    zoneinfo handles DST transitions correctly, including the spring-forward gap and the
-    fall-back fold; naive datetimes are never used for scheduling.
-    """
+def server_timezone():
+    """The zone the server uses when Settings has none saved: CMM_TIMEZONE, then TZ, then the system clock."""
     for env_var in ("CMM_TIMEZONE", "TZ"):
         tz_name = os.environ.get(env_var, "").strip()
         if tz_name:
@@ -104,6 +99,42 @@ def get_timezone():
         return datetime.datetime.now().astimezone().tzinfo or datetime.timezone.utc
     except Exception:
         return datetime.timezone.utc
+
+
+def get_timezone():
+    """Resolve the zone schedules run in: the one saved in Settings, else CMM_TIMEZONE, else TZ, else the system's.
+
+    CMM_TIMEZONE takes precedence over TZ so the app TZ setting and the cron TZ agree. A zone saved in Settings wins
+    over both, so it can be changed without editing docker-compose or restarting. zoneinfo handles DST transitions
+    correctly, including the spring-forward gap and the fall-back fold; naive datetimes are never used for scheduling.
+    """
+    from resonance import settings
+
+    saved = settings.timezone_name()
+    if saved:
+        try:
+            return zoneinfo.ZoneInfo(saved)
+        except Exception:
+            logger.warning("Invalid timezone %r in Settings, falling back", saved)
+    return server_timezone()
+
+
+def zone_label(tz):
+    return str(getattr(tz, "key", str(tz)))
+
+
+def server_timezone_name():
+    """Name of the zone used with no saved choice, for the Settings page."""
+    return zone_label(server_timezone())
+
+
+def zone_names():
+    """Zone names to offer in Settings, such as Europe/Oslo. Empty when the system has no zone database."""
+    try:
+        names = zoneinfo.available_timezones()
+    except Exception:
+        return []
+    return sorted(name for name in names if not name.startswith(("posix/", "right/")) and name != "localtime")
 
 
 def ordinal(n):
@@ -417,7 +448,7 @@ def schedule_summary(cfg):
             "is_valid": False,
             "next_run": None,
             "next_run_display": "",
-            "timezone": str(getattr(tz, "key", str(tz))),
+            "timezone": zone_label(tz),
         }
     cron_expr = get_effective_cron(cfg)
     is_valid = validate_cron(cron_expr)
@@ -450,7 +481,7 @@ def schedule_summary(cfg):
         "is_valid": is_valid,
         "next_run": next_run_iso,
         "next_run_display": next_run_display,
-        "timezone": str(getattr(tz, "key", str(tz))),
+        "timezone": zone_label(tz),
     }
 
 

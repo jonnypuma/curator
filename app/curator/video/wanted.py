@@ -2,7 +2,8 @@
 
 Radarr or Sonarr is asked first. A wanted row is saved only when that add is accepted,
 including when the title is already in Radarr or Sonarr. A rejection, a missing
-integration, or a show with no TVDB id leaves Curator unchanged.
+integration, or a show with no TVDB id leaves Curator unchanged. Sonarr 5 and newer
+can add a show by its TMDB id instead.
 """
 from __future__ import annotations
 
@@ -95,27 +96,30 @@ def add_show(source, source_id, title, year, root, search=None):
     tvdb_id = source_id if source == "tvdb" else sonarr.tvdb_for_tmdb(tmdb_id)
     if not tvdb_id and tmdb_id:
         tvdb_id = asyncio.run(_tvdb_from_tmdb(tmdb_id))
-    if not tvdb_id:
-        raise AppError("This show has no TVDB id, so Sonarr cannot add it.", 400)
-    result = sonarr.ensure_series(tvdb_id, search=search)
+    if not tvdb_id and not (tmdb_id and sonarr.tmdb_ok()):
+        raise AppError("This show has no TVDB id, so Sonarr cannot add it. Sonarr 5 and newer can add it by its TMDB id.", 400)
+    # Sonarr 5 and newer add a show by its TMDB id when there is no TVDB id. Sonarr may know the TVDB id itself.
+    result = sonarr.ensure_series(tvdb_id or None, search=search, tmdb_id=tmdb_id or None)
+    tvdb_id = tvdb_id or str(result.get("tvdb_id") or "")
     searched = bool(result.get("search"))
+    column, value = ("tvdb_id", tvdb_id) if tvdb_id else ("tmdb_id", tmdb_id)
     existing = db.fetchone(
-        "SELECT id FROM tv_shows WHERE tvdb_id = %s AND NOT wanted LIMIT 1", (tvdb_id,)
+        f"SELECT id FROM tv_shows WHERE {column} = %s AND NOT wanted LIMIT 1", (value,)
     )
     if existing:
         return _answer(existing["id"], False, result.get("action"), _already("Already in the library", searched), searched)
-    wanted = db.fetchone("SELECT id FROM tv_shows WHERE wanted AND tvdb_id = %s LIMIT 1", (tvdb_id,))
+    wanted = db.fetchone(f"SELECT id FROM tv_shows WHERE wanted AND {column} = %s LIMIT 1", (value,))
     if wanted:
         return _answer(wanted["id"], True, result.get("action"), _already("Already waiting for this show", searched), searched)
-    ids = {"tvdb": tvdb_id}
+    ids = {"tvdb": tvdb_id} if tvdb_id else {}
     if tmdb_id:
         ids["tmdb"] = tmdb_id
     show_id, _inserted = store.save_show({
-        "path": f"wanted://show/tvdb/{tvdb_id}",
+        "path": f"wanted://show/tvdb/{tvdb_id}" if tvdb_id else f"wanted://show/tmdb/{tmdb_id}",
         "root": root,
         "title": title,
         "year": _year(year),
-        "tvdb_id": tvdb_id,
+        "tvdb_id": tvdb_id or None,
         "tmdb_id": tmdb_id or None,
         "ids": ids,
         "wanted": True,

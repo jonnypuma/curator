@@ -14,10 +14,12 @@ class TraktRatings:
     def __init__(self, client, client_id):
         self.client = client
         self.client_id = client_id
+        self._ids = {}                        # Trakt ids already looked up: a show's episodes ask once, not once each
 
     def _headers(self):
         return {
-            "Content-Type": "application/json", "trakt-api-version": "2", "trakt-api-key": self.client_id,
+            "Content-Type": "application/json", "Accept": "application/json",
+            "trakt-api-version": "2", "trakt-api-key": self.client_id,
         }
 
     async def _ratings(self, path):
@@ -31,12 +33,15 @@ class TraktRatings:
     async def _trakt_id(self, kind, key):
         if not self.client_id or not key:
             return None
+        if (kind, key) in self._ids:
+            return self._ids[(kind, key)]
         try:
             data = await self.client.get(f"{API}/{kind}/{key}", headers=self._headers())
         except ScrapeError:
             return None
         value = ((data or {}).get("ids") or {}).get("trakt") if isinstance(data, dict) else None
-        return str(value) if value else None
+        self._ids[(kind, key)] = str(value) if value else None
+        return self._ids[(kind, key)]
 
     async def _bundle(self, kind, path, key, known):
         ratings = await self._ratings(path) if key else {}

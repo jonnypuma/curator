@@ -20,6 +20,7 @@ LABELS = {
     "no_audio": "No audio",
     "audio_lang": "Unknown audio language",
     "short": "Shorter than expected",
+    "corrupt": "Corrupt",
 }
 
 
@@ -29,11 +30,12 @@ def warnings(row, audio_tracks, duration=None, runtime_minutes=None):
         return []
     if str(row.get("container") or "").lower() in DISC_CONTAINERS:
         return []
-    found = []
+    from curator.video.integrity import corrupt
+
+    found = ["corrupt"] if corrupt(row) else []
     size = row.get("size_bytes")
     if size is not None and int(size) == 0:
-        found.append("no_size")
-        return found
+        return ["no_size"]
     if not row.get("video_codec"):
         found.append("no_video")
     tracks = audio_tracks or []

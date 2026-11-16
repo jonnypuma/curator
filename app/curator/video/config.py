@@ -4,8 +4,12 @@ from __future__ import annotations
 import os
 import re
 
-MOVIE_SOURCES = ("tmdb", "tvdb", "omdb", "rottentomatoes", "metacritic", "trakt", "anilist", "ofdb", "fanart")
-TV_SOURCES = ("tmdb", "tvdb", "tvmaze", "omdb", "rottentomatoes", "metacritic", "trakt", "anilist", "ofdb", "fanart")
+MOVIE_SOURCES = ("tmdb", "tvdb", "omdb", "rottentomatoes", "metacritic", "trakt", "anilist", "ofdb", "fanart", "ofdbcc")
+TV_SOURCES = ("tmdb", "tvdb", "tvmaze", "omdb", "rottentomatoes", "metacritic", "trakt", "anilist", "ofdb", "fanart", "ofdbcc")
+# On for a new install. OFDb (ofdb.de) is mostly German information, so it is off until switched on; the Open Film
+# Database (ofdb.cc) comes last, as the last resort for what the others left empty.
+DEFAULT_MOVIE_SOURCES = tuple(name for name in MOVIE_SOURCES if name != "ofdb")
+DEFAULT_TV_SOURCES = tuple(name for name in TV_SOURCES if name != "ofdb")
 ART_SOURCES = ("fanart", "tmdb", "tvdb")
 TV_ART_SOURCES = ART_SOURCES + ("tvmaze",)
 MOVIE_META = ("title", "original_title", "english_title", "mpaa", "certification", "tagline", "plot",
@@ -188,6 +192,18 @@ def _policies(data, fallback):
     return out
 
 
+def mediainfo_default():
+    """CMM_WRITE_SIDECARS: whether media info files are written until Settings says otherwise. 0, false, no or off turn it off."""
+    return os.environ.get("CMM_WRITE_SIDECARS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def writes_mediainfo(kind):
+    """True when a .cmm_mediainfo.xml file may be written beside this video. kind is "movie" or "episode"."""
+    key = "write_mediainfo_tv" if kind == "episode" else "write_mediainfo_movies"
+    value = current().get(key)
+    return mediainfo_default() if value is None else bool(value)
+
+
 def probe_workers_default():
     """CMM_PROBE_WORKERS, clamped to 1–20. Compose uses 8 when the variable is unset."""
     raw = os.environ.get("CMM_PROBE_WORKERS", "").strip()
@@ -196,6 +212,13 @@ def probe_workers_default():
     except ValueError:
         number = 8
     return max(1, min(8, number))
+
+
+def _clean_art_types(value, allowed):
+    """The artwork types the Clean artwork scan stage looks at: a list from the allowed ones, fanart when empty."""
+    picked = [str(item).strip().lower() for item in (value if isinstance(value, list) else [])]
+    picked = [item for item in dict.fromkeys(picked) if item in allowed]
+    return picked or ["fanart"]
 
 
 def normalize(data):
@@ -207,8 +230,8 @@ def normalize(data):
     rating = str(data.get("default_rating") or "").strip().lower()
     nfo_name = str(data.get("movie_nfo_name") or "").strip().lower()
     return {
-        "movie_sources": _chain(data.get("movie_sources"), MOVIE_SOURCES, list(MOVIE_SOURCES)),
-        "tv_sources": _include(_chain(data.get("tv_sources"), TV_SOURCES, list(TV_SOURCES)), ("tvmaze",)),
+        "movie_sources": _chain(data.get("movie_sources"), MOVIE_SOURCES, list(DEFAULT_MOVIE_SOURCES)),
+        "tv_sources": _include(_chain(data.get("tv_sources"), TV_SOURCES, list(DEFAULT_TV_SOURCES)), ("tvmaze",)),
         "art_sources": _chain(data.get("art_sources"), ART_SOURCES, list(ART_SOURCES)),
         "tv_art_sources": _include(_chain(
             data.get("tv_art_sources") if "tv_art_sources" in data else data.get("art_sources"),
@@ -222,14 +245,17 @@ def normalize(data):
         "language": _language(data.get("language"), "en-US"),
         "country": str(data.get("country") or "US").strip().upper()[:2] or "US",
         "art_languages": _art_languages(data.get("art_languages")),
+        "fanart_textless": _flag(data.get("fanart_textless"), True),
         "episode_order": order if order in ORDERS else "aired",
         "tv_primary": "tvdb" if str(data.get("tv_primary") or "").strip().lower() == "tvdb" else "tmdb",
         "default_rating": rating if rating in RATING_SOURCES else "themoviedb",
+        # Extra thumbs (extrathumbs/) are legacy: Kodi dropped them and few players read them, so they are off unless
+        # ticked. A saved choice is kept.
         "movie_art": _kinds(data.get("movie_art"), MOVIE_ART, ("poster", "fanart", "clearlogo", "clearart",
                                                                 "banner", "landscape", "discart", "squareart",
-                                                                "extrafanart", "extrathumbs")),
+                                                                "extrafanart")),
         "tv_art": _kinds(data.get("tv_art"), TV_ART, ("poster", "fanart", "clearlogo", "clearart", "banner",
-                                                      "landscape", "characterart", "squareart", "extrafanart", "extrathumbs")),
+                                                      "landscape", "characterart", "squareart", "extrafanart")),
         # Extra thumbs and extra fanart each stop at their own count.
         "extra_art_count": _int(data.get("extra_art_count"), 10, 1, 20),
         "extrafanart_count": _int(data.get("extrafanart_count"), 10, 1, 20),
@@ -243,17 +269,39 @@ def normalize(data):
         "overwrite_policy": "overwrite" if _as_overwrite(policy, default_overwrite()) else "merge",
         "policies": _policies(data, _as_overwrite(policy, default_overwrite())),
         "write_nfo": _flag(data.get("write_nfo"), True),
+        "write_mediainfo_movies": _flag(data.get("write_mediainfo_movies"), mediainfo_default()),
+        "write_mediainfo_tv": _flag(data.get("write_mediainfo_tv"), mediainfo_default()),
         "download_artwork": _flag(data.get("download_artwork"), True),
         "scan_fill_missing": _flag(data.get("scan_fill_missing"), True),
+        "scan_clean_art_movies": _flag(data.get("scan_clean_art_movies"), False),
+        "scan_clean_art_tv": _flag(data.get("scan_clean_art_tv"), False),
+        # Artwork of the wrong shape for its type (a fanart saved as the poster) is replaced during a scan. On by default.
+        "scan_fix_art_shape_movies": _flag(data.get("scan_fix_art_shape_movies"), True),
+        "scan_fix_art_shape_tv": _flag(data.get("scan_fix_art_shape_tv"), True),
+        "scan_clean_art_types_movies": _clean_art_types(data.get("scan_clean_art_types_movies"), ("fanart", "extrafanart")),
+        "scan_clean_art_types_tv": _clean_art_types(data.get("scan_clean_art_types_tv"), ("fanart", "characterart", "extrafanart")),
         "scan_limited_art": _flag(data.get("scan_limited_art"), False),
         "scan_download_trailers": _flag(data.get("scan_download_trailers"), False),
         "scan_download_tv_trailers": _flag(data.get("scan_download_tv_trailers"), False),
         "scan_download_themes": _flag(data.get("scan_download_themes"), False),
         "scan_download_tv_themes": _flag(data.get("scan_download_tv_themes"), False),
+        "scan_refresh_metadata_movies": _flag(data.get("scan_refresh_metadata_movies"), False),
+        "scan_refresh_artwork_movies": _flag(data.get("scan_refresh_artwork_movies"), False),
+        "scan_refresh_ratings_movies": _flag(data.get("scan_refresh_ratings_movies"), False),
+        "scan_refresh_metadata_tv": _flag(data.get("scan_refresh_metadata_tv"), False),
+        "scan_refresh_artwork_tv": _flag(data.get("scan_refresh_artwork_tv"), False),
+        "scan_refresh_ratings_tv": _flag(data.get("scan_refresh_ratings_tv"), False),
+        "scan_refresh_dry_movies": _flag(data.get("scan_refresh_dry_movies"), False),
+        "scan_refresh_dry_tv": _flag(data.get("scan_refresh_dry_tv"), False),
         "scan_rewrite_nfo": _flag(data.get("scan_rewrite_nfo"), False),
         "scan_iso": _flag(data.get("scan_iso"), True),
         "collapse_versions": _flag(data.get("collapse_versions"), False),
         "omdb_patron": _flag(data.get("omdb_patron"), False),
+        # IMDb's free datasets, downloaded by this install for personal use. Off until the person turns it on.
+        "imdb_data": _flag(data.get("imdb_data"), False),
+        "imdb_refresh_days": _int(data.get("imdb_refresh_days"), 30, 7, 365),
+        # What the requests to datasets.imdbws.com call themselves. Empty means the default, which names Curator.
+        "imdb_user_agent": _agent(data.get("imdb_user_agent")),
         "write_on_edit": _flag(data.get("write_on_edit"), True),
         "actor_thumbs": _flag(data.get("actor_thumbs"), True),
         "keywords_as_tags": _flag(data.get("keywords_as_tags"), False),
@@ -278,13 +326,39 @@ def normalize(data):
         "theme_on_webhook": _flag(data.get("theme_on_webhook"), False),
         "trakt_sync_mode": _choice(data.get("trakt_sync_mode"), ("both", "pull", "push"), "both"),
         "trakt_sync_hours": _int(data.get("trakt_sync_hours"), 0, 0, 168),
+        "watch_sync_players": [name for name in (data.get("watch_sync_players") or [])
+                               if name in ("kodi", "jellyfin", "emby", "plex")] if isinstance(data.get("watch_sync_players"), list) else [],
+        "watch_sync_mode": _choice(data.get("watch_sync_mode"), ("both", "pull", "push"), "both"),
+        "watch_sync_hours": _int(data.get("watch_sync_hours"), 0, 0, 168),
+        "watch_sync_user_jellyfin": " ".join(str(data.get("watch_sync_user_jellyfin") or "").split())[:300],
+        "watch_sync_user_emby": " ".join(str(data.get("watch_sync_user_emby") or "").split())[:300],
+        "kodi_keep_watched": _flag(data.get("kodi_keep_watched"), True),
+        "watch_sync_unwatch": _flag(data.get("watch_sync_unwatch"), False),
+        "watch_sync_music": _flag(data.get("watch_sync_music"), False),
+        "integrity_on_import": _flag(data.get("integrity_on_import"), False),
+        "integrity_research": _flag(data.get("integrity_research"), False),
+        "integrity_pass_files": _int(data.get("integrity_pass_files"), 0, 0, 500),
+        "wish_movie_resolution": _resolution_target(data.get("wish_movie_resolution")),
+        "wish_movie_hdr": _flag(data.get("wish_movie_hdr"), False),
+        "wish_tv_resolution": _resolution_target(data.get("wish_tv_resolution")),
+        "wish_tv_hdr": _flag(data.get("wish_tv_hdr"), False),
+        "wish_music": _choice(data.get("wish_music"), ("", "lossless", "hires"), ""),
+        "collections_players": [name for name in (data.get("collections_players") or [])
+                                if name in ("jellyfin", "emby", "plex")] if isinstance(data.get("collections_players"), list) else [],
+        "collections_sets": _flag(data.get("collections_sets"), True),
+        "collections_tags": _flag(data.get("collections_tags"), True),
+        "collections_after_scan": _flag(data.get("collections_after_scan"), False),
         "export_format": _choice(data.get("export_format"), ("csv", "xml"), "csv"),
+        "kodi_playlist_dir": " ".join(str(data.get("kodi_playlist_dir") or "").split())[:500],
         "split_chapter_window": _num(data.get("split_chapter_window"), 15, 1, 120),
         "split_detect_window": _num(data.get("split_detect_window"), 15, 1, 120),
         "split_wide_window": _num(data.get("split_wide_window"), 45, 1, 300),
         "subs_download_movies": _flag(data.get("subs_download_movies"), False),
         "subs_download_tv": _flag(data.get("subs_download_tv"), False),
         "subs_languages": str(data.get("subs_languages") or "en").strip()[:80] or "en",
+        "orig_lang_movies": _flag(data.get("orig_lang_movies"), False),
+        "orig_lang_tv": _flag(data.get("orig_lang_tv"), False),
+        "sub_pref_langs": _sub_pref_langs(data),
         "subs_hearing_impaired": _choice(data.get("subs_hearing_impaired"), ("exclude", "include", "only"), "exclude"),
         "subs_sync_after": _flag(data.get("subs_sync_after"), False),
         "subs_username": str(data.get("subs_username") or "").strip()[:120],
@@ -328,12 +402,47 @@ def normalize(data):
     }
 
 
+def _sub_pref_langs(data):
+    """Up to five preferred subtitle languages, in priority order, as three-letter codes.
+
+    Until they are saved, the OpenSubtitles download languages fill the list.
+    """
+    from curator.video.languages import normalize_lang
+
+    raw = data.get("sub_pref_langs")
+    if raw is None:
+        raw = str(data.get("subs_languages") or "en").replace(";", ",").split(",")
+    found = []
+    for value in raw if isinstance(raw, (list, tuple)) else []:
+        code = normalize_lang(value)
+        if code and code != "und" and code not in found:
+            found.append(code)
+    return found[:5]
+
+
 def _num(value, default, low, high):
     try:
         number = float(value)
     except (TypeError, ValueError):
         return default
     return max(low, min(number, high))
+
+
+MAX_AGENT = 200
+
+
+def _agent(value):
+    """A header value: printable ASCII only, one line, at most MAX_AGENT characters. Empty means the default."""
+    if not isinstance(value, str):
+        return ""
+    text = "".join(char for char in value if " " <= char <= "~")
+    return " ".join(text.split())[:MAX_AGENT]
+
+
+def _resolution_target(value):
+    """_choice lowercases, and these names keep their capitals (4K)."""
+    text = str(value or "").strip()
+    return text if text in ("720p", "1080p", "4K") else ""
 
 
 def _choice(value, allowed, default):

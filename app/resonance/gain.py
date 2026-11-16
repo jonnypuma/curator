@@ -9,7 +9,8 @@ from resonance.paths import assert_library_writable
 logger = logging.getLogger(__name__)
 
 
-def album_lines(album_id):
+def album_lines(album_id, record=True):
+    """Write ReplayGain tags for one album with rsgain. record False leaves the Jobs panel alone (a bulk job has its own)."""
     album = db.fetchone("SELECT * FROM albums WHERE id = %s", (album_id,))
     if not album:
         raise AppError("Album not found", 404)
@@ -22,7 +23,7 @@ def album_lines(album_id):
         VALUES ('replaygain', 'running', 'Writing ReplayGain', 0, 1, '', NOW())
         RETURNING id
         """
-    )
+    ) if record else None
     try:
         completed = subprocess.run(
             ["rsgain", "easy", album["path"]],
@@ -31,17 +32,20 @@ def album_lines(album_id):
             check=False,
         )
     except OSError as exc:
-        _finish(job["id"], "failed", str(exc))
+        _finish(job and job["id"], "failed", str(exc))
         raise AppError(f"rsgain failed: {exc}") from exc
     output = (completed.stderr or completed.stdout or "").strip()
     if completed.returncode:
-        _finish(job["id"], "failed", output[-500:])
+        _finish(job and job["id"], "failed", output[-500:])
         raise AppError(output[-400:] or "rsgain failed")
-    _finish(job["id"], "completed", "ReplayGain tags written")
+    _finish(job and job["id"], "completed", "ReplayGain tags written")
     return ["ReplayGain tags written"]
 
 
 def _finish(job_id, status, message):
+    if job_id is None:
+        logger.info("replaygain %s: %s", status, message)
+        return
     db.execute(
         """
         UPDATE work_jobs

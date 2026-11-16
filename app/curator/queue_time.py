@@ -10,6 +10,15 @@ def seconds_since(value):
     return max(0, int(delta))
 
 
+def elapsed(row):
+    """Seconds a database row has been running. The database measures it, because started_at is a timestamp in the
+    database's own time zone and reading it here as UTC made the timer start from zero on every refresh."""
+    value = row.get("running_for")
+    if value is not None:
+        return max(0, int(value))
+    return seconds_since(row.get("started_at"))
+
+
 def stamp():
     return datetime.now(timezone.utc).isoformat()
 

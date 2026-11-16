@@ -1,11 +1,13 @@
 """Write .nfo files from what the database holds, and remember their mtimes so the next scan skips them."""
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 
 from curator.video import naming, nfo_write, store
 
+logger = logging.getLogger(__name__)
 
 def _stem(path):
     return os.path.splitext(os.path.basename(path))[0]
@@ -162,10 +164,45 @@ def episode_nfo_path(video, season, episode, multi):
     return os.path.join(os.path.dirname(video), name)
 
 
-def write_show(show_id, cfg, policy="overwrite", episode_ids=None, episodes_only=False):
+def _nfo_on_disk(row):
+    """True when the row's stored .nfo is a file that is there."""
+    path = str((row or {}).get("nfo_path") or "")
+    return path.lower().endswith(".nfo") and os.path.isfile(path)
+
+
+def _target_key(path):
+    """One key for one file, also on a share that ignores letter case."""
+    return os.path.normcase(os.path.normpath(path)).casefold()
+
+
+def _exact_name(path):
+    """True when the folder lists the file with exactly this spelling, not only in another letter case."""
+    try:
+        return os.path.basename(path) in os.listdir(os.path.dirname(path) or ".")
+    except OSError:
+        return False
+
+
+def _forget_placeholder_nfos(episodes):
+    """A missing-episode placeholder has no video, so an .nfo stored on it from an earlier file is not its own.
+
+    Without this the row keeps its old fingerprint, a later lookup changes its fields, and the show shows NFO changes
+    that writing can never clear (placeholders are not written)."""
+    ids = [str(item["id"]) for item in episodes
+           if str(item.get("path") or "").startswith(("missing://", "wanted://")) and item.get("nfo_path")]
+    if ids:
+        store.db.execute(
+            "UPDATE tv_episodes SET nfo_path = NULL, nfo_mtime = NULL, nfo_digest = NULL WHERE id = ANY(%s::uuid[])",
+            (ids,),
+        )
+    return len(ids)
+
+
+def write_show(show_id, cfg, policy="overwrite", episode_ids=None, episodes_only=False, report=None):
     """tvshow.nfo, season.nfo in real season folders, and one <episodedetails> file per episode.
 
     episodes_only writes the selected episode files and leaves tvshow.nfo and season.nfo alone.
+    report, when a dict, gets "shared": labels of episodes whose .nfo another episode already wrote in this call.
     """
     show, seasons, episodes = store.show_rows(show_id)
     if not show:
@@ -187,7 +224,8 @@ def write_show(show_id, cfg, policy="overwrite", episode_ids=None, episodes_only
         if done:
             written.append(path)
         for season in seasons:
-            if not season_needs_nfo(season, show, episodes):
+            # A season.nfo that is already on disk is kept current too, so its NFO changes can be cleared.
+            if not season_needs_nfo(season, show, episodes) and not _nfo_on_disk(season):
                 continue
             season_path = _season_nfo_path(season, show)
             text = nfo_write.season_xml(season, show.get("title"), cfg["nfo_dialect"])
@@ -200,18 +238,30 @@ def write_show(show_id, cfg, policy="overwrite", episode_ids=None, episodes_only
             if done:
                 written.append(season_path)
     wanted = {str(item) for item in episode_ids} if episode_ids else None
+    _forget_placeholder_nfos(episodes)
     by_file = {}
     for episode in episodes:
-        if str(episode.get("path") or "").startswith("missing://"):
+        if str(episode.get("path") or "").startswith(("missing://", "wanted://")):
             continue
         by_file.setdefault(episode["path"], []).append(episode)
-    for video, group in by_file.items():
+    # Two episode rows can point at one .nfo: the same episode stored twice, or one file listed under two letter
+    # cases on a share that ignores case. Writing both made each write undo the other. The row whose video is listed
+    # with its exact name writes; the others are reported.
+    targets = {}
+    shared = []
+    ordered = sorted(by_file.items(), key=lambda pair: not _exact_name(pair[0]))
+    for video, group in ordered:
         if wanted is not None and not any(str(item["id"]) in wanted for item in group):
             continue
         file = store.file_row(group[0].get("file_id"))
         multi = len(group) > 1
         for item in group:
             nfo_path = episode_nfo_path(video, item.get("season_number"), item.get("episode_number"), multi)
+            key = _target_key(nfo_path)
+            if key in targets:
+                shared.append(_episode_label(item, targets[key]))
+                continue
+            targets[key] = item
             text = nfo_write.episodes_xml([item], show, file, **options)
             done, mtime = nfo_write.write(nfo_path, text, policy=policy, backup=cfg["nfo_backup"])
             if mtime is not None:
@@ -223,7 +273,23 @@ def write_show(show_id, cfg, policy="overwrite", episode_ids=None, episodes_only
                 written.append(nfo_path)
         if multi:
             _retire_combined(os.path.join(os.path.dirname(video), f"{_stem(video)}.nfo"), cfg["nfo_backup"])
+    if shared:
+        logger.warning("%s: %d episode .nfo files are shared by two episode rows: %s",
+                       show.get("title") or show_id, len(shared), ", ".join(shared[:10]))
+    if isinstance(report, dict):
+        report.setdefault("shared", []).extend(shared)
     return written
+
+
+def _episode_label(item, other):
+    def code(row):
+        season, episode = row.get("season_number"), row.get("episode_number")
+        if season is None or episode is None:
+            return "an episode"
+        return f"S{int(season):02d}E{int(episode):02d}"
+
+    mine, theirs = code(item), code(other)
+    return mine if mine == theirs else f"{mine} (same .nfo as {theirs})"
 
 
 def _retire_combined(path, backup):

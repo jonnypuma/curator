@@ -19,13 +19,14 @@ async function runLibraryLoad(flight) {
             const root = document.getElementById("tree");
             if (root && !treeHasRows(root)) showTreeLoading();
             const serverFilter = state.filter === "pending" ? "all" : state.filter;
-            const params = new URLSearchParams({ filter: serverFilter, q: state.query });
+            // The search box is applied on the page (musicSearchArtists), so the server sends the whole filtered list.
+            const params = new URLSearchParams({ filter: serverFilter });
             try {
                 const data = await api(`/api/library?${params}`);
                 // The filter or the search changed while this was loading: this answer is for an
                 // older question, so drop it and ask again instead of showing it.
                 const nowFilter = state.filter === "pending" ? "all" : state.filter;
-                if (nowFilter !== serverFilter || (state.query || "") !== params.get("q")) {
+                if (nowFilter !== serverFilter) {
                     flight.again = true;
                     continue;
                 }
@@ -36,16 +37,8 @@ async function runLibraryLoad(flight) {
                 if (data.as_of) state.libraryAsOf = data.as_of;
                 if (data.totals) setTotals(data.totals);
                 state.filterCounts = data.filter_counts || {};
-                // A saved filter that no longer matches anything (Duplicates after the copies are
-                // gone, say) would leave the tree empty with no hint why. Fall back to All.
-                if (!state.artists.length && !state.query && state.filter !== "all" && state.filter !== "pending"
-                    && Number(state.filterCounts[state.filter]) === 0) {
-                    state.filter = "all";
-                    const select = document.getElementById("library-filter");
-                    if (select) select.value = "all";
-                    notify("That filter no longer matches anything, so the library is showing All.", "info");
-                    flight.again = true;
-                }
+                // A filter that matches nothing keeps showing, with a Clear filters button in the empty tree
+                // (renderTree), the way the movie and TV lists do.
                 if (typeof renderSelectedCount === "function") renderSelectedCount();
                 if (typeof syncLibraryFilterButton === "function") syncLibraryFilterButton();
                 renderTree();
@@ -69,6 +62,76 @@ async function runLibraryLoad(flight) {
         if (boot) boot.done();
         finishBoot();
     }
+}
+
+// After an edit, read again only the artists it touched (and same-named artist folders, whose Duplicate and Upgrade
+// marks can follow), instead of the whole library. Falls back to a full load when a full load is already running,
+// nothing is named, or the refresh fails.
+async function refreshLibraryItems(albumIds, artistIds) {
+    const albums = [...new Set((albumIds || []).filter(Boolean).map(String))];
+    const artists = [...new Set((artistIds || []).filter(Boolean).map(String))];
+    // The artist the page shows each album under now: an edit can move an album to another artist.
+    for (const artist of state.artists || []) {
+        if ((artist.albums || []).some((album) => albums.includes(String(album.id))) && !artists.includes(String(artist.id))) {
+            artists.push(String(artist.id));
+        }
+    }
+    if (!state.libraryLoaded || libraryFlight || (!albums.length && !artists.length)) return loadLibrary();
+    const serverFilter = state.filter === "pending" ? "all" : state.filter;
+    let data;
+    try {
+        data = await api("/api/library/refresh", { method: "POST", body: { album_ids: albums, artist_ids: artists, filter: serverFilter } });
+    } catch (error) {
+        return loadLibrary();
+    }
+    // The filter or the search changed meanwhile, or a full load started: that load has the newer answer.
+    const nowFilter = state.filter === "pending" ? "all" : state.filter;
+    if (libraryFlight || nowFilter !== serverFilter) return libraryFlight ? libraryFlight.promise : loadLibrary();
+    const requested = new Set((data.requested || []).map(String));
+    const incoming = new Map((data.artists || []).map((artist) => [String(artist.id), artist]));
+    const next = [];
+    for (const artist of state.artists || []) {
+        const id = String(artist.id);
+        if (!requested.has(id)) next.push(artist);
+        else if (incoming.has(id)) {
+            next.push(incoming.get(id));
+            incoming.delete(id);
+        }
+        // requested but not returned: it no longer matches the open filter, or it is gone
+    }
+    incoming.forEach((artist) => next.push(artist));
+    state.artists = next;
+    if (data.totals) setTotals(data.totals);
+    if (data.filter_counts) state.filterCounts = data.filter_counts;
+    if (typeof renderSelectedCount === "function") renderSelectedCount();
+    renderTree();
+    renderBatchBar();
+    if (state.album && !findAlbum(state.album.album.id)) {
+        state.album = null;
+        state.trackId = null;
+        state.proposal = null;
+        renderCenter();
+        renderEditor();
+    }
+}
+
+// Back to All and an empty search box, from the Clear filters button of an empty filtered tree.
+function clearMusicLibraryFilters() {
+    const reload = state.filter !== "all";       // a search alone is cleared on the page, without asking the server
+    state.filter = "all";
+    state.query = "";
+    try { sessionStorage.setItem("resonance.filter", "all"); } catch (error) { /* private window */ }
+    const select = document.getElementById("library-filter");
+    if (select) select.value = "all";
+    const search = document.getElementById("artist-search");
+    if (search) search.value = "";
+    if (typeof syncLibraryFilterButton === "function") syncLibraryFilterButton();
+    if (!reload) {
+        renderTree();
+        if (typeof renderBatchBar === "function") renderBatchBar();
+        return Promise.resolve();
+    }
+    return loadLibrary();
 }
 
 function finishBoot() {

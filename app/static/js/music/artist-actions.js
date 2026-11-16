@@ -136,7 +136,7 @@ async function addChosenArtist(mbid) {
     if (!mbid) throw new Error("That result has no MusicBrainz id.");
     const data = await api("/api/library/artists", { method: "POST", body: { mbid } });
     document.getElementById("add-artist-modal").classList.add("hidden");
-    await loadLibrary();
+    await refreshLibraryItems([], data.artist_id ? [data.artist_id] : []);
     if (data.artist_id) await selectArtist(data.artist_id);
     const warnings = (data.warnings || []).filter(Boolean);
     const extra = warnings.length ? ` ${warnings.join(" ")}` : "";

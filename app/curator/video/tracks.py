@@ -15,11 +15,11 @@ _KINDS = {"audio": ("a", "audio"), "subtitle": ("s", "subtitle")}
 
 
 def edit_args(kind, index, count):
-    """mkvpropedit --edit arguments that leave one track of this type as the default."""
+    """mkvpropedit --edit arguments that leave one track of this type as the default. index None clears them all."""
     letter = _KINDS[kind][0]
     args = []
     for number in range(1, count + 1):
-        args.extend(["--edit", f"track:{letter}{number}", "--set", f"flag-default={1 if number == index + 1 else 0}"])
+        args.extend(["--edit", f"track:{letter}{number}", "--set", f"flag-default={1 if index is not None and number == index + 1 else 0}"])
     return args
 
 
@@ -31,6 +31,30 @@ def apply(path, kind, index, tracks):
     count = len(tracks or [])
     if index < 0 or index >= count:
         raise AppError(f"That {label} track is not in this file", 400)
+    return _write(path, kind, index, count)
+
+
+def clear(path, kind, tracks):
+    """Clear the default flag on every track of this type, so a player starts with none (subtitles off)."""
+    if kind not in _KINDS:
+        raise AppError("Choose an audio or subtitle track", 400)
+    count = len(tracks or [])
+    if not count:
+        return False
+    return _write(path, kind, None, count)
+
+
+def mark_user_set(path):
+    """Remember that the default tracks of this file were chosen by hand, for this file size.
+
+    The automatic original-language switch leaves such a file alone until the file is replaced.
+    """
+    from resonance import db
+
+    db.execute("UPDATE video_files SET user_default_size = size_bytes WHERE path = %s", (path,))
+
+
+def _write(path, kind, index, count):
     if os.path.splitext(path or "")[1].lower() != ".mkv":
         raise AppError("Default tracks can be set on MKV files. Other containers need a remux.", 400)
     from curator.video import writes

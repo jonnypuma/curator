@@ -7,7 +7,9 @@ writes the .nfo. Runs one job at a time in a worker thread with its own event lo
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
+import json
 import logging
 import os
 import threading
@@ -22,12 +24,14 @@ from curator.scrapers.http import Client, ScrapeError
 from curator.scrapers.anilist import AniList
 from curator.scrapers.metacritic import Metacritic
 from curator.scrapers.ofdb import Ofdb
+from curator.scrapers.ofdbcc import OfdbCc
 from curator.scrapers.omdb import Omdb
 from curator.scrapers.rottentomatoes import RottenTomatoes
 from curator.scrapers.tmdb import Tmdb
 from curator.scrapers.trakt import TraktRatings
 from curator.scrapers.tvdb import Tvdb
 from curator.scrapers.tvmaze import Tvmaze
+from curator.video import imdb_data
 from curator.video import activity, actor_art, art_fetch, config, exports, naming, nfo_write, sets, store, writes
 from resonance.errors import AppError
 
@@ -61,7 +65,7 @@ _cancel = threading.Event()
 _listeners = []
 _state = {"status": "idle", "media": None, "scope": None, "message": "Idle", "processed": 0, "total": 0,
           "current": "", "started_at": None, "finished_at": None, "result": {}, "id": None,
-          "art_only": False, "embedded": False}
+          "art_only": False, "ratings_only": False, "embedded": False}
 _log = deque(maxlen=LOG_LINES)
 _sets_state = {"status": "idle", "media": "sets", "scope": None, "message": "Idle", "processed": 0, "total": 0,
                "current": "", "started_at": None, "finished_at": None, "result": {}, "id": None,
@@ -81,7 +85,7 @@ def _load_initial_sets_state():
             "SELECT * FROM video_scrape_jobs WHERE media = 'sets' ORDER BY started_at DESC NULLS LAST LIMIT 1",
         )
         from curator import scan_logs
-        latest = scan_logs.latest_log("sets")
+        latest = scan_logs.latest_log("sets", kind="scrape") or scan_logs.latest_log("sets")
         if row:
             res = row.get("result") or {}
             if not isinstance(res, dict):
@@ -420,8 +424,10 @@ def _scan_pass(scan_job, ids, cfg, art_only, phase, label):
 
 def start(media, scope, ids=None, policy=None, label=None, art_only=False, release_queue=False,
          groups=None, primary=None, fields=None, art=None, art_primary=None, meta_policy=None, art_policy=None,
-         rewrite_nfo=None):
-    """Returns False when a scrape is already running."""
+         rewrite_nfo=None, ratings_only=False, rating_sources=None, art_levels=None, rating_filter=None):
+    """Returns False when a scrape is already running. ratings_only updates just the ratings of the given ids,
+    from the rating_sources picked (None: every source that is set up). art_levels narrows an artwork-only show
+    job to some of "show", "season" and "episode" (None: all three)."""
     if media not in ("movies", "tv", "sets", "episodes", "seasons"):
         raise ValueError(media)
     if scope not in SCOPES:
@@ -433,8 +439,8 @@ def start(media, scope, ids=None, policy=None, label=None, art_only=False, relea
         _log.clear()
         _state.update({
             "status": "running", "media": media, "scope": scope, "message": "Starting", "processed": 0,
-            "total": 0, "current": "", "started_at": datetime.now().isoformat(timespec="seconds"),
-            "finished_at": None, "id": None, "art_only": bool(art_only), "embedded": False,
+            "total": 0, "current": "", "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "finished_at": None, "id": None, "art_only": bool(art_only), "ratings_only": bool(ratings_only), "embedded": False,
             "result": {"scraped": 0, "skipped": 0, "failed": 0, "art": 0, "nfo": 0, "failures": []},
         })
         if media == "sets":
@@ -442,14 +448,14 @@ def start(media, scope, ids=None, policy=None, label=None, art_only=False, relea
             _sets_state.update(dict(_state))
     thread = threading.Thread(
         target=_run, args=(media, scope, list(ids or []), policy, label, art_only, release_queue, groups, primary,
-                           fields, art, art_primary, meta_policy, art_policy, rewrite_nfo),
+                           fields, art, art_primary, meta_policy, art_policy, rewrite_nfo, bool(ratings_only), rating_sources, art_levels, rating_filter),
         name=f"{media}-scrape", daemon=True,
     )
     thread.start()
     return True
 
 
-def apply_pending(ids=None):
+def apply_pending(ids=None, wait=False):
     """Write files for scan matches that were kept in the database. ids limits it to those items."""
     movies, shows = store.pending_match_ids()
     if ids is not None:
@@ -466,10 +472,13 @@ def apply_pending(ids=None):
         _state.update({
             "status": "running", "media": "movies" if movies else "tv", "scope": "selected",
             "message": "Apply match", "processed": 0, "total": 0, "current": "",
-            "started_at": datetime.now().isoformat(timespec="seconds"),
-            "finished_at": None, "id": None, "art_only": False, "embedded": False,
+            "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "finished_at": None, "id": None, "art_only": False, "ratings_only": False, "embedded": False,
             "result": {"scraped": 0, "skipped": 0, "failed": 0, "art": 0, "nfo": 0, "failures": []},
         })
+    if wait:
+        _apply_pending_run(movies, shows)        # the queue runs this on its own worker and waits for the end
+        return True
     thread = threading.Thread(target=_apply_pending_run, args=(movies, shows), name="apply-match", daemon=True)
     thread.start()
     return True
@@ -545,6 +554,7 @@ class _Job:
         self.lang = cfg["language"].split("-")[0]
         self.last_push = 0.0
         self.sets_done = set()
+        self.verb = "Scraping"
 
     def log(self, line):
         stamp = datetime.now().strftime('%H:%M:%S')
@@ -577,7 +587,7 @@ class _Job:
             _state["processed"] += 1
             if current:
                 _state["current"] = current
-            _state["message"] = f"Scraping {_state['processed']}/{_state['total']}"
+            _state["message"] = f"{self.verb} {_state['processed']}/{_state['total']}"
             if self.media == "sets":
                 _sets_state["processed"] = _state["processed"]
                 if current:
@@ -597,11 +607,16 @@ class _Job:
 
 
 def _run(media, scope, ids, policy, label, art_only=False, release_queue=False, groups=None, primary=None,
-         fields=None, art=None, art_primary=None, meta_policy=None, art_policy=None, rewrite_nfo=None):
+         fields=None, art=None, art_primary=None, meta_policy=None, art_policy=None, rewrite_nfo=None,
+         ratings_only=False, rating_sources=None, art_levels=None, rating_filter=None):
     cfg = config.current()
     policy = policy if policy in config.POLICIES else None
     job = _Job(media, cfg, policy, art_only=art_only, groups=groups, primary=primary, fields=fields, art=art,
                art_primary=art_primary, meta_policy=meta_policy, art_policy=art_policy, rewrite_nfo=rewrite_nfo)
+    job.rating_sources = normalize_rating_sources(rating_sources)
+    job.art_levels = normalize_art_levels(art_levels)
+    job.rating_filter = normalize_rating_filter(rating_filter)
+    job.fix = str(label or "").lower() == "fix match"          # re-identifying an item: every field is refreshed, not only the saved ones
     try:
         job_id = store.start_scrape_job(media, label or scope)
         with _lock:
@@ -610,8 +625,11 @@ def _run(media, scope, ids, policy, label, art_only=False, release_queue=False, 
         logger.exception("could not record the scrape job")
     final, message = "completed", ""
     writes.forget_roots()
+    items = []
     try:
-        if media == "episodes":
+        if ratings_only:
+            items = list(dict.fromkeys(str(item) for item in ids if item))
+        elif media == "episodes":
             items = _episode_shows(job, ids)
         elif media == "seasons":
             items = _season_shows(job, ids)
@@ -619,7 +637,10 @@ def _run(media, scope, ids, policy, label, art_only=False, release_queue=False, 
             items = {"movies": store.movie_ids, "tv": store.show_ids, "sets": store.set_ids}[media](scope, ids)
         with _lock:
             _state["total"] = len(items)
-        if media == "episodes":
+        if ratings_only:
+            noun = {"movies": "movies", "tv": "shows", "episodes": "episodes"}.get(media, "items")
+            count = len(items)
+        elif media == "episodes":
             noun = "episodes"
             count = len(job.only_episode_ids or [])
         elif media == "seasons":
@@ -633,12 +654,23 @@ def _run(media, scope, ids, policy, label, art_only=False, release_queue=False, 
             detail += f", primary {job.primary}"
         if job.groups is not None:
             detail += f", {', '.join(sorted(job.groups))}"
-        job.log(f"{'Downloading artwork for' if art_only else 'Scraping'} {count} {noun} ({detail})")
+        if ratings_only:
+            job.verb = "Updating ratings"
+            if job.rating_sources is not None:
+                order = "from " + ", ".join(RATING_SOURCES[key] for key in RATING_SOURCES if key in job.rating_sources)
+            else:
+                order = "local IMDb data first" if imdb_data.usable(cfg) else "online sources only, the local IMDb data is off or not built"
+            if job.rating_filter:
+                order += f"; only items with {_filter_text(job.rating_filter)}"
+            job.log(f"Updating ratings for {count} {noun} ({order})")
+        else:
+            job.log(f"{'Downloading artwork for' if art_only else 'Scraping'} {count} {noun} ({detail})")
         job.push(force=True)
         if items:
-            asyncio.run(_main(job, items))
+            asyncio.run(_ratings_main(job, items) if ratings_only else _main(job, items))
         if job.cancelled:
-            final, message = "cancelled", "Scrape stopped. Items already scraped were kept."
+            final, message = "cancelled", ("Rating update stopped. Items already updated were kept." if ratings_only
+                                           else "Scrape stopped. Items already scraped were kept.")
     except ScrapeError as exc:
         final, message = "failed", str(exc)
         job.log(message)
@@ -648,13 +680,16 @@ def _run(media, scope, ids, policy, label, art_only=False, release_queue=False, 
         job.log(f"Scrape failed: {exc}")
     with _lock:
         result = dict(_state["result"])
-    if final == "completed":
+    result.update(_scrape_items(media, items, job, ratings_only))
+    if final == "completed" and ratings_only:
+        message = _ratings_summary(result)
+    elif final == "completed":
         message = (f"{result['scraped']} scraped, {result['skipped']} skipped, {result['failed']} failed, "
                    f"{result['art']} images saved, {result['nfo']} .nfo files written")
     job.log(message)
     with _lock:
         _state.update({"status": final, "message": message, "current": "",
-                       "finished_at": datetime.now().isoformat(timespec="seconds")})
+                       "finished_at": datetime.now().astimezone().isoformat(timespec="seconds")})
         job_id = _state["id"]
         lines = list(_log)
         if media == "sets":
@@ -664,12 +699,16 @@ def _run(media, scope, ids, policy, label, art_only=False, release_queue=False, 
         store.finish_scrape_job(job_id, final, message, result)
     except Exception:
         logger.exception("could not record the scrape result")
-    if media == "sets":
-        try:
-            from curator.video.scanner import _write_log
-            _write_log("sets", lines)
-        except Exception:
-            logger.exception("could not write sets scan log")
+    from curator import outbound
+
+    outbound.scrape_done(media, final, result, message, label)
+    try:
+        from curator import scan_logs
+        from resonance.settings import load as load_settings
+
+        scan_logs.write_scrape_log(media, lines, load_settings().get("scan_log_keep") or 30)
+    except Exception:
+        logger.exception("could not write the scrape log")
     _notify()
     if release_queue:
         from resonance import scan_queue
@@ -678,61 +717,265 @@ def _run(media, scope, ids, policy, label, art_only=False, release_queue=False, 
     start_next_fix()
 
 
-def refresh_ratings(kind, item_id):
-    """Ask TMDB, OMDb and Trakt for a fresh rating and write it onto this item."""
+def _scrape_items(media, items, job, ratings_only=False):
+    """The items a scrape worked on, named for the Jobs panel's Recent list. Never raises."""
+    from curator import job_history
+
+    try:
+        if media == "episodes" and (ratings_only or job.only_episode_ids):
+            episodes = list(items if ratings_only else job.only_episode_ids)
+            if len(episodes) <= job_history.ITEMS_KEPT or ratings_only:
+                return job_history.items_result(store.item_names("episode", episodes), len(episodes))
+        kind = {"movies": "movie", "tv": "show", "sets": "set", "episodes": "show", "seasons": "show"}.get(media)
+        if not kind:
+            return {}
+        return job_history.items_result(store.item_names(kind, items), len(items))
+    except Exception:
+        logger.exception("could not name the scraped items")
+    return {}
+
+
+class RatingsSkipped(ScrapeError):
+    """Nothing was done for this item and that is not an error: it is locked."""
+
+
+# OMDb is the source of these two scores unless the Rotten Tomatoes and Metacritic page scrapers are on.
+_CRITIC_SCORES = {"tomatometerallcritics", "metacritic"}
+
+
+RATING_SOURCES = {
+    "local": "Local IMDb data", "tmdb": "TMDB", "omdb": "OMDb", "trakt": "Trakt",
+    "rottentomatoes": "Rotten Tomatoes", "metacritic": "Metacritic", "anilist": "AniList", "ofdb": "OFDb",
+}
+
+
+ART_LEVELS = ("show", "season", "episode")
+
+
+def normalize_art_levels(value):
+    """The levels an artwork-only show job covers, or None for all of them."""
+    if value is None:
+        return None
+    picked = {str(item) for item in value if str(item) in ART_LEVELS}
+    return picked or None
+
+
+def normalize_rating_sources(value):
+    """The sources picked for a ratings update as a set, or None for every source that is set up."""
+    if value is None:
+        return None
+    picked = {str(item) for item in value if str(item) in RATING_SOURCES}
+    if not picked:
+        raise ScrapeError("Pick at least one source to update the ratings from")
+    return picked
+
+
+# The stored scores each source supplies (the keys of an item's `ratings`).
+SOURCE_SCORES = {
+    "local": ("imdb",), "tmdb": ("themoviedb",), "omdb": ("imdb", "tomatometerallcritics", "metacritic"),
+    "trakt": ("trakt",), "rottentomatoes": ("tomatometerallcritics",), "metacritic": ("metacritic",),
+    "anilist": ("anilist",), "ofdb": ("ofdb",),
+}
+
+
+def normalize_rating_filter(value):
+    """The conditions that narrow an Update ratings run, or None for no narrowing.
+
+    rating_below (0-10), votes_below, votes_above, unrated. An item is updated, for a ticked source, when the score
+    stored for that source meets any one of them."""
+    if not value:
+        return None
+    out = {}
+    try:
+        if value.get("rating_below") not in (None, ""):
+            out["rating_below"] = min(10.0, max(0.0, float(value["rating_below"])))
+        for key in ("votes_below", "votes_above"):
+            if value.get(key) not in (None, ""):
+                out[key] = max(0, int(float(value[key])))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ScrapeError("The rating filter needs numbers") from exc
+    if value.get("unrated"):
+        out["unrated"] = True
+    return out or None
+
+
+def _stored_scores(ratings, source):
+    return [ratings[key] for key in SOURCE_SCORES.get(source, ()) if isinstance(ratings.get(key), dict)]
+
+
+def _score_met(entry, flt):
+    """Does one stored score (or None for no score) meet any condition of the filter?"""
+    if entry is None or entry.get("value") in (None, ""):
+        return any(key in flt for key in ("unrated", "rating_below", "votes_below"))
+    try:
+        value = float(entry["value"]) * 10 / float(entry.get("max") or 10)
+    except (TypeError, ValueError):
+        value = None
+    votes = int(entry.get("votes") or 0)
+    return bool(
+        (value is not None and "rating_below" in flt and value < flt["rating_below"])
+        or ("votes_below" in flt and votes < flt["votes_below"])
+        or ("votes_above" in flt and votes > flt["votes_above"])
+    )
+
+
+def filter_rating_sources(ratings, use, flt):
+    """The sources, of those ticked (None: all), that still need to be asked for this item under the filter."""
+    ratings = ratings if isinstance(ratings, dict) else {}
+    chosen = set(RATING_SOURCES) if use is None else set(use)
+    keep = set()
+    for source in chosen:
+        entries = _stored_scores(ratings, source)
+        if (entries and any(_score_met(entry, flt) for entry in entries)) or (not entries and _score_met(None, flt)):
+            keep.add(source)
+        elif len(SOURCE_SCORES.get(source, ())) > len(entries) and _score_met(None, flt):
+            keep.add(source)           # one of its scores is missing, and a missing score meets the filter
+    return keep
+
+
+def _filter_text(flt):
+    parts = []
+    if "rating_below" in flt:
+        parts.append(f"rating below {flt['rating_below']:g}")
+    if "votes_below" in flt:
+        parts.append(f"fewer than {flt['votes_below']} votes")
+    if "votes_above" in flt:
+        parts.append(f"more than {flt['votes_above']} votes")
+    if flt.get("unrated"):
+        parts.append("no score yet")
+    return " or ".join(parts)
+
+
+def rating_source_options(kind):
+    """Every source a ratings update can use, and whether it is set up for this kind of item."""
+    cfg = config.current()
+    media = "tv" if kind in ("show", "episode") else "movies"
+    chain = cfg["tv_sources"] if media == "tv" else cfg["movie_sources"]
+    where = "the TV source list" if media == "tv" else "the movie source list"
+
+    def option(key, available, reason):
+        return {"key": key, "label": RATING_SOURCES[key], "available": bool(available), "reason": "" if available else reason}
+
+    return [
+        option("local", imdb_data.usable(cfg), "Turn on IMDb's data files under Settings, Integrations, and let the copy build."),
+        option("tmdb", "tmdb" in chain and cfg.get("tmdb_key"), "Needs a TMDB key, and TMDB in " + where + "."),
+        option("omdb", "omdb" in chain and cfg.get("omdb_key"), "Needs an OMDb key, and OMDb in " + where + "."),
+        option("trakt", "trakt" in chain and trakt_auth.client_id(), "Needs a Trakt client id, and Trakt in " + where + "."),
+        option("rottentomatoes", "rottentomatoes" in chain, "Not in " + where + "."),
+        option("metacritic", "metacritic" in chain, "Not in " + where + "."),
+        option("anilist", "anilist" in chain, "Not in " + where + "."),
+        option("ofdb", "ofdb" in chain, "Not in " + where + "."),
+    ]
+
+
+def refresh_ratings(kind, item_id, sources=None):
+    """Fresh ratings for one item from the sources picked: by default the local IMDb copy first, then TMDB, OMDb,
+    Trakt and the score pages."""
     if kind not in ("movie", "show", "episode"):
         raise ValueError(kind)
-    return asyncio.run(_refresh_ratings(kind, item_id))
+    return asyncio.run(_refresh_ratings(kind, item_id, normalize_rating_sources(sources)))
 
 
-async def _refresh_ratings(kind, item_id):
+async def _refresh_ratings(kind, item_id, use=None):
     row = await asyncio.to_thread(_rating_row, kind, item_id)
     if not row:
         raise ScrapeError("That item is not in the library any more")
-    if row.get("locked"):
-        raise ScrapeError("This item is locked. Unlock it to update ratings.")
     cfg = config.current()
     client = Client()
-    extra_ids = {}
     try:
-        media = "tv" if kind in ("show", "episode") else "movies"
-        found = sources(client, cfg, media)
-        fresh = {}
-        tmdb = found.get("tmdb")
-        if tmdb and kind == "movie" and row.get("tmdb_id"):
-            base = await tmdb.movie(row["tmdb_id"])
-            fresh.update((base or {}).get("ratings") or {})
-        elif tmdb and kind == "show" and row.get("tmdb_id"):
-            base = await tmdb.tv(row["tmdb_id"])
-            fresh.update((base or {}).get("ratings") or {})
-        elif tmdb and kind == "episode" and row.get("show_tmdb"):
-            episode = await tmdb.episode(row["show_tmdb"], row["season_number"], row["episode_number"])
-            fresh.update((episode or {}).get("ratings") or {})
-        ids = _ids(row)
-        if kind == "episode" and row.get("show_imdb"):
-            ids.setdefault("imdb", str(row["show_imdb"]))
-        if found.get("omdb") and ids.get("imdb"):
-            if kind == "episode":
-                omdb = await found["omdb"].episode_ratings(ids["imdb"], row["season_number"], row["episode_number"])
-            else:
-                omdb = await found["omdb"].ratings(ids["imdb"])
-            fresh.update((omdb or {}).get("ratings") or {})
-        if found.get("trakt"):
-            if kind == "movie":
-                payload = await found["trakt"].movie(ids)
-            elif kind == "show":
-                payload = await found["trakt"].show(ids)
-            else:
-                payload = await found["trakt"].episode(ids, row["season_number"], row["episode_number"])
-            fresh.update((payload or {}).get("ratings") or {})
-            extra_ids = (payload or {}).get("ids") or {}
-        else:
-            extra_ids = {}
-        if kind in ("movie", "show"):
-            fresh.update(await _page_ratings(found, kind, row.get("title"), row.get("year")))
+        done = await _update_ratings(cfg, client, {}, kind, row, item_id=item_id, use=use)
     finally:
         await client.close()
+    shown = f"{done['rating']}" if done["rating"] is not None else "saved"
+    return {"ok": True, "rating": done["rating"], "votes": done["votes"], "message": f"Ratings updated. Score {shown}."}
+
+
+async def _update_ratings(cfg, client, found_by_media, kind, row, write_lock=None, spare_omdb=False, item_id=None,
+                          use=None):
+    """Fetch and save the ratings of one movie, show or episode row.
+
+    The IMDb score comes from the local IMDb copy when it has the title, and replaces what OMDb has cached.
+    spare_omdb (batches) skips the OMDb request when the local copy covers the IMDb score and the item already
+    has its critic scores, so a large batch does not use up the OMDb quota. found_by_media shares the source
+    clients between the items of a batch. Returns the score, the votes and whether the local copy gave the IMDb score.
+    """
+    item_id = item_id or row["id"]
+    if row.get("locked"):
+        raise RatingsSkipped("This item is locked. Unlock it to update ratings.")
+    extra_ids = {}
+    media = "tv" if kind in ("show", "episode") else "movies"
+    if media not in found_by_media:
+        found_by_media[media] = sources(client, cfg, media)
+    found = found_by_media[media]
+    if use is not None:
+        found = {name: source for name, source in found.items() if name in use}
+    fresh = {}
+    problems = []
+
+    async def attempt(call):
+        """One source failing (Trakt answering with a web page, say) must not lose what the others returned."""
+        try:
+            return await call
+        except ScrapeError as exc:
+            problems.append(str(exc))
+            return None
+
+    tmdb = found.get("tmdb")
+    if tmdb and kind == "movie" and row.get("tmdb_id"):
+        base = await attempt(tmdb.movie(row["tmdb_id"]))
+        fresh.update((base or {}).get("ratings") or {})
+    elif tmdb and kind == "show" and row.get("tmdb_id"):
+        base = await attempt(tmdb.tv(row["tmdb_id"]))
+        fresh.update((base or {}).get("ratings") or {})
+    elif tmdb and kind == "episode" and row.get("show_tmdb"):
+        episode = await attempt(tmdb.episode(row["show_tmdb"], row["season_number"], row["episode_number"]))
+        fresh.update((episode or {}).get("ratings") or {})
+    if kind == "episode":
+        # An episode row carries the episode's own ids, but OMDb and Trakt are asked by the show's id plus the
+        # season and episode number. The episode's own IMDb id as a show id made Trakt answer with a web page.
+        ids = {key: str(value) for key, value in (row.get("show_ids") or {}).items() if value}
+        for key in ("imdb", "tvdb"):
+            if row.get(f"show_{key}"):
+                ids[key] = str(row[f"show_{key}"])
+        if row.get("show_tmdb"):
+            ids["tmdb"] = str(row["show_tmdb"])
+    else:
+        ids = _ids(row)
+    local = _local_imdb(cfg, kind, row, ids) if use is None or "local" in use else {}
+    local_ratings = local.get("ratings") or {}
+    has_critics = bool(_CRITIC_SCORES & set(row.get("ratings") or {}))
+    if kind == "episode" and local_ratings:
+        # The local copy has this episode's score, so OMDb is not asked for it.
+        fresh.update(local_ratings)
+    elif found.get("omdb") and ids.get("imdb") and not (spare_omdb and local_ratings.get("imdb") and has_critics):
+        if kind == "episode":
+            omdb = await attempt(found["omdb"].episode_ratings(ids["imdb"], row["season_number"], row["episode_number"]))
+        else:
+            omdb = await attempt(found["omdb"].ratings(ids["imdb"]))
+        fresh.update((omdb or {}).get("ratings") or {})
+    if found.get("trakt"):
+        if kind == "movie":
+            payload = await attempt(found["trakt"].movie(ids))
+        elif kind == "show":
+            payload = await attempt(found["trakt"].show(ids))
+        else:
+            payload = await attempt(found["trakt"].episode(ids, row["season_number"], row["episode_number"]))
+        fresh.update((payload or {}).get("ratings") or {})
+        if kind != "episode":              # the Trakt id found this way is the show's, not the episode's
+            extra_ids = (payload or {}).get("ids") or {}
+    if kind in ("movie", "show"):
+        fresh.update(await _page_ratings(found, kind, row.get("title"), row.get("year")))
+    fresh.update(local_ratings)            # local first: the IMDb score of the local copy wins over OMDb's cached one
+    if kind == "episode" and "imdb" not in fresh and _span_keys(row):
+        # Part of a multi-episode file that IMDb lists once: the other episodes take the score it has.
+        shared = shared_imdb(cfg, row, await asyncio.to_thread(_file_siblings, row))
+        if shared:
+            fresh["imdb"] = shared
+    if kind == "episode" and local.get("ids") and not extra_ids.get("imdb"):
+        extra_ids = {**extra_ids, **local["ids"]}
     if not fresh:
+        if problems:
+            raise ScrapeError(problems[0])
         raise ScrapeError("No ratings came back. The item needs a TMDB id, and OMDb or Trakt when you want those scores.")
     ratings = dict(row.get("ratings") or {})
     ratings.update(fresh)
@@ -741,25 +984,168 @@ async def _refresh_ratings(kind, item_id):
     if extra_ids:
         await asyncio.to_thread(store.merge_ids, kind, item_id, extra_ids)
     if cfg.get("write_nfo") and cfg.get("write_on_edit", True):
-        if kind == "movie":
-            await asyncio.to_thread(exports.write_movie, item_id, cfg)
-        elif kind == "show":
-            await asyncio.to_thread(exports.write_show, item_id, cfg)
-        else:
-            await asyncio.to_thread(exports.write_show, str(row["show_id"]), cfg, "overwrite", [item_id])
-    shown = f"{value}" if value is not None else "saved"
-    return {"ok": True, "rating": value, "votes": votes, "message": f"Ratings updated. Score {shown}."}
+        async with (write_lock or contextlib.nullcontext()):
+            if kind == "movie":
+                await asyncio.to_thread(exports.write_movie, item_id, cfg)
+            elif kind == "show":
+                await asyncio.to_thread(exports.write_show, item_id, cfg)
+            else:
+                await asyncio.to_thread(exports.write_show, str(row["show_id"]), cfg, "overwrite", [item_id])
+    return {"rating": value, "votes": votes, "local": bool(local_ratings.get("imdb")), "warnings": problems}
+
+
+def _span_keys(row):
+    """(season, episode) of every episode in the file this episode is part of; empty for a single-episode file."""
+    span = row.get("file_span")
+    if isinstance(span, str):
+        try:
+            span = json.loads(span)
+        except ValueError:
+            return []
+    keys = []
+    for item in span if isinstance(span, list) else []:
+        try:
+            keys.append((int(item["season"]), int(item["episode"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return keys if len(keys) > 1 else []
+
+
+def shared_imdb(cfg, row, siblings=None):
+    """The IMDb score an episode takes from the other episodes in its file.
+
+    IMDb often lists a two-part episode once, on its first number. Every other episode in that file gets that
+    score. The local IMDb copy is asked for each of them in turn; the scores already saved on the other episodes in
+    the file (siblings: their rows) come next. None for a single-episode file or when none of them has a score."""
+    keys = _span_keys(row)
+    if not keys:
+        return None
+    try:
+        mine = (int(row.get("season_number")), int(row.get("episode_number")))
+    except (TypeError, ValueError):
+        return None
+    show_imdb = row.get("show_imdb")
+    for key in keys:
+        if key == mine:
+            continue
+        found = imdb_data.episode_result(cfg, show_imdb, key[0], key[1])
+        value = ((found or {}).get("ratings") or {}).get("imdb")
+        if value:
+            return value
+    for other in siblings or []:
+        if str(other.get("id")) == str(row.get("id")) or other.get("path") != row.get("path"):
+            continue
+        value = (other.get("ratings") or {}).get("imdb")
+        if value:
+            return value
+    return None
+
+
+def _file_siblings(row):
+    return [dict(item) for item in store.db.fetchall(
+        "SELECT id, path, ratings FROM tv_episodes WHERE show_id = %s AND path = %s AND id <> %s",
+        (row["show_id"], row.get("path"), row["id"]),
+    )]
+
+
+def _rating_title(kind, row):
+    title = str(row.get("title") or "").strip()
+    if kind != "episode":
+        return title or "Untitled"
+    place = f"S{int(row.get('season_number') or 0):02d}E{int(row.get('episode_number') or 0):02d}"
+    show = str(row.get("show_title") or "").strip()
+    return " ".join(part for part in (show, place, title if title and title != show else "") if part)
+
+
+async def _ratings_main(job, ids):
+    use = getattr(job, "rating_sources", None)
+    flt = getattr(job, "rating_filter", None)
+    """Update the ratings of the picked movies, shows or episodes, a few at a time."""
+    kind = {"movies": "movie", "tv": "show", "episodes": "episode"}[job.media]
+    client = Client()
+    found = {}
+    gate = asyncio.Semaphore(job.cfg["concurrency"])
+    write_lock = asyncio.Lock()
+    try:
+        async def one(item_id):
+            async with gate:
+                if job.cancelled:
+                    return
+                title = None
+                try:
+                    row = await asyncio.to_thread(_rating_row, kind, item_id)
+                    if not row:
+                        title = str(item_id)
+                        raise ScrapeError("That item is not in the library any more")
+                    title = _rating_title(kind, row)
+                    chosen = use
+                    if flt:
+                        chosen = filter_rating_sources(row.get("ratings"), use, flt)
+                        if not chosen:
+                            job.count("filtered")
+                            return
+                    done = await _update_ratings(job.cfg, client, found, kind, row, write_lock=write_lock, spare_omdb=True, use=chosen)
+                    job.count("scraped")
+                    if done["local"]:
+                        job.count("local")
+                    shown = "" if done["rating"] is None else f" {done['rating']}"
+                    job.log(f"Ratings for {title}:{shown}{' (IMDb from the local data)' if done['local'] else ''}")
+                    for problem in done.get("warnings") or []:
+                        job.log(f"  Not used for {title}: {problem}")
+                except RatingsSkipped as exc:
+                    job.count("skipped")
+                    job.log(f"Skipped {title}: {exc}")
+                except ScrapeError as exc:
+                    job.fail(title or str(item_id), exc)
+                except Exception as exc:
+                    logger.exception("ratings update of %s failed", item_id)
+                    job.fail(title or str(item_id), exc)
+                finally:
+                    job.step(title)
+
+        await asyncio.gather(*(one(item_id) for item_id in ids))
+    finally:
+        await client.close()
+
+
+def _ratings_summary(result):
+    updated, local = int(result.get("scraped") or 0), int(result.get("local") or 0)
+    parts = [f"{updated} updated"]
+    if local:
+        parts.append(f"{local} with the IMDb score from the local data")
+    if int(result.get("filtered") or 0):
+        parts.append(f"{int(result['filtered'])} left out by the filter")
+    parts.extend([f"{int(result.get('skipped') or 0)} skipped", f"{int(result.get('failed') or 0)} failed"])
+    reasons = {}
+    for item in result.get("failures") or []:
+        text = str(item.get("error") or "").strip()
+        if text:
+            reasons[text] = reasons.get(text, 0) + 1
+    line = ", ".join(parts)
+    if reasons:
+        top, count = max(reasons.items(), key=lambda pair: pair[1])
+        line += f". Why: {top}" + (f" ({count} items)" if count > 1 else "")
+    return line
+
+
+def _local_imdb(cfg, kind, row, ids):
+    """The local IMDb copy's answer for one item: {"ratings": {...}, "ids": {...}}, empty when it has none or is off."""
+    if kind == "episode":
+        found = imdb_data.episode_result(cfg, row.get("show_imdb"), row.get("season_number"), row.get("episode_number"))
+    else:
+        found = imdb_data.title_result(cfg, ids.get("imdb"))
+    return found or {}
 
 
 def _rating_row(kind, item_id):
     if kind == "movie":
         return store.movie_row(item_id)
     if kind == "show":
-        show, _seasons, _episodes = store.show_rows(item_id)
-        return show
+        return store.show_row(item_id)        # the show alone: a batch must not load every episode of every show
     row = store.db.fetchone(
         """
-        SELECT e.*, s.tmdb_id AS show_tmdb, s.imdb_id AS show_imdb, s.tvdb_id AS show_tvdb, s.ids AS show_ids
+        SELECT e.*, s.tmdb_id AS show_tmdb, s.imdb_id AS show_imdb, s.tvdb_id AS show_tvdb, s.ids AS show_ids,
+               s.title AS show_title
         FROM tv_episodes e JOIN tv_shows s ON s.id = e.show_id WHERE e.id = %s
         """,
         (item_id,),
@@ -826,6 +1212,8 @@ def sources(client, cfg, media):
         found["anilist"] = AniList(client)
     if "ofdb" in chain:
         found["ofdb"] = Ofdb(client)
+    if "ofdbcc" in chain:
+        found["ofdbcc"] = OfdbCc(client)
     if media == "tv" and "tvmaze" in chain:
         found["tvmaze"] = Tvmaze(client)
     if media in ("movies", "sets") and "tmdb" not in found:
@@ -1226,6 +1614,8 @@ def _writes_metadata(job):
 
 def _fields(job, names, level="movie"):
     names = [field for field in names if field not in RATING_FIELDS]
+    if getattr(job, "fix", False) and job.picks is None:
+        return list(names)          # Fix Match: the old title, year, language and country belonged to the wrong match
     if job.picks is not None:
         chosen = _chosen(job, level) or set()
         allowed = {column for column, keys in _COLUMN_KEYS.items() if chosen & keys}
@@ -1413,6 +1803,7 @@ def _remember_art(job, candidates, kinds, level, row=None):
         ranked = merge.rank_art(
             candidates, kind, lang=job.lang, sources=sources,
             min_width=job.cfg["min_width"].get(kind, 0), langs=job.cfg.get("art_languages"),
+            textless_fanart=job.cfg.get("fanart_textless", True),
         )
         if ranked:
             bucket.setdefault(kind, []).extend(_slim_art(ranked))
@@ -1488,11 +1879,13 @@ async def _extra_art(job, client, folder, candidates, kinds, level="movie", row=
         if not kinds.get(flag) or job.cancelled:
             continue
         ranked = merge.rank_art(candidates, kind, lang=job.lang, sources=sources,
-                                min_width=job.cfg["min_width"].get(kind, 0), langs=job.cfg.get("art_languages"))
+                                min_width=job.cfg["min_width"].get(kind, 0), langs=job.cfg.get("art_languages"),
+                                textless_fanart=job.cfg.get("fanart_textless", True))
         # The main fanart file is separate. Extra fanart and extra thumbs each have their own count.
         limit = job.cfg.get("extrafanart_count") or 10 if flag == "extrafanart" else (job.cfg.get("extra_art_count") or 10)
         saved = await art_fetch.extras(
             client, ranked[1:], os.path.join(folder, flag), prefix, kind, _art_policy(job, level), limit,
+            replace=bool(getattr(job, "fix", False)),
         )
         job.count("art", len(saved))
 
@@ -1511,13 +1904,30 @@ async def _art(job, client, kinds, candidates, existing, base_for, level="movie"
         if not enabled or job.cancelled or kind in {"extrafanart", "extrathumbs"}:
             continue
         ranked = merge.rank_art(candidates, kind, lang=job.lang, sources=sources,
-                                min_width=job.cfg["min_width"].get(kind, 0), langs=job.cfg.get("art_languages"))
+                                min_width=job.cfg["min_width"].get(kind, 0), langs=job.cfg.get("art_languages"),
+                                textless_fanart=job.cfg.get("fanart_textless", True))
+        fix = bool(getattr(job, "fix", False))
         if not ranked:
+            if fix and current.get(kind):
+                # The old image belongs to the wrong match; without a new one it must not stay.
+                old_path = current.pop(kind)
+                try:
+                    if isinstance(old_path, str) and os.path.isfile(old_path):
+                        await asyncio.to_thread(os.remove, old_path)
+                    job.log(f"Artwork {level} {kind}: no image for the new match, the old one was removed")
+                except OSError as exc:
+                    job.log(f"Artwork {level} {kind}: no image for the new match, the old one was dropped "
+                            f"but the file could not be removed ({exc})")
             continue
-        path = await art_fetch.fetch(client, ranked, base_for(kind), kind, current.get(kind), _art_policy(job, level))
+        path = await art_fetch.fetch(client, ranked, base_for(kind), kind, current.get(kind), _art_policy(job, level),
+                                     replace=fix)
         if path:
             current[kind] = path
             job.count("art")
+            if fix:
+                job.log(f"Artwork {level} {kind}: replaced ({os.path.basename(path)})")
+        elif fix:
+            job.log(f"Artwork {level} {kind}: {len(ranked)} candidates, none could be saved, the old one is kept")
     return current
 
 
@@ -1532,7 +1942,8 @@ async def _stacked_discarts(job, client, folder, stem, parts, art, row=None):
     if job.picks is not None and "discart" not in ((job.picks.get("movie") or {}).get("art") or set()):
         return
     ranked = merge.rank_art(art or [], "discart", lang=job.lang, sources=_art_sources(job, "movie", row),
-                            min_width=job.cfg["min_width"].get("discart", 0), langs=job.cfg.get("art_languages"))
+                            min_width=job.cfg["min_width"].get("discart", 0), langs=job.cfg.get("art_languages"),
+                                textless_fanart=job.cfg.get("fanart_textless", True))
     if len(ranked) < 2:
         return
     for index, candidate in enumerate(ranked[: len(parts)], start=1):
@@ -1687,6 +2098,11 @@ async def _movie(job, client, found, movie_id):
             tasks["fanart"] = _quiet(job, "Fanart.tv", found["fanart"].movie(ids))
         else:
             job.log("Fanart.tv: skipped (no TMDB or IMDb id)")
+    if "ofdbcc" in found:
+        if ids.get("imdb") or ids.get("tmdb"):
+            tasks["ofdbcc"] = _quiet(job, "Open Film Database", found["ofdbcc"].movie(ids))
+        else:
+            job.log("Open Film Database: skipped (no IMDb or TMDB id)")
     _score_tasks(tasks, job, found, "movie", row["title"], row.get("year"))
     if tmdb_base and tmdb_base.get("set") and tmdb_base["set"].get("tmdb_id"):
         tasks["set"] = _quiet(job, "TMDB collection",
@@ -1700,11 +2116,15 @@ async def _movie(job, client, found, movie_id):
     if answers.get("trakt"):
         payload = answers["trakt"] or {}
         results.append({"source": "trakt", "ratings": payload.get("ratings") or {}, "ids": payload.get("ids") or {}})
-    for name in ("rottentomatoes", "metacritic", "anilist", "ofdb"):
+    for name in ("rottentomatoes", "metacritic", "anilist", "ofdb", "ofdbcc"):
         if answers.get(name):
             results.append(answers[name])
     if answers.get("fanart"):
         results.append({"source": "fanart", "art": answers["fanart"]})
+    # The local IMDb data goes last, so it only fills what the other sources left empty.
+    local = imdb_data.title_result(job.cfg, ids.get("imdb"))
+    if local:
+        results.append(local)
     merged = merge.combine(_ordered(results, chain))
     locked_tmdb = ((tmdb_base or {}).get("ids") or {}).get("tmdb")
     if locked_tmdb:
@@ -1942,6 +2362,11 @@ async def _show(job, client, found, show_id):
             tasks["fanart"] = _quiet(job, "Fanart.tv", found["fanart"].tv(ids))
         else:
             job.log("Fanart.tv: skipped (no TVDB id)")
+    if "ofdbcc" in found:
+        if ids.get("imdb") or ids.get("tmdb") or ids.get("tvdb"):
+            tasks["ofdbcc"] = _quiet(job, "Open Film Database", found["ofdbcc"].show(ids))
+        else:
+            job.log("Open Film Database: skipped (no IMDb, TMDB or TVDB id)")
     _score_tasks(tasks, job, found, "tv", show["title"], show.get("year"))
     numbers = sorted({season["season_number"] for season in seasons})
     if base_tmdb:
@@ -1959,6 +2384,7 @@ async def _show(job, client, found, show_id):
     if "tvmaze" in found:
         tasks["tvmaze"] = _quiet(job, "TVMaze", found["tvmaze"].show(ids, show["title"], show.get("year")))
     answers = dict(zip(tasks, await asyncio.gather(*tasks.values())))
+    answers["imdb_show"] = ids.get("imdb")        # lets each episode find its own IMDb id before the show row has one
     if getattr(job, "missing_only", False):
         if job.only_season_numbers:
             seasons = [item for item in seasons if int(item["season_number"]) in job.only_season_numbers]
@@ -1980,7 +2406,7 @@ async def _show(job, client, found, show_id):
         results.append(dict(answers["omdb"]))
     if answers.get("trakt"):
         results.append({**(answers["trakt"] or {}), "source": "trakt"})
-    for name in ("rottentomatoes", "metacritic", "anilist", "ofdb"):
+    for name in ("rottentomatoes", "metacritic", "anilist", "ofdb", "ofdbcc"):
         if answers.get(name):
             results.append(answers[name])
     fanart_seasons = {}
@@ -1990,6 +2416,9 @@ async def _show(job, client, found, show_id):
     if answers.get("tvmaze"):
         results.append(answers["tvmaze"])
         answers["tvmaze_episodes"] = answers["tvmaze"].get("episodes") or {}
+    local = imdb_data.title_result(job.cfg, ids.get("imdb"))
+    if local:
+        results.append(local)
     merged = _prefer_season_source(job, merge.combine(_ordered(results, chain)), results)
     merged["ids"] = {**merged.get("ids", {}), **ids}
     for kind in ("imdb", "tmdb", "tvdb", "anilist", "ofdb", "trakt"):
@@ -2029,12 +2458,19 @@ async def _show(job, client, found, show_id):
         return title
     if job.art_only:
         folder = show["path"]
-        art = await _art(job, client, job.cfg["tv_art"], merged.get("art") or [], show.get("artwork"),
-                         lambda kind: os.path.join(folder, kind), level="show", row=show)
-        await _extra_art(job, client, folder, merged.get("art") or [], job.cfg["tv_art"], level="show", row=show)
-        if art != (show.get("artwork") or {}):
-            await asyncio.to_thread(store.set_artwork, "tv_shows", show_id, art)
-        for season in seasons:
+        # A season job covers only those seasons. A show job can be narrowed to some levels (art_levels).
+        levels = getattr(job, "art_levels", None)
+        scoped = bool(getattr(job, "only_seasons", None))
+        do_show = (levels is None or "show" in levels) and not scoped
+        do_seasons = levels is None or "season" in levels
+        do_episodes = (levels is None or "episode" in levels) and not scoped
+        if do_show:
+            art = await _art(job, client, job.cfg["tv_art"], merged.get("art") or [], show.get("artwork"),
+                             lambda kind: os.path.join(folder, kind), level="show", row=show)
+            await _extra_art(job, client, folder, merged.get("art") or [], job.cfg["tv_art"], level="show", row=show)
+            if art != (show.get("artwork") or {}):
+                await asyncio.to_thread(store.set_artwork, "tv_shows", show_id, art)
+        for season in (seasons if do_seasons else []):
             if season.get("locked") or season.get("status") == "IGNORED":
                 continue
             with activity.holding() as hold:
@@ -2047,8 +2483,9 @@ async def _show(job, client, found, show_id):
                                         level="season", row=season)
                 if season_art != (season.get("artwork") or {}):
                     await asyncio.to_thread(store.set_artwork, "tv_seasons", season["id"], season_art)
-        await _episodes(job, client, show, episodes, answers, order, primary)
-        await _fill_missing_episodes(job, client, show, seasons, episodes, answers, order, primary)
+        if do_episodes:
+            await _episodes(job, client, show, episodes, answers, order, primary)
+            await _fill_missing_episodes(job, client, show, seasons, episodes, answers, order, primary)
         job.count("scraped")
         job.log(f"Artwork for {title}")
         _settle_hold(job, "tv_shows", show_id, title, True)
@@ -2075,6 +2512,9 @@ async def _show(job, client, found, show_id):
         await _extra_art(job, client, folder, merged["art"], job.cfg["tv_art"], level="show", row=show)
         if art != (show.get("artwork") or {}):
             await asyncio.to_thread(store.set_artwork, "tv_shows", show_id, art)
+    if getattr(job, "fix", False):
+        # The episode lists of the old match say nothing about this show; the new match refills them below.
+        await asyncio.to_thread(store.reset_season_listings, show_id)
     for season in seasons:
         if season.get("locked") or season.get("status") == "IGNORED":
             continue
@@ -2104,10 +2544,15 @@ async def _show(job, client, found, show_id):
             ids = _season_ids(job, info.get("ids"))
             if ids and (job.policy == "overwrite" or not (season.get("ids") or {})):
                 meta["ids"] = ids
-            if info.get("episode_count"):
-                meta["tmdb_episode_count"] = info["episode_count"]
-            if info.get("episode_numbers"):
-                meta["tmdb_episode_numbers"] = info["episode_numbers"]
+            if job.policy == "overwrite" or getattr(job, "fix", False):
+                # A list from an earlier (wrong) match must not outlive a scrape that replaces it.
+                meta["tmdb_episode_count"] = info.get("episode_count") or None
+                meta["tmdb_episode_numbers"] = list(info.get("episode_numbers") or [])
+            else:
+                if info.get("episode_count"):
+                    meta["tmdb_episode_count"] = info["episode_count"]
+                if info.get("episode_numbers"):
+                    meta["tmdb_episode_numbers"] = info["episode_numbers"]
             if meta:
                 await asyncio.to_thread(store.save_season_meta, season["id"], meta)
             if (chosen is None or "season_name" in chosen) and "season_name" not in set(season.get("locked_fields") or []):
@@ -2123,6 +2568,14 @@ async def _show(job, client, found, show_id):
                 await asyncio.to_thread(store.set_artwork, "tv_seasons", season["id"], season_art)
     await _episodes(job, client, show, episodes, answers, order, primary)
     await _fill_missing_episodes(job, client, show, seasons, episodes, answers, order, primary)
+    if getattr(job, "fix", False):
+        # Another show title changes which episodes count as the same one, so duplicate and upgrade pills are redone.
+        try:
+            from curator.video import copies
+            seeds = await asyncio.to_thread(copies.episode_seed_rows, [str(item["id"]) for item in episodes])
+            await asyncio.to_thread(copies.refresh_episode_seeds, seeds)
+        except Exception as exc:
+            job.log(f"{show.get('title')}: could not refresh the duplicate and upgrade marks: {exc}")
     if getattr(job, "only_seasons", None):
         if not job.art_only and job.cfg["write_nfo"] and _writes_metadata(job) and not _defer_active(job):
             for season in seasons:
@@ -2258,6 +2711,15 @@ async def _scrape_one_episode(job, client, show, episode, episodes, answers, ord
         found.append(from_tvmaze)
     if not found:
         return False
+    show_imdb = answers.get("imdb_show") or (show.get("ids") or {}).get("imdb") or show.get("imdb_id")
+    local = imdb_data.episode_result(job.cfg, show_imdb, key[0], key[1])
+    if local:
+        found.append(local)
+    if not any((item.get("ratings") or {}).get("imdb") for item in found) and _span_keys(episode):
+        # A multi-episode file that IMDb lists once: this episode takes the score of the others in the file.
+        shared = shared_imdb(job.cfg, {**episode, "show_imdb": show_imdb}, episodes)
+        if shared:
+            found.append({"source": "imdb_data", "ratings": {"imdb": shared}})
     merged = merge.combine(found)
     if merged.get("guest_stars") and "guest_stars" not in set(episode.get("locked_fields") or []) and _meta_on(job, "episode", "actors") and not _defer_active(job):
         merged["guest_stars"] = await actor_art.store_thumbs(client, show["path"], merged["guest_stars"])
@@ -2338,11 +2800,13 @@ async def _fill_missing_episodes(job, client, show, seasons, episodes, answers, 
         except (TypeError, ValueError):
             continue
     made = listed = 0
+    wanted = set()
     for season in seasons:
         if season.get("locked") or season.get("status") == "IGNORED":
             continue
         for number in sorted(_listed_numbers(answers, season["season_number"])):
             listed += 1
+            wanted.add((int(season["season_number"]), int(number)))
             code = naming.episode_mark(season["season_number"], number)
             existing = known.get((int(season["season_number"]), int(number)))
             if existing and not existing.get("missing") and not str(existing.get("path") or "").startswith("missing://"):
@@ -2378,6 +2842,14 @@ async def _fill_missing_episodes(job, client, show, seasons, episodes, answers, 
             made += 1
             job.log(f"{show.get('title')}: {code} is missing, metadata saved")
     title = show.get("title") or "Show"
+    if getattr(job, "fix", False):
+        # Matched to another show: the missing episodes and seasons of the old one are not this show's.
+        try:
+            gone = await asyncio.to_thread(store.prune_placeholders, show["id"], wanted)
+            if gone:
+                job.log(f"{title}: {gone} missing episode{'s' if gone != 1 else ''} of the old match removed")
+        except Exception as exc:
+            job.log(f"{title}: could not remove the old match's missing episodes: {exc}")
     if made:
         job.log(f"{title}: {made} missing episode{'s' if made != 1 else ''} recorded")
     elif listed:

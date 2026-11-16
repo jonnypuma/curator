@@ -93,7 +93,17 @@ function arrSearchBlocked(source) {
 
 function arrTest(action) {
     return `<div class="arr-test"><button type="button" class="btn-ghost" data-action="${action}">Test connection</button>
-        <p class="muted" data-arr-test></p></div>`;
+        <p class="muted" data-arr-test>${escapeHtml(arrVersionNote(action))}</p></div>`;
+}
+
+// What the last connection test saved, shown under the button until the next test.
+function arrVersionNote(action) {
+    const app = String(action || "").replace(/^auto-/, "").replace(/-test$/, "");
+    const entry = ((state.settings || {}).arr_versions || {})[app];
+    if (!entry || !entry.version) return "";
+    const api = entry.api ? `, API ${entry.api}` : "";
+    const when = String(entry.tested_at || "").replace("T", " ").slice(0, 16);
+    return `Last test: version ${entry.version}${api}${when ? ` (${when})` : ""}`;
 }
 
 function isPlaceholderProfile(name) {
@@ -313,11 +323,13 @@ async function loadLidarrOptions(quiet) {
     return data;
 }
 
+// Only an app with an address and a key is asked: an app that is not set up would answer with an error toast.
 function refreshSavedArrOptions() {
     const jobs = [];
-    if (document.getElementById("radarr-profile")) jobs.push(loadRadarrOptions(true));
-    if (document.getElementById("sonarr-profile")) jobs.push(loadSonarrOptions(true));
-    if (document.getElementById("lidarr-profile")) jobs.push(loadLidarrOptions(true));
+    const ready = (conn) => Boolean(String(conn.url || "").trim() && String(conn.key || "").trim());
+    if (document.getElementById("radarr-profile") && ready(radarrConnection())) jobs.push(loadRadarrOptions(true));
+    if (document.getElementById("sonarr-profile") && ready(sonarrConnection())) jobs.push(loadSonarrOptions(true));
+    if (document.getElementById("lidarr-profile") && ready(lidarrConnection())) jobs.push(loadLidarrOptions(true));
     Promise.all(jobs.map((job) => Promise.resolve(job).catch(() => null)));
 }
 
@@ -510,6 +522,7 @@ async function testArrConnection(path, body, button) {
     try {
         const data = await api(path, { method: "POST", body });
         const message = data.message || "Connected.";
+        if (data.versions && state.settings) state.settings.arr_versions = data.versions;
         if (note) {
             note.textContent = message;
             note.className = "key-set";
@@ -717,12 +730,13 @@ function runningMark(item, label) {
 
 function tickQueueElapsed() {
     const fetched = Number(state.queuePanel.fetchedAt) || Date.now();
-    document.querySelectorAll("#queue-items .queue-elapsed").forEach((node) => {
+    document.querySelectorAll("#queue-items .queue-elapsed, #queue-status .queue-elapsed").forEach((node) => {
         if (node.dataset.base === "") return;
         const base = Number(node.dataset.base);
         if (!Number.isFinite(base)) return;
         const seconds = Math.max(0, Math.floor(base + (Date.now() - fetched) / 1000));
-        node.textContent = `${node.dataset.label || "Running"} · ${queueRunLength(seconds)}`;
+        const label = node.dataset.label;
+        node.textContent = label === "" ? queueRunLength(seconds) : `${label || "Running"} · ${queueRunLength(seconds)}`;
     });
 }
 
@@ -789,10 +803,13 @@ function queueTab() {
 
 function queueLaneCount(name) {
     const queue = live.queue || {};
-    if (name === "webhook") return (Number(queue.queued_items_count) || 0) + (queue.running ? 1 : 0);
+    if (name === "webhook") {
+        const left = queue.running ? Math.max(1, (Number(queue.batch_total) || 1) - (Number(queue.batch_done) || 0)) : 0;
+        return (Number(queue.queued_items_count) || 0) + left;
+    }
     if (name === "scan") return (state.queuePanel.scans || []).length;
     if (name === "arr") return (state.queuePanel.arr || queue.arr || []).length;
-    if (name === "library") return (state.queuePanel.library || queue.library || []).length;
+    if (name === "library") return (state.queuePanel.library || queue.library || []).reduce((sum, item) => sum + libraryItemsLeft(item), 0);
     return 0;
 }
 
@@ -803,7 +820,10 @@ function paintQueueTabs() {
         const name = button.dataset.tab;
         const on = name === tab;
         const count = queueLaneCount(name);
-        button.textContent = count ? `${labels[name] || name} (${count})` : (labels[name] || name);
+        // The count sits in a pill after the label, like the alert counts on the header buttons.
+        const label = escapeHtml(labels[name] || name);
+        const html = count ? `${label}<span class="icon-count queue-tab-count">${count > 99 ? "99+" : count}</span>` : label;
+        if (button.innerHTML !== html) button.innerHTML = html;
         button.classList.toggle("is-active", on);
         button.setAttribute("aria-selected", on ? "true" : "false");
     });
@@ -848,12 +868,17 @@ function paintQueueRing(queue) {
     const bar = document.getElementById("queue-ring-bar");
     if (bar && tab === "webhook") {
         bar.style.strokeDasharray = `${QUEUE_RING}`;
-        bar.style.strokeDashoffset = `${imports ? QUEUE_RING * (1 - Math.min(1, remaining / total)) : QUEUE_RING}`;
+        const share = queue.running && Number(queue.batch_total)
+            ? Math.min(1, (Number(queue.batch_done) || 0) / Number(queue.batch_total))
+            : (imports ? 1 - Math.min(1, remaining / total) : 0);
+        bar.style.strokeDashoffset = `${QUEUE_RING * (1 - share)}`;
         bar.classList.toggle("is-running", !!queue.running);
     }
     const clock = document.getElementById("queue-clock");
     const count = document.getElementById("queue-count");
-    if (clock) clock.textContent = queue.running ? "…" : imports ? queueClock(remaining) : "–";
+    const batchTotal = Number(queue.batch_total) || 0;
+    const batchDone = Math.min(batchTotal, Number(queue.batch_done) || 0);
+    if (clock) clock.textContent = queue.running ? (batchTotal ? `${batchDone}/${batchTotal}` : "…") : imports ? queueClock(remaining) : "–";
     if (count) count.textContent = queue.running ? "Running" : imports ? "Starts in" : "Empty";
     const status = document.getElementById("queue-status");
     const rules = document.getElementById("queue-rules");
@@ -888,7 +913,7 @@ function paintQueueRing(queue) {
         clearable = waitingLibrary.length > 0;
         busy = runningLibrary.length > 0;
         text = runningLibrary.length
-            ? runningLibrary.map((item) => item.title).join(", ") + (runningLibrary.length === 1 ? " is scanning." : " are scanning.")
+            ? runningLibrary.map(libraryBannerHtml).join(" ")
             : waitingLibrary.length
                 ? `${waitingLibrary.length} update${waitingLibrary.length === 1 ? "" : "s"} waiting.`
                 : "No library updates are waiting.";
@@ -899,8 +924,9 @@ function paintQueueRing(queue) {
         busy = !!queue.running;
         const debounce = Math.round((Number(queue.total_debounce_seconds) || 0) / 60);
         const postpone = Math.round((Number(queue.max_postpone_seconds) || 0) / 60);
+        const progress = webhookProgressText(queue);
         text = queue.running
-            ? (queue.message || "Processing the queue")
+            ? `${queue.message || "Processing the queue"}${progress ? `. ${progress}.` : ""}`
             : imports
                 ? (queue.message || `Imports run in ${queueClock(remaining)} unless more arrive.`)
                 : "The webhook queue is empty.";
@@ -908,7 +934,9 @@ function paintQueueRing(queue) {
     }
     if (title) keepText(title, heading);
     status.className = `scan-status ${busy ? "is-running" : clearable ? "is-stopped" : ""}`;
-    keepText(status, text);
+    // The library banner is HTML (the folder in bold, a ticking time); every other banner is plain text.
+    if (tab === "library" && runningLibrary.length) replaceHtml(status, text);
+    else keepText(status, text);
     keepText(rules, rule);
     const scanBusy = !!(queue.library_busy || (state.scan && state.scan.status === "running") || (state.videoScan && state.videoScan.status === "running"));
     const flush = document.getElementById("queue-flush");
@@ -981,7 +1009,38 @@ function queueItemCell(item) {
     if (!title && path) title = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
     if (!title && !path) return "";
     const extra = path && path !== title ? `<br><small class="mono muted">${escapeHtml(path)}</small>` : "";
-    return `${escapeHtml(title)}${extra}`;
+    return `${queueTitleWithQuality(title, item && item.quality)}${extra}`;
+}
+
+// The info panel's colored badges after a library queue item: resolution, HDR, codecs and container for video,
+// format, bit depth, sample rate and bitrate for music.
+function queueQualityBadges(facts) {
+    if (!facts) return "";
+    if (facts.kind === "music") {
+        const lossless = facts.lossless === true;
+        return [
+            toneBadge(String(facts.format || "").toUpperCase(), lossless ? "badge-lossless" : "badge-audio"),
+            facts.bit_depth ? toneBadge(`${facts.bit_depth}-bit`, "badge-channels") : "",
+            facts.sample_rate ? toneBadge(musicRateLabel(facts.sample_rate), "badge-channels") : "",
+            facts.bitrate ? toneBadge(`${facts.bitrate} kbps`, "badge-audio") : "",
+        ].join("");
+    }
+    const container = containerName(facts.container);
+    return [
+        fileChips(facts),
+        Number(facts.bit_depth) > 8 ? toneBadge(`${facts.bit_depth}-bit`, "badge-channels") : "",
+        container ? toneBadge(container.toUpperCase(), "badge-container") : "",
+    ].join("");
+}
+
+function queueTitleWithQuality(title, quality) {
+    const entries = (quality || []).filter((entry) => entry && entry.label);
+    const text = escapeHtml(title);
+    if (!entries.length) return text;
+    // Inline only when the title is that one item. "A, B" with facts for A alone lists A under the title instead.
+    if (entries.length === 1 && entries[0].label === String(title || "").trim()) return `${text} <span class="queue-quality">${queueQualityBadges(entries[0])}</span>`;
+    const lines = entries.map((entry) => `<div>${escapeHtml(entry.label)} <span class="queue-quality">${queueQualityBadges(entry)}</span></div>`);
+    return `${text}<div class="queue-quality-list">${lines.join("")}</div>`;
 }
 
 function lookUpIn(source) {
@@ -1016,17 +1075,50 @@ function queueScanRow(scan) {
 function queueLibraryRow(item) {
     const running = item.status === "running";
     const names = (item.items || []).filter(Boolean);
+    const facts = (item.quality || []).filter((entry) => entry && entry.label);
+    // Each album or title once: when every name has its own line with quality badges, the names are not listed again
+    // above those lines.
+    const covered = names.length > 1 && facts.length > 0 && names.every((name) => facts.some((entry) => entry.label === name));
     const what = names.length
-        ? `${escapeHtml(names.join(", "))}<br><small class="muted">${escapeHtml(item.scope || "")}</small>`
+        ? `${queueTitleWithQuality(covered ? "" : names.join(", "), item.quality)}<br><small class="muted">${escapeHtml(item.scope || "")}</small>`
         : escapeHtml(item.scope || "");
     const button = running ? "Cancel" : "Remove";
-    const stateLabel = running ? runningMark(item, "Scanning") : "Queued";
+    const stateLabel = running ? runningMark(item, libraryProgressLabel(item) || "Scanning") : "Queued";
     return `<tr>
         <td>${providerIcon(item.player || item.source)}</td>
         <td>${mediaLabelHtml(item.media)}</td>
         <td>${what}</td>
         <td>${stateLabel} <button type="button" class="btn-ghost btn-remove" data-action="queue-drop-library" data-id="${escapeHtml(item.id)}">${button}</button></td>
     </tr>`;
+}
+
+// "Scanning 5 of 37" for a Kodi job that goes through its folders one at a time; "" when the job has no such count.
+function libraryProgressLabel(item) {
+    const progress = item && item.progress;
+    if (!progress || !Number(progress.total)) return "";
+    return `Scanning ${Math.min(Number(progress.total), Number(progress.done || 0) + 1)} of ${Number(progress.total)}`;
+}
+
+// How many folders or titles a library update still has to do: what is left of a running Kodi job, else its items.
+function libraryItemsLeft(item) {
+    const progress = item && item.progress;
+    if (progress && Number(progress.total)) return Math.max(1, Number(progress.total) - Number(progress.done || 0));
+    const count = ((item && item.items) || []).filter(Boolean).length;
+    return count || 1;
+}
+
+// The banner line for a running library update. A Kodi job names the folder it is on and how long it has taken.
+function libraryBannerHtml(item) {
+    const progress = item && item.progress;
+    if (!progress || !Number(progress.total)) return `${escapeHtml(item.title || "")} is scanning.`;
+    const total = Number(progress.total);
+    const done = Math.min(total, Number(progress.done || 0));
+    const left = total - done - 1;
+    const seconds = Math.max(0, Math.floor(Number(progress.current_seconds) || 0));
+    return `${escapeHtml(item.where || item.player || "")} · ${escapeHtml(item.media || "")} · scanning ${done + 1} of ${total}: `
+        + `<strong>${escapeHtml(progress.current || item.title || "")}</strong> · `
+        + `<span class="queue-elapsed" data-label="" data-base="${seconds}">${escapeHtml(queueRunLength(seconds))}</span>`
+        + (left > 0 ? `, ${left} more waiting.` : ".");
 }
 
 function queueArrRow(item) {
@@ -1042,9 +1134,15 @@ function queueArrRow(item) {
 function queueGrouped(rows, head, rowHtml) {
     const running = rows.filter((item) => item.status === "running");
     const waiting = rows.filter((item) => item.status !== "running");
+    // Each row carries its id, so a redraw can keep the row the reader is looking at in place.
+    const keyed = (item) => {
+        const key = escapeHtml(String((item && item.id) || ""));
+        const html = rowHtml(item);
+        return key ? html.replace("<tr", `<tr data-key="${key}"`) : html;
+    };
     const block = (title, list) => {
         if (!list.length) return "";
-        return `<h3 class="queue-group">${title}</h3><table class="queue-table"><thead><tr>${head}</tr></thead><tbody>${list.map(rowHtml).join("")}</tbody></table>`;
+        return `<h3 class="queue-group">${title}</h3><table class="queue-table"><thead><tr>${head}</tr></thead><tbody>${list.map(keyed).join("")}</tbody></table>`;
     };
     return block("Running", running) + block("Waiting", waiting);
 }
@@ -1069,7 +1167,7 @@ function paintQueueLists() {
             <td>${item.status === "running" ? `${runningMark(item, "Running")} <button type="button" class="btn-ghost btn-remove" data-action="queue-cancel-import" data-id="${escapeHtml(item.id)}">Cancel</button>` : `<button type="button" class="btn-ghost btn-remove" data-action="queue-drop" data-id="${escapeHtml(item.id)}">Remove</button>`}</td>
         </tr>`);
     }
-    replaceHtml(host, html || `<p class="muted">Nothing queued.</p>`);
+    replaceHtmlAnchored(host, html || `<p class="muted">Nothing queued.</p>`);
     armQueueClock();
     paintQueueHistory();
 }
@@ -1083,7 +1181,7 @@ function libraryRetryButton(item) {
 
 function queueHistoryTable(rows, empty) {
     if (!rows.length) return `<p class="muted">${empty}</p>`;
-    return `<table class="queue-table"><thead><tr><th>Time</th><th>Where</th><th>Event</th><th>Item</th><th>Result</th></tr></thead><tbody>${rows.map((item) => `<tr class="queue-${escapeHtml(item.outcome)}">
+    return `<table class="queue-table"><thead><tr><th>Time</th><th>Where</th><th>Event</th><th>Item</th><th>Result</th></tr></thead><tbody>${rows.map((item) => `<tr class="queue-${escapeHtml(item.outcome)}" data-key="${escapeHtml(String(item.id || item.received_at || ""))}">
         <td class="mono queue-fit">${escapeHtml(String(item.received_at || "").replace("T", " ").slice(0, 19))}</td>
         <td class="queue-fit">${item.whereHtml || mediaLabelHtml(item.where || item.source || "")}</td>
         <td class="queue-fit">${mediaLabelHtml(item.event_type || "")}</td>
@@ -1099,7 +1197,7 @@ function paintQueueHistory() {
     if (tab === "scan") {
         if (title) title.textContent = "Recent scans";
         const rows = (state.queuePanel.scanEvents || []).map((item) => ({ ...item, where: item.message || item.source || "" }));
-        replaceHtml(host, queueHistoryTable(rows, "No scans yet."));
+        replaceHtmlAnchored(host, queueHistoryTable(rows, "No scans yet."));
         return;
     }
     if (tab === "arr") {
@@ -1108,7 +1206,7 @@ function paintQueueHistory() {
             ...item,
             whereHtml: providerIcon(item.source),
         }));
-        replaceHtml(host, queueHistoryTable(rows, "Nothing has finished yet."));
+        replaceHtmlAnchored(host, queueHistoryTable(rows, "Nothing has finished yet."));
         return;
     }
     if (tab === "library") {
@@ -1118,20 +1216,48 @@ function paintQueueHistory() {
             whereHtml: providerIcon(item.source),
             showMessage: true,
         }));
-        replaceHtml(host, queueHistoryTable(rows, "No library updates yet."));
+        replaceHtmlAnchored(host, queueHistoryTable(rows, "No library updates yet."));
         return;
     }
     if (title) title.textContent = "Recent webhooks";
     const events = state.queuePanel.events || [];
-    replaceHtml(host, events.length
-        ? `<table class="queue-table"><thead><tr><th>Time</th><th>From</th><th>Event</th><th>Item</th><th>Result</th></tr></thead><tbody>${events.map((item) => `<tr class="queue-${escapeHtml(item.outcome)}">
+    replaceHtmlAnchored(host, events.length
+        ? `<table class="queue-table"><thead><tr><th>Time</th><th>From</th><th>Event</th><th>Item</th><th>Result</th></tr></thead><tbody>${events.map((item) => `<tr class="queue-${escapeHtml(item.outcome)}" data-key="${escapeHtml(String(item.id || item.received_at || ""))}">
             <td class="mono queue-fit">${escapeHtml(String(item.received_at || "").replace("T", " ").slice(0, 19))}</td>
             <td class="queue-fit">${providerIcon(item.source)}</td>
             <td class="queue-fit">${mediaLabelHtml(item.event_type)}</td>
             <td>${queueItemCell(item)}</td>
-            <td class="queue-fit">${escapeHtml(QUEUE_OUTCOMES[item.outcome] || item.outcome)}${libraryRetryButton(item)}${item.message ? `<br><small class="muted">${escapeHtml(item.message)}</small>` : ""}</td>
+            <td class="queue-fit">${escapeHtml(QUEUE_OUTCOMES[item.outcome] || item.outcome)}${libraryRetryButton(item)}${webhookCallButton(item)}${item.message ? `<br><small class="muted">${escapeHtml(item.message)}</small>` : ""}</td>
         </tr>`).join("")}</tbody></table>`
         : `<p class="muted">No webhooks yet.</p>`);
+}
+
+// The call a webhook made, kept with its row: Show call opens it, to see why one was not recognised or was ignored.
+function webhookCallButton(item) {
+    if (!item || !item.has_payload || !item.id) return "";
+    return ` <button type="button" class="btn-ghost" data-action="queue-show-call" data-id="${escapeHtml(item.id)}">Show call</button>`;
+}
+
+async function showWebhookCall(id) {
+    const data = await api(`/api/v1/queue/events/${encodeURIComponent(id)}/call`);
+    const source = String(data.source || "webhook");
+    const name = source.charAt(0).toUpperCase() + source.slice(1);
+    document.getElementById("webhook-call-title").textContent = `${name} ${data.event_type || "call"}`;
+    document.getElementById("webhook-call-note").textContent =
+        `Received ${String(data.received_at || "").replace("T", " ").slice(0, 19)}. This is the JSON body the app sent; Curator keeps it with the row.`;
+    document.getElementById("webhook-call-body").textContent = JSON.stringify(data.payload, null, 2);
+    document.getElementById("webhook-call-modal").classList.remove("hidden");
+}
+
+async function copyWebhookCall() {
+    const text = document.getElementById("webhook-call-body").textContent || "";
+    try {
+        if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
+        else copyPlainText(text);
+        notify("Webhook call copied.", "info");
+    } catch (error) {
+        notify("Could not copy the webhook call.", "warning");
+    }
 }
 
 async function retryLibraryUpdate(id) {
@@ -1408,6 +1534,8 @@ const AUTOMATION_ACTIONS = {
     "queue-kodi": (action) => runAction(() => queueKodiLibrary(action.dataset.media)),
     "queue-library-manual": (action) => runAction(() => queueManualLibrary(action), "Queuing…"),
     "queue-library-retry": (action) => runAction(() => retryLibraryUpdate(action.dataset.id), "Queuing…"),
+    "queue-show-call": (action) => runAction(() => showWebhookCall(action.dataset.id)),
+    "queue-copy-call": () => runAction(copyWebhookCall),
     "queue-clear": () => clearQueueAsk(),
     "queue-tab": (action) => selectQueueTab(action.dataset.tab),
     "queue-drop": (action) => runAction(() => dropQueueItem(action.dataset.id)),
@@ -1435,6 +1563,8 @@ const AUTOMATION_ACTIONS = {
     "auto-ob-add": () => obAdd(),
     "auto-ob-remove": (action) => obRemove(action.dataset.id),
     "auto-ob-test": (action) => obTest(action.dataset.id),
+    "auto-ob-digest-preview": () => obDigestPreview(),
+    "auto-ob-digest-send": () => obDigestSend(),
     "auto-row-remove": (action) => { const row = action.closest(".auto-row"); if (row) row.remove(); },
     "auto-test": (action) => testAutomationConnection(action),
     "auto-radarr-test": (action) => testArrConnection("/api/v1/radarr/test", radarrConnection(), action),

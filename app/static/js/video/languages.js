@@ -46,7 +46,8 @@ async function loadLanguageOptions() {
 function onLanguageAction(name, action) {
     if (name === "lang-search") return runAction(() => searchLanguageDefaults(0), "Searching languages…");
     if (name === "lang-page") return runAction(() => searchLanguageDefaults(langState.offset + (Number(action.dataset.dir) * langState.limit)), "Searching languages…");
-    if (name === "lang-save") return runAction(saveLanguageDefaults, "Saving default tracks…");
+    if (name === "lang-save") return runAction(() => saveLanguageDefaults(), "Saving…");
+    if (name === "lang-save-one") return runAction(() => saveLanguageDefaults([action.dataset.file]), "Saving…");
     if (name === "lang-pick") return toggleLanguagePick(action);
 }
 
@@ -130,8 +131,10 @@ function languageFileHtml(file, lang) {
     const audio = languageBadges(file, "audio", file.audio || [], pick.audio, lang);
     const subs = languageBadges(file, "subtitle", file.subtitles || [], pick.subtitle, lang);
     return `<article class="lang-file">
-        <h3>${escapeHtml(file.name || file.title || "Video")}</h3>
-        <p class="muted mono">${escapeHtml(file.path || "")}</p>
+        <div class="lang-file-head"><div>
+            <h3>${escapeHtml(file.name || file.title || "Video")}</h3>
+            <p class="muted mono">${escapeHtml(file.path || "")}</p>
+        </div>${file.mkv ? `<button type="button" data-action="lang-save-one" data-file="${escapeHtml(file.id)}">Save</button>` : ""}</div>
         <p class="lang-line"><span>Audio</span>${audio || `<span class="muted">None</span>`}</p>
         <p class="lang-line"><span>Subs</span>${subs || `<span class="muted">None</span>`}</p>
         ${file.mkv ? "" : `<p class="muted">Not an MKV, so Save leaves it unchanged.</p>`}
@@ -141,7 +144,7 @@ function languageFileHtml(file, lang) {
 function languageBadges(file, kind, tracks, pending, lang) {
     return (tracks || []).map((track) => {
         const on = pending === track.index;
-        const label = `${kind === "audio" ? audioBadge(track) : subtitleBadge(track)}${track.default ? " · Default" : ""}`;
+        const label = `${kind === "audio" ? audioTrackLabel(track) : subtitleBadge(track)}${track.default ? " · Default" : ""}`;
         const mine = String(track.lang || "").toLowerCase() === String(lang || "").toLowerCase();
         const classes = ["lang-badge", track.default ? "is-default" : "", on ? "is-pending" : "", mine && !track.default ? "is-lang" : ""].filter(Boolean).join(" ");
         if (!file.mkv) return `<span class="${classes}">${escapeHtml(label)}</span>`;
@@ -149,7 +152,7 @@ function languageBadges(file, kind, tracks, pending, lang) {
     }).join("");
 }
 
-function audioBadge(track) {
+function audioTrackLabel(track) {
     return [track.codec, track.lang, track.channels].filter(Boolean).join(" ");
 }
 
@@ -170,18 +173,50 @@ function toggleLanguagePick(action) {
     paintLanguageList();
 }
 
-async function saveLanguageDefaults() {
-    const rows = visibleLanguageFiles().filter((file) => file.mkv);
+async function saveLanguageDefaults(only) {
+    const rows = visibleLanguageFiles().filter((file) => file.mkv && (!only || only.includes(String(file.id))));
     if (!rows.length) throw new Error("No MKV files on this page to save");
     const picks = {};
     rows.forEach((file) => {
         if (langState.picks[file.id]) picks[file.id] = langState.picks[file.id];
     });
+    const lang = document.getElementById("lang-lang").value;
     await api("/api/v1/language-defaults/save", {
         method: "POST",
-        body: { lang: document.getElementById("lang-lang").value, ids: rows.map((file) => file.id), picks },
+        body: { lang, ids: rows.map((file) => file.id), picks },
     });
-    watchLanguageSave();
+    langState.saved = { lang, ids: rows.map((file) => file.id), picks };
+    // The button stays busy until the whole save has run.
+    await new Promise((resolve) => {
+        langState.finish = resolve;
+        watchLanguageSave();
+    });
+}
+
+function applySavedLanguageDefaults(saved) {
+    if (!saved) return;
+    const wanted = String(saved.lang || "").toLowerCase();
+    const plain = (track) => !(track.flags || []).length;
+    const rank = (track) => (plain(track) ? 0 : (track.flags || []).includes("forced") && !(track.flags || []).some((flag) => flag === "sdh" || flag === "hi") ? 2 : 1);
+    const mark = (tracks, index) => (tracks || []).forEach((track) => { track.default = track.index === index; });
+    (langState.files || []).forEach((file) => {
+        if (!saved.ids.includes(file.id) || !file.mkv) return;
+        const pick = saved.picks[file.id] || {};
+        const mine = (tracks) => (tracks || []).filter((track) => String(track.lang || "").toLowerCase() === wanted);
+        const picked = pick.audio != null || pick.subtitle != null;
+        const audio = pick.audio != null ? pick.audio : (picked ? null : (mine(file.audio)[0] || {}).index);
+        const subtitle = pick.subtitle != null ? pick.subtitle
+            : (picked ? null : ([...mine(file.subtitles)].sort((a, b) => rank(a) - rank(b))[0] || {}).index);
+        if (audio != null) mark(file.audio, audio);
+        if (subtitle != null) mark(file.subtitles, subtitle);
+        delete langState.picks[file.id];
+    });
+}
+
+function finishLanguageWait() {
+    const finish = langState.finish;
+    langState.finish = null;
+    if (finish) finish();
 }
 
 function watchLanguageSave() {
@@ -195,20 +230,32 @@ async function pollLanguageSave() {
     if (!modal || modal.classList.contains("hidden")) {
         window.clearInterval(langState.timer);
         langState.timer = 0;
+        finishLanguageWait();
         return;
     }
     const data = await api("/api/v1/language-defaults/save");
     const status = document.getElementById("lang-status");
     if (status) {
         const problems = (data.failed || []).length ? ` ${data.failed[0]}` : "";
-        status.textContent = `${data.message || ""}${data.total ? ` ${data.processed || 0} of ${data.total}.` : ""}${problems}`;
+        const total = Number(data.total) || 0;
+        const percent = total ? Math.min(100, Math.round(((data.processed || 0) / total) * 100)) : 0;
+        status.innerHTML = `<span class="lang-progress-text">${escapeHtml(`${data.message || ""}${problems}`)}</span>`
+            + (data.status === "running" && total ? `<span class="lang-progress"><span style="width:${percent}%"></span></span>` : "");
+        status.classList.toggle("is-working", data.status === "running");
     }
     if (data.status !== "running") {
         window.clearInterval(langState.timer);
         langState.timer = 0;
+        finishLanguageWait();
         if (data.status === "done") {
             notify(data.message || "Default tracks saved.", (data.failed || []).length ? "warning" : "success");
-            await searchLanguageDefaults(langState.offset);
+            // No new search: the rows stay where they are and show the saved defaults.
+            applySavedLanguageDefaults(langState.saved);
+            langState.saved = null;
+            const body = document.querySelector("#language-modal .modal-body");
+            const top = body ? body.scrollTop : 0;
+            paintLanguageList();
+            if (body) body.scrollTop = top;
         }
     }
 }

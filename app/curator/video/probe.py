@@ -6,6 +6,7 @@ unknown, so SDR and HDR10 files cost one ffprobe and one MediaInfo call.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -860,11 +861,13 @@ def _prefer_video_probe(probe, mediainfo):
     return probe
 
 
-def analyze(path, cancel=None, *, open_iso=None):
+def analyze(path, cancel=None, *, open_iso=None, timed=None):
     """Probe one file. Returns video_files columns, with probe_error set when a step failed.
 
-    open_iso overrides the Movies setting. A TV scan passes False so a disc image stays a file name.
+    open_iso overrides the Movies setting. A TV scan passes False so a disc image stays a file name. timed(name) is a
+    context manager that times each tool (ffprobe, MediaInfo, dovi_tool) for the scan's "Time per step" line.
     """
+    timed = timed or (lambda _name: contextlib.nullcontext())
     name = os.path.basename(path)
     if ext(name) == ".iso":
         allow = scan_iso() if open_iso is None else bool(open_iso)
@@ -874,7 +877,8 @@ def analyze(path, cancel=None, *, open_iso=None):
     if ext(name) in NOT_PROBED:
         return disc_image_summary(path)
     try:
-        probe, err, code = _ffprobe_document(path, cancel)
+        with timed("ffprobe"):
+            probe, err, code = _ffprobe_document(path, cancel)
         if ext(name) in TS_EXTS and not _has_video(probe):
             deeper, deeper_err, deeper_code = _ffprobe_document(
                 path, cancel, ("-probesize", "50000000", "-analyzeduration", "50000000", "-f", "mpegts"),
@@ -909,7 +913,11 @@ def analyze(path, cancel=None, *, open_iso=None):
             if s.get("codec_type") == "video"
         ))
     )
-    mediainfo = None if _ffprobe_has_detail else _mediainfo(path, cancel, MEDIAINFO_TIMEOUT)
+    if _ffprobe_has_detail:
+        mediainfo = None
+    else:
+        with timed("MediaInfo"):
+            mediainfo = _mediainfo(path, cancel, MEDIAINFO_TIMEOUT)
     probe = _prefer_video_probe(probe, mediainfo)
     if not probe:
         summary = summarize(name, {})
@@ -925,7 +933,8 @@ def analyze(path, cancel=None, *, open_iso=None):
     if _needs_dovi_tool(summary):
         videos = [s for s in probe.get("streams") or [] if s.get("codec_type") == "video"]
         try:
-            dovi = _dovi_rpu(path, len(videos), cancel)
+            with timed("dovi_tool (Dolby Vision)"):
+                dovi = _dovi_rpu(path, len(videos), cancel)
         except (OSError, RuntimeError) as exc:
             logger.warning("dovi_tool skipped for %s: %s", path, exc)
             dovi = None

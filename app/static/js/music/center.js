@@ -277,6 +277,15 @@ function applyAlbumNfoStale(albumId, stale) {
     }
 }
 
+function clearArtistNfoStale(artistId) {
+    if (!artistId) return;
+    rememberNfoStale("artist", { id: artistId, nfo_stale: false });
+    for (const artist of state.artists || []) {
+        if (artist.id === artistId) artist.nfo_stale = false;
+    }
+    renderTree();
+}
+
 function syncOpenNfoStale() {
     const album = state.album && state.album.album;
     if (album) rememberNfoStale("album", album);

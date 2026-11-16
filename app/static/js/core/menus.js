@@ -59,7 +59,7 @@ async function rewriteSelectedNfos(ids) {
 }
 
 function onTreeMenu(event) {
-    if (event.target.closest(".album-item, .vgrid-card[data-album]")) return onAlbumMenu(event);
+    if (event.target.closest(".album-item, .album-line[data-album], .vgrid-card[data-album]")) return onAlbumMenu(event);
     const row = event.target.closest(".artist-row");
     if (row) onArtistMenu(event, row);
 }
@@ -81,8 +81,9 @@ function menuArtistIds(artistId) {
     return [artistId];
 }
 
+// One grammar for every library's menu: verb and object, with the count in brackets when more than one is picked.
 function menuLabel(text, count) {
-    return `${text} (${count})`;
+    return count > 1 ? `${text} (${count})` : text;
 }
 
 function fillContextMenu(items, action) {
@@ -90,7 +91,9 @@ function fillContextMenu(items, action) {
     menu.innerHTML = items.map(([kind, label, enabled, danger, title, raw]) => {
         const off = enabled === "off";
         const classes = [danger ? "menu-danger" : "", off ? "is-unavailable" : ""].filter(Boolean).join(" ");
-        return `<button type="button" role="menuitem" class="${classes}" data-action="${action}" data-menu="${kind}" ${enabled ? "" : "disabled"}${title ? ` title="${escapeHtml(title)}"` : ""}>${raw ? label : escapeHtml(label)}</button>`;
+        const trash = kind === "trash" ? " menu-trash" : "";
+        const named = kind === "trash" && title ? ` aria-label="${escapeHtml(title)}"` : "";
+        return `<button type="button" role="menuitem" class="${classes}${trash}" data-action="${action}" data-menu="${kind}" ${enabled ? "" : "disabled"}${title ? ` title="${escapeHtml(title)}"` : ""}${named}>${raw ? label : escapeHtml(label)}</button>`;
     }).join("");
     return menu;
 }
@@ -107,22 +110,24 @@ function onArtistMenu(event, row) {
     const diffMenu = document.getElementById("diff-menu");
     if (diffMenu) diffMenu.classList.add("hidden");
     const items = [
-        ["find-metadata", menuLabel("Find metadata for selected artists", count), true],
-        ["download-art", menuLabel("Download missing artwork for selected artists", count), writable],
-        ["lookup-art", menuLabel("Lookup artwork for selected artists", count), true],
-        ["rewrite-nfo", menuLabel("Rewrite nfo for selected artists", count), writable],
+        ["find-metadata", menuLabel("Find metadata", count), true],
+        ["download-art", menuLabel("Download missing artwork", count), writable],
+        ["lookup-art", menuLabel("Look up artwork…", count), true],
+        ["download-lyrics", menuLabel("Download lyrics", count), writable],
+        ["rewrite-nfo", menuLabel("Write .nfo", count), writable],
         ["arr-rescan", `Update library in ${providerIcon("lidarr")}${count > 1 ? ` (${count})` : ""}`, integrationOn("lidarr") ? true : "off", false, "Ask Lidarr to rescan", true],
-        ["mark-processed", menuLabel("Mark selected artists as processed", count), true],
+        ["library-update", menuLabel("Update library", count), true, false, "Ask Kodi, Emby, Jellyfin and Plex to scan these artist folders"],
+        ["move", menuLabel("Move…", count), writable],
+        ["mark-processed", menuLabel("Mark as processed", count), true],
         ["ignore-artist", menuLabel(artists.length && artists.every((artist) => artist.status === "IGNORED") ? "Stop ignoring" : "Ignore", count), true],
         ["lock-artist", menuLabel(artists.length && artists.every((artist) => artist.locked) ? "Unlock" : "Lock", count), true],
-        ["forget", menuLabel("Remove selected artists from database", count), true, true],
-        ["delete-disk", menuLabel("Delete artist from disk", count), writable, true],
+        ["trash", `${trashSvg()}<span>${escapeHtml(menuLabel("Remove or delete…", count))}</span>`, true, true, menuLabel("Remove from library or delete from disk", count), true],
     ];
     placeMenu(fillContextMenu(items, "artist-menu"), event);
 }
 
 function onAlbumMenu(event) {
-    const button = event.target.closest(".album-item, .vgrid-card[data-album]");
+    const button = event.target.closest(".album-item, .album-line[data-album], .vgrid-card[data-album]");
     if (!button) return;
     event.preventDefault();
     const albumId = button.dataset.album;
@@ -139,24 +144,25 @@ function onAlbumMenu(event) {
     const diffMenu = document.getElementById("diff-menu");
     if (diffMenu) diffMenu.classList.add("hidden");
     const items = [
-        ["match", menuLabel("Find metadata for selected albums", count), true],
-        ["apply", menuLabel("Apply match for selected albums", count), pending && anyWritable],
-        ["cancel-proposal", menuLabel("Clear match for selected albums", count), pending],
-        ["toggle-aligner", menuLabel("Align tracks for selected albums", count), alignable],
-        ["artwork", menuLabel("Lookup artwork for selected albums", count), true],
-        ["download-missing-art", menuLabel("Download missing artwork for selected albums", count), anyWritable],
-        ["rewrite-nfo", menuLabel("Rewrite album .nfos for selected albums", count), anyWritable],
-        ["rename-items", menuLabel("Rename folder/files for selected albums and songs", count), anyWritable],
-        ["edit-fields", menuLabel("Edit fields", count), count > 1],
-        ["compilation", menuLabel("Treat selected albums as compilations", count), anyWritable],
-        ["replaygain", menuLabel("Set ReplayGain for selected albums", count), anyWritable],
-        ["audit", menuLabel("Audit audio for selected albums", count), true],
-        ["check-gaps", menuLabel("Check missing tracks for selected albums", count), true],
-        ["mark-album", menuLabel("Mark selected albums as processed", count), true],
+        ["match", menuLabel("Find metadata", count), true],
+        ["apply", menuLabel("Apply match", count), pending && anyWritable],
+        ["cancel-proposal", menuLabel("Clear match", count), pending],
+        ["toggle-aligner", menuLabel("Align tracks", count), alignable],
+        ["artwork", menuLabel("Look up artwork…", count), true],
+        ["download-missing-art", menuLabel("Download missing artwork", count), anyWritable],
+        ["download-lyrics", menuLabel("Download lyrics", count), anyWritable],
+        ["rewrite-nfo", menuLabel("Write .nfo", count), anyWritable],
+        ["rename-items", menuLabel("Rename files…", count), anyWritable],
+        ["library-update", menuLabel("Update library", count), true, false, "Ask Kodi, Emby, Jellyfin and Plex to scan the artist folders of these albums"],
+        ["edit-fields", menuLabel("Edit fields…", count), count > 1],
+        ["compilation", menuLabel("Treat as compilation", count), anyWritable],
+        ["replaygain", menuLabel("Set ReplayGain", count), anyWritable],
+        ["audit", menuLabel("Audit audio (integrity)", count), true],
+        ["check-gaps", menuLabel("Check missing tracks", count), true],
+        ["mark-album", menuLabel("Mark as processed", count), true],
         ["ignore-album", menuLabel(targets.length && targets.every((row) => row.album.status === "IGNORED") ? "Stop ignoring" : "Ignore", count), true],
         ["lock-album", menuLabel(targets.length && targets.every((row) => row.album.locked) ? "Unlock" : "Lock", count), true],
-        ["forget", menuLabel("Remove selected albums from database", count), true, true],
-        ["delete-disk", menuLabel("Delete selected albums from disk", count), anyWritable, true],
+        ["trash", `${trashSvg()}<span>${escapeHtml(menuLabel("Remove or delete…", count))}</span>`, true, true, menuLabel("Remove from library or delete from disk", count), true],
     ];
     if (album && album.cue_image) items.push(["open-split", "Split into tagged tracks", writable]);
     if (album && album.upgrade) items.push(["show-upgrade", "Upgrade available", true]);
@@ -184,15 +190,23 @@ async function runAlbumMenu(kind) {
         return;
     }
     if (kind === "download-missing-art") return downloadMissingArt(ids);
+    if (kind === "download-lyrics") return downloadLyrics({ album_ids: ids });
     if (kind === "artwork") return startArtworkQueue(ids);
     if (kind === "rewrite-nfo") return rewriteSelectedNfos();
     if (kind === "rename-items") return openRenameModal();
     if (kind === "edit-fields") return openBatchEdit("album", ids);
     if (kind === "compilation") return treatSelectedCompilations(ids);
-    if (kind === "replaygain") return runSelectedAlbumJobs(ids, "replaygain", "ReplayGain");
-    if (kind === "audit") return runSelectedAlbumJobs(ids, "audit", "Audio audit");
-    if (kind === "check-gaps") return runSelectedAlbumJobs(ids, "gaps", "Missing-track check");
+    if (kind === "replaygain") return runSelectedAlbumJobs(ids, "replaygain");
+    if (kind === "audit") return runSelectedAlbumJobs(ids, "audit");
+    if (kind === "check-gaps") return runSelectedAlbumJobs(ids, "gaps");
     if (kind === "mark-album") return completeSelectedProcessed(ids);
+    if (kind === "library-update") {
+        const owners = new Map();
+        visibleAlbums().filter((row) => ids.includes(row.album.id)).forEach((row) => {
+            if (!owners.has(row.artist.id)) owners.set(row.artist.id, row.album.id);
+        });
+        return sendMusicLibraryUpdates([...owners.values()]);
+    }
     if (kind === "ignore-album") {
         const albums = visibleAlbums().filter((row) => ids.includes(row.album.id)).map((row) => row.album);
         const status = albums.length && albums.every((album) => album.status === "IGNORED") ? "new" : "ignored";
@@ -205,25 +219,13 @@ async function runAlbumMenu(kind) {
         const albums = visibleAlbums().filter((row) => ids.includes(row.album.id)).map((row) => row.album);
         return lockLibraryRows("album", ids, !(albums.length && albums.every((album) => album.locked)));
     }
-    if (kind === "forget") {
+    if (kind === "trash") {
         const count = ids.length;
-        return askDanger(
-            "Remove from the database?",
-            `Remove ${count} album${count === 1 ? "" : "s"} from the database. The files stay on disk.`,
-            "Remove from database",
-            () => forgetLibrary({ album_ids: ids }, `${count} album${count === 1 ? "" : "s"}`),
-            true,
-        );
-    }
-    if (kind === "delete-disk") {
-        const count = ids.length;
-        return askDanger(
-            "Delete these albums from disk?",
-            `Delete ${count} album${count === 1 ? "" : "s"} and the files inside those folders. This cannot be undone.`,
-            "Delete from disk",
-            () => deleteLibrary({ album_ids: ids }, `${count} album${count === 1 ? "" : "s"}`),
-            true,
-        );
+        const label = `${count} album${count === 1 ? "" : "s"}`;
+        const albums = visibleAlbums().filter((row) => ids.includes(row.album.id)).map((row) => row.album);
+        return askMusicRemoval(label, albums.some((album) => libraryWritable(album.path)),
+            `Delete from disk removes ${count === 1 ? "the album folder" : "each album folder"} and the audio files in it.`,
+            () => deleteLibrary({ album_ids: ids }, label), () => forgetLibrary({ album_ids: ids }, label));
     }
     if (!state.album || state.album.album.id !== albumId) await selectAlbum(albumId);
     if (!state.album) return;
@@ -234,12 +236,30 @@ async function runAlbumMenu(kind) {
     if (kind === "show-upgrade") return showUpgrade();
 }
 
+// One library update per artist folder, the same request as Send library update on the album page.
+async function sendMusicLibraryUpdates(albumIds) {
+    let sent = 0;
+    const errors = [];
+    for (const id of albumIds) {
+        try {
+            await api(`/api/albums/${encodeURIComponent(id)}/library-update`, { method: "POST", body: {} });
+            sent += 1;
+        } catch (error) {
+            errors.push(error.message);
+        }
+    }
+    if (!sent && errors.length) throw new Error(errors[0]);
+    const done = `Library update queued for ${sent} artist${sent === 1 ? "" : "s"}.`;
+    notify(errors.length ? `${done} ${errors[0]}` : done, errors.length ? "warning" : "info");
+}
+
 async function runArtistMenu(kind) {
     document.getElementById("album-menu").classList.add("hidden");
     const ids = state.contextArtists || [];
     if (!ids.length || !kind) return;
     if (kind === "find-metadata") return findMetadataForArtists(ids);
     if (kind === "download-art") return downloadArtistArtwork(ids);
+    if (kind === "download-lyrics") return downloadLyrics({ artist_ids: ids });
     if (kind === "lookup-art") {
         state.artworkQueueSubject = "artist";
         state.artworkQueue = ids.slice(1);
@@ -254,6 +274,13 @@ async function runArtistMenu(kind) {
         return;
     }
     if (kind === "rewrite-nfo") return rewriteArtistNfos(ids);
+    if (kind === "library-update") {
+        const albums = (state.artists || []).filter((row) => ids.includes(row.id) && (row.albums || []).length)
+            .map((row) => row.albums[0].id);
+        if (!albums.length) throw new Error("These artists have no albums to send.");
+        return sendMusicLibraryUpdates(albums);
+    }
+    if (kind === "move") return openVideoMove("artist", ids);
     if (kind === "mark-processed") return markArtistsProcessed(ids);
     if (kind === "ignore-artist") {
         const artists = (state.artists || []).filter((row) => ids.includes(row.id));
@@ -263,29 +290,49 @@ async function runArtistMenu(kind) {
         const artists = (state.artists || []).filter((row) => ids.includes(row.id));
         return lockLibraryRows("artist", ids, !(artists.length && artists.every((row) => row.locked)));
     }
-    if (kind === "forget") {
+    if (kind === "trash") {
         const count = ids.length;
-        return askDanger(
-            "Remove from the database?",
-            `Remove ${count} artist${count === 1 ? "" : "s"} and their albums from the database. The files stay on disk.`,
-            "Remove from database",
-            () => forgetLibrary({ artist_ids: ids }, `${count} artist${count === 1 ? "" : "s"}`),
-            true,
-        );
-    }
-    if (kind === "delete-disk") {
-        const count = ids.length;
-        return askDanger(
-            "Delete these artists from disk?",
-            `Delete ${count} artist${count === 1 ? "" : "s"} and their albums from disk. The folders and music files will be removed. This cannot be undone.`,
-            "Delete from disk",
-            () => deleteLibrary({ artist_ids: ids }, `${count} artist${count === 1 ? "" : "s"}`),
-            true,
-        );
+        const label = `${count} artist${count === 1 ? "" : "s"}`;
+        const artists = (state.artists || []).filter((row) => ids.includes(row.id));
+        return askMusicRemoval(label, artists.some((artist) => libraryWritable(artist.path)),
+            "Delete from disk removes the artist folders with their albums and music files.",
+            () => deleteLibrary({ artist_ids: ids }, label), () => forgetLibrary({ artist_ids: ids }, label));
     }
 }
 
-function askDanger(title, text, confirmLabel, action, danger, libraryAction) {
+/* The window behind the menu's red bin: Delete from disk, or Remove from library. A folder Curator cannot write to
+   only offers Remove from library. */
+function askMusicRemoval(label, writable, diskText, deleteAction, forgetAction) {
+    if (!writable) {
+        return askDanger(
+            `Remove ${label} from the library?`,
+            "The files are on a folder Curator cannot write to, so they can only be removed from the library. The files stay on disk.",
+            "Remove from library",
+            forgetAction,
+            false,
+        );
+    }
+    return askDanger(
+        `Remove ${label}?`,
+        `${diskText} This cannot be undone. Removing from the library leaves the files in place.`,
+        "Delete from disk",
+        deleteAction,
+        true,
+        forgetAction,
+    );
+}
+
+// What happens to a deleted file: the recycle bin keeps it for some days, or it is gone at once.
+function trashWarning() {
+    const cfg = state.settings || {};
+    if (cfg.trash_enabled === false) return "Delete from disk cannot be undone.";
+    const days = Math.max(1, Number(cfg.trash_days) || 30);
+    return `Delete from disk moves the files to the recycle bin for ${days} day${days === 1 ? "" : "s"} (Settings, General).`;
+}
+
+// libraryAction is the function behind the "Remove from library" button (none: no button). trashNote shows the recycle
+// bin warning without that button, for a delete that has no "remove from the library only" alternative.
+function askDanger(title, text, confirmLabel, action, danger, libraryAction, trashNote) {
     state.dangerAction = action;
     state.dangerLibraryAction = libraryAction || null;
     document.getElementById("danger-title").textContent = title;
@@ -297,9 +344,9 @@ function askDanger(title, text, confirmLabel, action, danger, libraryAction) {
     if (library) library.classList.toggle("hidden", !libraryAction);
     const warn = document.getElementById("danger-warn");
     if (warn) {
-        const show = !!(danger && libraryAction);
+        const show = !!(danger && (libraryAction || trashNote));
         warn.classList.toggle("hidden", !show);
-        warn.textContent = show ? "Delete from disk cannot be undone." : "";
+        warn.textContent = show ? trashWarning() : "";
     }
     document.getElementById("danger-modal").classList.remove("hidden");
 }
@@ -423,25 +470,46 @@ async function applySelectedMatches() {
         setPending(state.album.album.id, state.proposal);
     }
     if (!ids.length) return;
-    let done = 0;
-    const errors = [];
-    for (const id of ids) {
-        const proposal = state.pending[id];
-        if (!proposal) continue;
-        try {
-            await api(`/api/albums/${id}/apply`, { method: "POST", body: proposal });
-            setPending(id, null);
-            if (state.album && state.album.album.id === id) state.proposal = null;
-            done += 1;
-        } catch (error) {
-            errors.push(error.message);
-        }
+    return applyMatchesInBulk(ids);
+}
+
+// Bulk album and artist actions run as one job in the Jobs panel (resonance/bulk.py), with progress and Stop, instead
+// of one request per album. Resolves with the finished job: status, message, log, and the done and failed ids.
+async function runBulkJob(action, ids, proposals) {
+    const data = await api("/api/bulk", { method: "POST", body: { action, ids, proposals: proposals || {} } });
+    if (!data.started) throw new Error("Another bulk job is running. Let it finish, or stop it in the Jobs panel.");
+    if (typeof schedulePoll === "function") schedulePoll(300);
+    const id = data.job.id;
+    let wait = 400;
+    for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, wait));
+        wait = 1500;
+        const job = await api(`/api/bulk/${encodeURIComponent(id)}`);
+        if (job.status !== "running") return job;
     }
-    await loadLibrary();
+}
+
+function bulkNotice(job) {
+    const failed = (job.failed || []).length;
+    const firstFailure = String(job.log || "").split(/\r?\n/).find((line) => line.startsWith("Failed")) || "";
+    if (failed || job.status === "cancelled") notify(`${job.message}.${firstFailure ? ` ${firstFailure}` : ""}`, "warning");
+    else notify(`${job.message}.`, "info");
+}
+
+async function applyMatchesInBulk(ids) {
+    const proposals = {};
+    ids.forEach((id) => { if (state.pending[id]) proposals[id] = state.pending[id]; });
+    const job = await runBulkJob("apply", Object.keys(proposals), proposals);
+    for (const id of job.done || []) {
+        const proposal = proposals[id];
+        setPending(id, null);
+        if (state.album && state.album.album.id === id) state.proposal = null;
+        ((proposal && proposal.tracks) || []).forEach((track) => { delete state.tagDrafts[track.id]; });
+    }
+    await refreshLibraryItems(ids);
     renderCenter();
     renderEditor();
-    if (errors.length) notify(`Applied ${done}. ${errors[0]}`, "warning");
-    else notify(`Applied ${done} ${done === 1 ? "match" : "matches"}.`, "info");
+    bulkNotice(job);
 }
 
 function clearSelectedMatches() {
@@ -457,37 +525,17 @@ function clearSelectedMatches() {
 }
 
 async function treatSelectedCompilations(ids) {
-    let done = 0;
-    const errors = [];
-    for (const id of ids) {
-        try {
-            await api(`/api/albums/${id}/compilation`, { method: "POST", body: { enabled: true } });
-            done += 1;
-        } catch (error) {
-            errors.push(error.message);
-        }
-    }
-    await loadLibrary();
+    const job = await runBulkJob("compilation", ids);
+    await refreshLibraryItems(ids);
     if (state.center === "album" && state.album && ids.includes(state.album.album.id)) await selectAlbum(state.album.album.id, true);
-    if (errors.length) notify(`Updated ${done}. ${errors[0]}`, "warning");
-    else notify(`Treated ${done} album${done === 1 ? "" : "s"} as compilations.`, "info");
+    bulkNotice(job);
 }
 
-async function runSelectedAlbumJobs(ids, kind, label) {
-    let done = 0;
-    const errors = [];
-    for (const id of ids) {
-        try {
-            await api(`/api/albums/${id}/${kind}`, { method: "POST", body: {} });
-            done += 1;
-        } catch (error) {
-            errors.push(error.message);
-        }
-    }
-    await loadLibrary();
+async function runSelectedAlbumJobs(ids, kind) {
+    const job = await runBulkJob(kind, ids);
+    await refreshLibraryItems(ids);
     if (state.center === "album" && state.album && ids.includes(state.album.album.id)) await selectAlbum(state.album.album.id, true);
-    if (errors.length) notify(`${label} finished for ${done}. ${errors[0]}`, "warning");
-    else notify(`${label} finished for ${done} album${done === 1 ? "" : "s"}.`, "info");
+    bulkNotice(job);
 }
 
 async function findMetadataForArtists(ids) {
@@ -495,21 +543,19 @@ async function findMetadataForArtists(ids) {
         if (state.artistId !== ids[0]) await selectArtist(ids[0]);
         return scrapeArtist();
     }
-    let done = 0;
-    const errors = [];
-    for (const id of ids) {
-        try {
-            const data = await api(`/api/artists/${id}/scrape`, { method: "POST", body: {} });
-            await api(`/api/artists/${id}/biography`, { method: "POST", body: { biography: data.biography || "", fields: data.fields || {}, only_if_longer: true } });
-            done += 1;
-        } catch (error) {
-            errors.push(error.message);
-        }
-    }
-    await loadLibrary();
+    const job = await runBulkJob("artist-metadata", ids);
+    await refreshLibraryItems([], ids);
     if (state.center === "artist" && state.artistId) await selectArtist(state.artistId);
-    if (errors.length) notify(`Found metadata for ${done}. ${errors[0]}`, "warning");
-    else notify(`Saved metadata for ${done} artists.`, "info");
+    bulkNotice(job);
+}
+
+async function downloadLyrics(body) {
+    const data = await api("/api/lyrics/download", { method: "POST", body });
+    if (!data.started) throw new Error("A lyrics download is already running.");
+    state.missingLyricsSeen = "running";
+    state.working = true;
+    schedulePoll(300);
+    notify("Searching and downloading lyrics. Tracks that already have lyrics are skipped. Progress is in the Jobs panel, and a notice says what was saved when it ends.", "info");
 }
 
 async function downloadArtistArtwork(ids) {

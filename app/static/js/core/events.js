@@ -7,6 +7,21 @@ function fitModalChrome() {
     document.documentElement.style.setProperty("--chrome-bottom", `${bottom}px`);
 }
 
+function fitSelectBars() {
+    // The selection footer slides over the status pane too, up to the Scan engine button.
+    const dock = document.getElementById("dock");
+    const slot = document.querySelector(".dock-player-slot");
+    const scan = document.getElementById("dock-scan");
+    if (!dock || !slot) return;
+    let width = "";
+    if (scan && scan.getClientRects().length) {
+        const room = Math.floor(scan.getBoundingClientRect().left - slot.getBoundingClientRect().left - 8);
+        if (room > slot.getBoundingClientRect().width) width = `${room}px`;
+    }
+    if (width) dock.style.setProperty("--select-bar-w", width);
+    else dock.style.removeProperty("--select-bar-w");
+}
+
 function placeJobsDrawer(anchor) {
     // The drawer's CSS already pins it above its parent (.dock-jobs) via
     //   position: absolute; right: 0; bottom: calc(100% + 8px);
@@ -47,6 +62,8 @@ function closeJobsDrawer() {
 
 function bindEvents() {
     fitModalChrome();
+    fitSelectBars();
+    window.addEventListener("resize", fitSelectBars);
     if (typeof bindArtSplit === "function") bindArtSplit();
     window.addEventListener("resize", fitModalChrome);
     if (window.ResizeObserver) {
@@ -55,9 +72,13 @@ function bindEvents() {
         const dock = document.getElementById("dock");
         if (header) chrome.observe(header);
         if (dock) chrome.observe(dock);
+        const fit = new ResizeObserver(fitSelectBars);
+        ["dock", "dock-scan", "activity"].forEach((id) => { const el = document.getElementById(id); if (el) fit.observe(el); });
     }
     document.getElementById("library-filter").addEventListener("change", (event) => {
+        const wasLatest = state.filter === "latest";
         state.filter = event.target.value;
+        if (typeof musicLatestSort === "function" && wasLatest !== (state.filter === "latest")) musicLatestSort(state.filter === "latest");
         sessionStorage.setItem("resonance.filter", state.filter);
         if (typeof syncLibraryFilterButton === "function") syncLibraryFilterButton();
         const overlay = document.getElementById("filter-overlay");
@@ -75,13 +96,18 @@ function bindEvents() {
             const mode = event.target.value;
             state.librarySort = mode === "artists" || mode === "albums" || mode === "modified" ? mode : "name";
             localStorage.setItem("resonance.librarySort", state.librarySort);
+            // Picking an order here replaces a sort chosen on a column.
+            if (typeof clearMusicSort === "function") clearMusicSort();
             renderTree();
         });
     }
+    // The whole list for the open filter is loaded, so the search filters it here without asking the server.
     document.getElementById("artist-search").addEventListener("input", debounce((event) => {
         state.query = event.target.value.trim();
-        loadLibrary();
-    }, 250));
+        renderTree();
+        if (typeof renderBatchBar === "function") renderBatchBar();
+    }, 120));
+    if (typeof bindMusicColumns === "function") bindMusicColumns();
     const tree = document.getElementById("tree");
     if (tree) {
         const clearTreeScrollGuard = () => { state.treeScrollAt = 0; };
@@ -95,11 +121,27 @@ function bindEvents() {
         });
     }
     window.addEventListener("resize", () => paintTreeWindow(true));
+    if (tree && window.ResizeObserver) {
+        // The pane changes height when the scan banner comes and goes, and a pane that was hidden has height 0.
+        // Draw the rows that fit its new size, and put a position lost while hidden back.
+        let lastHeight = tree.clientHeight;
+        new ResizeObserver(() => {
+            const height = tree.clientHeight;
+            const wasHidden = !lastHeight;
+            lastHeight = height;
+            if (!height || state.musicViewMode === "grid") return;
+            if (wasHidden) paintTreeWindow(true);
+            else if (typeof settleTree === "function") settleTree();
+        }).observe(tree);
+    }
+    watchModalStacking();
     document.body.addEventListener("click", onClick);
     document.body.addEventListener("change", onChange);
     document.body.addEventListener("input", (event) => {
         if (event.target.dataset.schedulePreview) queueSchedulePreview();
         if (event.target.id === "artist-pick-query") queueArtistPick();
+        if (event.target.id === "schedule-timezone" && typeof syncTimezoneReset === "function") syncTimezoneReset();
+        if (event.target.id === "imdb-user-agent" && typeof syncImdbAgentReset === "function") syncImdbAgentReset();
         if (event.target.id === "library-filter-find" && typeof paintLibraryFilterOptions === "function") paintLibraryFilterOptions();
     });
     document.addEventListener("keydown", onKeyDown);
@@ -325,23 +367,41 @@ async function onClick(event) {
     const menu = document.getElementById("column-menu");
     if (menu && !event.target.closest("#column-menu")) menu.classList.add("hidden");
 
-    if (event.target.closest("[data-check-artist]")) return;
+    if (event.target.closest("[data-check-artist], [data-check-album]")) return;
+    // A quality badge in an album row filters the list instead of opening the album.
+    const musicBadge = event.target.closest("#tree [data-action='music-col-badge']");
+    if (musicBadge) return onMusicColumnAction("music-col-badge", musicBadge);
     const duplicatePill = event.target.closest("#tree .duplicate-pill");
+    if (duplicatePill && duplicatePill.dataset.action === "twin-artists") {
+        return runAction(() => openTwinArtists(duplicatePill.dataset.id));
+    }
     if (duplicatePill) {
         const albumButton = duplicatePill.closest("[data-album]");
         if (albumButton) {
+            actionButton = busyButton(duplicatePill);
             return runAction(() => openDuplicates({ media: "music", id: albumButton.dataset.album }), "Looking up duplicates…");
         }
     }
+    // The pill turns busy at once: loading the album and looking up its copies can take a while on a big library.
     const upgradePill = event.target.closest("#tree .upgrade-pill");
     if (upgradePill) {
         const albumButton = upgradePill.closest("[data-album]");
         if (albumButton) {
-            state.expanded.add(albumButton.dataset.artistId);
-            persistExpanded();
-            await selectAlbum(albumButton.dataset.album);
-            await showUpgrade();
-            return;
+            actionButton = busyButton(upgradePill);
+            const albumId = albumButton.dataset.album;
+            return runAction(async () => {
+                state.expanded.add(albumButton.dataset.artistId);
+                persistExpanded();
+                await selectAlbum(albumId);
+                // Opening the album draws the tree again, which replaces the busy pill: mark the new one until done.
+                const again = document.querySelector(`#tree [data-album="${CSS.escape(albumId)}"] .upgrade-pill`);
+                markActionBusy(again, "Looking up upgrades…");
+                try {
+                    await showUpgrade();
+                } finally {
+                    clearActionBusy(again);
+                }
+            }, "Looking up upgrades…");
         }
     }
     const toggle = event.target.closest("[data-toggle-artist]");
@@ -396,8 +456,20 @@ async function onClick(event) {
         if (handler) return handler(action);
     }
     if (name.startsWith("video-") || name.startsWith("trakt-") || name === "library-update-send") return onVideoAction(name, action, event);
+    if (name.startsWith("music-col-")) return onMusicColumnAction(name, action);
     if (name.startsWith("insights-")) return onInsightsAction(name, action);
     if (name.startsWith("tags-")) return onTagsAction(name, action);
+    if (name.startsWith("trash-")) return onTrashAction(name, action);
+    if (name.startsWith("orphans-")) return onOrphansAction(name, action);
+    if (name.startsWith("disk-")) return onDiskAction(name, action);
+    if (name.startsWith("cleanup-")) return onCleanupAction(name);
+    if (name.startsWith("history-")) return onHistoryAction(name);
+    if (name.startsWith("wishlist-")) return onWishlistAction(name, action);
+    if (name.startsWith("twin-")) return onTwinAction(name, action);
+    if (name.startsWith("journeys-")) return onJourneyAction(name, action);
+    if (name.startsWith("tools-")) return onToolsAction(name);
+    if (name.startsWith("setup-")) return onSetupAction(name, action);
+    if (name.startsWith("musicvideos-")) return onMusicVideoAction(name, action);
     if ((name.startsWith("queue-") || name.startsWith("auto-") || name.startsWith("kodi-sources-")) && onAutomationAction(name, action)) return;
     if (name === "album-menu" && action.dataset.menu === "mark-album") return queueSelectedProcessed();
     if (name === "album-menu") return runAction(() => runAlbumMenu(action.dataset.menu));
@@ -510,6 +582,18 @@ async function onClick(event) {
         askDeleteCopy(action.dataset.id);
         return;
     }
+    if (name === "recent-job-log") return runAction(() => toggleRecentJobLog(action.dataset.key));
+    if (name === "recent-job-copy") return runAction(copyRecentJobLog);
+    if (name === "page-reload") {
+        window.location.reload();
+        return;
+    }
+    if (name === "page-reload-later") {
+        const banner = document.getElementById("update-banner");
+        state.pageBuildDismissed = banner ? banner.dataset.build : "";
+        if (banner) banner.classList.add("hidden");
+        return;
+    }
     if (name === "delete-duplicate") {
         askDeleteDuplicate(action.dataset.id);
         return;
@@ -542,6 +626,7 @@ async function onClick(event) {
     }
     if (name === "scan-duplicates") return runAction(scanDuplicates, "Fingerprinting tracks…");
     if (name === "dismiss-duplicate") return runAction(() => dismissDuplicatePair(action.dataset.index));
+    if (name === "remove-duplicate") return askRemoveDuplicate(action.dataset.id);
     if (name === "dismiss-video-duplicate") return runAction(async () => {
         const data = await api("/api/v1/video-duplicates/dismiss", { method: "POST", body: { kind: action.dataset.kind, left_id: action.dataset.left, right_id: action.dataset.right } });
         if (typeof clearVideoDuplicatePills === "function") clearVideoDuplicatePills(data.cleared);
@@ -562,7 +647,10 @@ async function onClick(event) {
         const drawer = document.getElementById("job-drawer");
         const opening = drawer.classList.contains("hidden");
         if (!opening) closeJobsDrawer();
-        else placeJobsDrawer();
+        else {
+            placeJobsDrawer();
+            if (typeof loadRecentJobs === "function") loadRecentJobs(true);
+        }
         return;
     }
     if (name === "open-activity") {
@@ -602,6 +690,7 @@ async function onClick(event) {
         if (media === "movies" || media === "tv" || media === "sets") return openVideoScanModal(media);
         return openScanModal();
     }
+    if (name === "job-cancel") return runAction(() => cancelJob(action.dataset.how, action.dataset.id));
     if (name === "copy-job") return copyJob(action.dataset.job);
     if (name === "export-job") return exportJob(action.dataset.job);
     if (name === "toggle-alerts") return toggleAlerts();
@@ -615,6 +704,7 @@ async function onClick(event) {
             : (state.videoScanFocus || (scanKind() === "tv" ? "tv" : (state.media === "sets" ? "sets" : "movies")));
         return openScanHistory(media);
     }
+    if (name === "scrape-history") return openScanHistory("", "scrape");
     if (name === "open-scan-report") return openScanReport(action.dataset.name);
     if (name === "scan-report-copy") return copyScanReport();
     if (name === "scan-results-copy") return copyScanResults();
@@ -681,6 +771,7 @@ async function onClick(event) {
     }
     if (name === "suffix-type") return toggleSuffixType(action.dataset.suffixType);
     if (name === "copy-cmm-key") return copyCmmApiKey();
+    if (name === "reset-schedule-timezone") return resetScheduleTimezone();
     if (name === "save-settings") return saveSettings();
     if (name === "save-scan-schedule") return saveScanSchedule();
     if (name === "remove-scan-schedule") return removeScanSchedule(action.dataset.index);
@@ -721,6 +812,11 @@ async function onClick(event) {
     if (name === "purge-storage") return runAction(() => purgeStorage(action.dataset.folder), "Deleting files…");
     if (name === "about-open") return openAbout();
     if (name === "about-ytdlp-update") return updateYtdlp();
+    if (name === "ratings-run") return runAction(ratingsRun, "Updating ratings…");
+    if (name === "settings-goto") return gotoSettingsTab(action.dataset.tab, action.dataset.target);
+    if (name === "imdb-data-refresh") return refreshImdbData();
+    if (name === "imdb-data-remove") return removeImdbData();
+    if (name === "imdb-user-agent-reset") return resetImdbAgent();
     if (name === "scan-force") return runAction(() => scan(true, "deep"));
     if (name === "cancel-scan") return scanKind() !== "music" && videoScanRunning() ? cancelVideoScan() : cancelScan();    if (name === "remove-path") return removeLibraryPath(action.dataset.path, action.dataset.media);
     if (name === "select-tier") return selectByTier(action.dataset.tier);
@@ -773,6 +869,7 @@ async function onClick(event) {
     if (name === "batch-delete") return askBatchAlbumRemoval(true);
     if (name === "start-scan") return runAction(startScanFromModal);
     if (name === "reset-columns") return resetColumns();
+    if (name === "music-filters-clear") return runAction(clearMusicLibraryFilters);
     if (name === "scrape-artist") return runAction(scrapeArtist, "Finding artist metadata…");
     if (name === "artist-move") {
         const artist = state.artistDetail && state.artistDetail.artist;
@@ -945,4 +1042,28 @@ function onChange(event) {
         const row = chainBox.closest(".priority-item");
         if (row && row.parentElement) row.parentElement.appendChild(row);
     }
+}
+
+// A window opened while another is open comes to the front, wherever it sits in the page: Follow imports from the Queue
+// window, say. Escape already closes the window with the highest z-index, so it closes this one first.
+function raiseOpenedModal(modal) {
+    const others = Array.from(document.querySelectorAll(".modal:not(.hidden)")).filter((el) => el !== modal);
+    modal.style.zIndex = "";
+    if (!others.length) return;
+    const level = (el) => Number(getComputedStyle(el).zIndex) || 0;
+    const highest = Math.max(...others.map(level));
+    if (highest >= level(modal)) modal.style.zIndex = String(highest + 1);
+}
+
+function watchModalStacking() {
+    new MutationObserver((records) => {
+        records.forEach((record) => {
+            const modal = record.target;
+            if (!modal.classList || !modal.classList.contains("modal")) return;
+            const wasOpen = !String(record.oldValue || "").split(/\s+/).includes("hidden");
+            const open = !modal.classList.contains("hidden");
+            if (open && !wasOpen) raiseOpenedModal(modal);
+            else if (!open && wasOpen) modal.style.zIndex = "";
+        });
+    }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ["class"], attributeOldValue: true });
 }

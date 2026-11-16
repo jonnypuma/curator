@@ -35,9 +35,11 @@ state.video = {
     movieId: null,
     setId: null,
     tvSel: null,
+    missingSel: null,
     detail: null,
     detailToken: 0,
     paintToken: 0,
+    checkAllToken: 0,
     showDetails: new Map(),
     expanded: new Set(),
     left: readJson("curator.videoLeft", {}),
@@ -89,12 +91,18 @@ function initVideo() {
             if (key) setMovieColumn(key, event.target.checked);
         });
     }
+    document.addEventListener("change", (event) => {
+        const box = event.target && event.target.closest ? event.target.closest("[data-tv-scope]") : null;
+        if (!box) return;
+        tvScope()[box.dataset.tvScope] = box.checked;
+        renderVideoSelectBar();
+    });
     document.addEventListener("click", (event) => {
         const menu = document.getElementById("video-columns-menu");
         if (menu && !menu.classList.contains("hidden") && !event.target.closest("#video-columns-menu, #video-columns-btn")) closeVideoColumns();
         const colFilter = document.getElementById("video-col-filter");
         if (colFilter && !colFilter.classList.contains("hidden") && !event.target.closest("#video-col-filter, .vm-filter")) colFilter.classList.add("hidden");
-        if (!event.target.closest(".rescan-split, body > .scan-menu")) closeRescanMenus();
+        if (!event.target.closest(".rescan-split, body > .scan-menu") || event.target.closest(".group-item")) closeRescanMenus();
     });
     try { if (typeof bindVideoSplit === "function") bindVideoSplit(); } catch (e) { console.error("bindVideoSplit error", e); }
     try { if (typeof bindVideoScrape === "function") bindVideoScrape(); } catch (e) { console.error("bindVideoScrape error", e); }
@@ -386,7 +394,7 @@ function videoGridCardHtml(row, kind, size) {
         const active = (itemKind === "movie" && id === state.video.movieId)
             || (itemKind === "set" && id === state.video.setId)
             || (itemKind === "show" && state.video.tvSel && state.video.tvSel.type === "show" && state.video.tvSel.id === id);
-        const checked = selectionHas(itemKind, id);
+        const checked = itemKind === "movie" && typeof matrixChecked === "function" ? matrixChecked(row) : selectionHas(itemKind, id);
         const selected = active || checked;
         let posterUrl = "";
         let fullPosterSrc = "";
@@ -414,7 +422,7 @@ function videoGridCardHtml(row, kind, size) {
         return `<div class="vgrid-card${selected ? " is-selected" : ""}${active ? " is-active" : ""}${checked ? " is-checked" : ""}${row.status === "NEW" || row.has_new || row.new_count ? " is-new" : ""}" data-action="${openAct}" data-kind="${itemKind}" data-id="${escapeHtml(id)}">
             <div class="vgrid-poster-wrap">
                 ${posterUrl ? `<img class="vgrid-poster" loading="lazy" src="${escapeHtml(posterUrl)}" data-full-src="${escapeHtml(fullPosterSrc)}" alt=""${showBadge ? ` onload="updateArtBadgeOnLoad(this)"` : ""} onerror="this.replaceWith(Object.assign(document.createElement('div'), {className:'vgrid-fallback', textContent:'No Poster'}))">${showBadge ? `<span class="art-dim-badge hidden"></span>` : ""}` : `<div class="vgrid-fallback">${escapeHtml(title)}</div>`}
-                <label class="vgrid-check" onclick="event.stopPropagation()"><input type="checkbox" data-action="video-check" data-kind="${itemKind}" data-id="${escapeHtml(id)}" ${checked ? "checked" : ""}></label>
+                <label class="vgrid-check" onclick="if (event.target.tagName !== 'INPUT') event.stopPropagation()"><input type="checkbox" data-action="video-check" data-kind="${itemKind}" data-id="${escapeHtml(id)}"${itemKind === "movie" && typeof versionsAttr === "function" ? versionsAttr(row) : ""} ${checked ? "checked" : ""}></label>
                 ${row.locked ? `<span class="vgrid-lock">${lockIcon(true)}</span>` : ""}
             </div>
             ${progress}
@@ -430,7 +438,7 @@ function videoGridCardHtml(row, kind, size) {
 function videoGridBadges(row, kind) {
     let facts = [];
     if (kind === "movie") {
-        facts = [row.resolution, row.hdr_main && row.hdr_main !== "SDR" ? row.hdr_main : "", row.codec, row.audio_codec ? [row.audio_codec, row.audio_channels].filter(Boolean).join(" ") : "", row.edition];
+        facts = [row.resolution, row.hdr_main && row.hdr_main !== "SDR" ? row.hdr_main : "", row.codec, row.audio_codec ? [normalAudioCodec(row.audio_codec), row.audio_channels].filter(Boolean).join(" ") : "", row.edition];
     } else if (kind === "show") {
         facts = [row.status, row.episode_count ? `${row.episode_count} episodes` : "", Number(row.missing_count) ? `${row.missing_count} missing` : ""];
     } else {
@@ -450,7 +458,7 @@ function renderVideoPosterGrid(rows, kind) {
         key: (row) => row.id,
         ratio: 1.5,
         render: (row, size) => videoGridCardHtml(row, kind, size),
-        empty: `<div class="vposter-grid"><p class="muted vpad">No matching items.</p></div>`,
+        empty: `<div class="vposter-grid"><p class="muted vpad">Nothing matches these filters. <button type="button" class="link" data-action="video-filters-clear">Clear filters</button></p></div>`,
     });
 }
 
@@ -464,7 +472,10 @@ function paintVideoRows() {
             const active = (itemKind === "movie" && id === state.video.movieId)
                 || (itemKind === "set" && id === state.video.setId)
                 || (itemKind === "show" && state.video.tvSel && state.video.tvSel.type === "show" && state.video.tvSel.id === id);
-            const checked = selectionHas(itemKind, id);
+            const versionBox = card.querySelector(".vgrid-check input[data-versions]");
+            const checked = versionBox
+                ? versionBox.dataset.versions.split(",").every((one) => selectionHas("movie", one))
+                : selectionHas(itemKind, id);
             card.classList.toggle("is-active", !!active);
             card.classList.toggle("is-checked", !!checked);
             card.classList.toggle("is-selected", !!(active || checked));
@@ -1031,9 +1042,7 @@ function paintTvAfterStatus(options) {
     const scroll = host ? host.scrollTop : 0;
     const ribbons = document.getElementById("video-ribbons");
     if (ribbons) {
-        ribbons.innerHTML = ribbonBarHtml(TV_RIBBONS, (state.video.shows || []).concat(
-            [...state.video.showDetails.values()].flatMap((detail) => (detail.episodes || []).map((episode) => ({ ...episode, _kind: "episode" })))
-        ));
+        ribbons.innerHTML = ribbonBarHtml(TV_RIBBONS, tvRibbonRows(), null, true, true);
     }
     if (keepRows) {
         state.video.paintToken += 1;
@@ -1112,6 +1121,12 @@ function onVideoAction(name, action, event) {
     if (name === "video-open-movie" || name === "video-open-set" || name === "video-open-show" || name === "video-open-season" || name === "video-open-episode") {
         if (matrixTextSelected(action)) return;
     }
+    if (name === "video-pick-missing") {
+        state.video.missingSel = action.dataset.id;
+        if (state.video.tvSel) state.video.tvSel = null;
+        state.video.paintToken = (state.video.paintToken || 0) + 1;
+        return paintTvRows();
+    }
     if (name === "video-view-toggle") return toggleVideoViewMode();
     if (name === "video-filter-query") {
         const q = (action.dataset.query || "").trim();
@@ -1128,6 +1143,8 @@ function onVideoAction(name, action, event) {
     }
     if (name === "create-set-save" || name === "video-create-set-save") return runAction(createSetFromModal, "Creating movie set…");
     if (name === "video-batch-thumbs") return runAction(() => runVideoBatch("thumbs"), "Generating episode thumbnails…");
+    if (name === "video-twin-shows") return runAction(() => openTwinShows(action.dataset.id), "Looking up the show folders…");
+    if (name === "video-batch-integrity") return runAction(() => runVideoBatch("integrity"));
     if (name === "video-batch-themes") return runAction(() => runVideoBatch("themes"), "Downloading theme songs…");
     if (name === "video-batch-lock") {
         const unlock = videoSelectionAllLocked();
@@ -1168,6 +1185,7 @@ function onVideoAction(name, action, event) {
         const ribbons = libraryRibbons();
         if (ribbons.has(key)) ribbons.delete(key);
         else ribbons.add(key);
+        if (key === "latest" && (state.media === "movies" || state.media === "tv")) latestRibbonSort(ribbons.has(key));
         renderVideoList();
         const list = document.getElementById("video-list");
         if (list) list.scrollTop = 0;
@@ -1183,6 +1201,7 @@ function onVideoAction(name, action, event) {
     }
     if (name === "video-col-filter") return openColumnFilter(action);
     if (name === "video-col-filter-toggle") return toggleColumnFilter(action.dataset.col, action.dataset.value || "");
+    if (name === "video-badge-filter") return badgeFilter(action);
     if (name === "video-col-filter-clear") return clearColumnFilter(action.dataset.col);
     if (name === "video-col-filter-set") return setColumnFilter(action.dataset.col, action.dataset.value || "");
     if (name === "video-filters-clear") return clearLibraryFilters();
@@ -1192,16 +1211,26 @@ function onVideoAction(name, action, event) {
         return toggleSavedFilterMenu("video-saved-filters");
     }
     if (name === "video-filter-apply") return applyVideoSavedFilter(action.dataset.id);
+    if (name === "video-filter-run") return runAction(() => runSavedFilterAction(action.dataset.id), "Starting…");
     if (name === "video-filter-delete") {
         event.stopPropagation();
         return runAction(() => deleteSavedFilter(action.dataset.id, state.media === "tv" ? "tv" : state.media === "sets" ? "sets" : "movies"));
     }
     if (name === "video-check") {
-        event.preventDefault();
+        // A checkbox keeps its own click: cancelling it makes the browser put the old state back
+        // after the page has painted the new one.
+        if (action.tagName !== "INPUT") event.preventDefault();
         event.stopPropagation();
-        return selectionToggle(action.dataset.kind, action.dataset.id, event.shiftKey).then(() => paintCheckedRows());
+        const versions = action.dataset.versions ? action.dataset.versions.split(",").filter(Boolean) : null;
+        const done = selectionToggle(action.dataset.kind, action.dataset.id, event.shiftKey, versions);
+        paintCheckedRows();
+        return done.then(() => paintCheckedRows());
     }
-    if (name === "video-check-all") return selectionToggleVisible(action.checked).then(() => paintCheckedRows());
+    if (name === "video-check-all") {
+        const done = selectionToggleVisible(action.checked);
+        paintCheckedRows();
+        return done.then(() => paintCheckedRows());
+    }
     if (name === "video-batch-scrape") return runAction(scrapeSelectedRows, "Scraping…");
     if (name === "video-batch-reload") return runAction(() => reloadSelectedRows(action), "Starting a scan…");
     if (name === "video-batch-move") return openBatchMove();
@@ -1217,7 +1246,7 @@ function onVideoAction(name, action, event) {
     if (name === "video-art-delete") {
         askDanger(
             "Delete artwork",
-            `Delete the ${action.dataset.artKind || ""} image file from disk? This cannot be undone.`,
+            `Delete the ${action.dataset.artKind || ""} image file${action.dataset.path ? ` (${action.dataset.path.split("/").pop()})` : ""}? It goes to the recycle bin (Tools), where it can be restored, unless the bin is off in Settings, Files.`,
             "Delete artwork",
             () => runAction(() => deleteVideoArt(action), "Deleting artwork…"),
             true
@@ -1238,6 +1267,13 @@ function onVideoAction(name, action, event) {
         return;
     }
     if (name === "video-art-upload") return chooseVideoArtFile(action.dataset.artKind);
+    if (name === "video-art-tick") return onArtTick(action);
+    if (name === "video-art-ban") return runAction(() => banVideoArt([{ url: action.dataset.url, art_kind: action.dataset.artKind }]), "Banning…");
+    if (name === "video-art-unban") return runAction(() => unbanVideoArt(action.dataset.url), "Unbanning…");
+    if (name === "video-art-bulk-ban") return runAction(banTickedArt, "Banning…");
+    if (name === "video-art-bulk-download") return runAction(downloadTickedArt, "Downloading artwork…");
+    if (name === "video-art-bulk-delete") return deleteTickedArt();
+    if (name === "video-art-bulk-clear") return clearArtTicks();
     if (name === "video-art-choose") return runAction(() => chooseVideoArt(action), "Saving artwork…");
     if (name === "video-copy-probe") {
         event.stopPropagation();
@@ -1254,6 +1290,11 @@ function onVideoAction(name, action, event) {
         else state.video.openVersions.add(action.dataset.key);
         const list = document.getElementById("video-list");
         const scroll = list ? list.scrollTop : 0;
+        if (state.media === "tv") {
+            renderTvTree();
+            if (list) list.scrollTop = scroll;
+            return;
+        }
         renderMovieMatrix();
         if (list) {
             list.scrollTop = scroll;
@@ -1262,9 +1303,15 @@ function onVideoAction(name, action, event) {
         return;
     }
     if (name === "video-batch-art") return runAction(() => runVideoBatch("artwork"), "Downloading artwork…");
+    if (name === "video-batch-cleanfanart") return openCleanFanart();
+    if (name === "video-batch-playerart") return openPlayerArtwork();
+    if (name === "video-player-art-start") return runAction(updatePlayerArtwork, "Queuing…");
+    if (name === "video-clean-fanart-start") return runAction(startCleanFanart, "Starting…");
     if (name === "video-batch-nfo") return runAction(() => runVideoBatch("nfo"), "Writing .nfo files…");
+    if (name === "video-batch-ratings") return runAction(() => runVideoBatch("ratings"), "Updating ratings…");
     if (name === "video-batch-rename") return runAction(() => openSelectionRename(), "Preparing rename…");
     if (name === "video-batch-subs") return runAction(() => runVideoBatch("subs"), "Normalizing subtitles…");
+    if (name === "video-batch-origlang") return runAction(() => runVideoBatch("origlang"), "Switching to the original language…");
     if (name === "video-batch-split") {
         const ids = typeof selectedSplitEpisodeIds === "function" ? selectedSplitEpisodeIds() : [];
         if (!ids.length) return;
@@ -1323,4 +1370,7 @@ function onVideoAction(name, action, event) {
     if (name === "trakt-copy-code") return copyTraktCode(action.dataset.code);
     if (name === "trakt-disconnect") return runAction(disconnectTrakt);
     if (name === "trakt-sync") return runAction(startTraktSync, "Starting the Trakt sync…");
+    if (name === "trakt-players-sync") return runAction(startPlayerSync, "Starting the player sync…");
+    if (name === "trakt-players-test") return runAction(testPlayers, "Reading the players…");
+    if (name === "trakt-collections-push") return runAction(pushCollections, "Pushing collections…");
 }

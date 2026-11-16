@@ -65,7 +65,58 @@ function outboundSettingsHtml() {
         <p class="muted">Curator can message Discord, Slack, Telegram, Pushover, ntfy, Gotify, an Apprise server or any webhook when something happens. Each target picks its own events. Addresses and tokens are hidden once saved; leave a box empty to keep the saved value. Messages are sent in the background, and a target that fails is skipped and logged.</p>
         <div id="ob-list">${obListHtml()}</div>
         <p><button type="button" class="btn-ghost" data-action="auto-ob-add">Add a target</button></p>
+        ${obDigestHtml()}
     </section>`;
+}
+
+// The "Added to the library" message (curator/digest.py): how often and when. Targets tick the event as usual.
+const OB_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+function obDigestHtml() {
+    const cfg = (state.settings || {}).outbound_digest || { every: "off", hour: 9, weekday: 0 };
+    const option = (value, label, current) => `<option value="${value}" ${String(current) === String(value) ? "selected" : ""}>${label}</option>`;
+    const hours = Array.from({ length: 24 }, (_, hour) => option(hour, `${String(hour).padStart(2, "0")}:00`, cfg.hour)).join("");
+    const days = OB_WEEKDAYS.map((day, index) => option(index, day, cfg.weekday)).join("");
+    return `<h4>Added to the library</h4>
+        <p class="muted">One message listing the movies, episodes (per show), albums and music videos added since the last one. Tick <em>Added to the library</em> on the targets that should get it. When nothing was added, nothing is sent.</p>
+        <div class="ob-digest">
+            <label class="field">Send <select id="ob-digest-every">${option("off", "Never", cfg.every)}${option("day", "Every day", cfg.every)}${option("week", "Every week", cfg.every)}</select></label>
+            <label class="field" id="ob-digest-weekday-field"${cfg.every === "week" ? "" : " hidden"}>on <select id="ob-digest-weekday">${days}</select></label>
+            <label class="field">at <select id="ob-digest-hour">${hours}</select></label>
+            <button type="button" class="btn-ghost" data-action="auto-ob-digest-preview">Preview</button>
+            <button type="button" class="btn-ghost" data-action="auto-ob-digest-send" title="Send it now with the saved settings, to the targets that have it ticked">Send now</button>
+        </div>
+        <pre id="ob-digest-preview" class="ob-digest-preview" hidden></pre>`;
+}
+
+function obDigestInputs() {
+    const every = document.getElementById("ob-digest-every");
+    if (!every) return null;
+    return {
+        every: every.value,
+        hour: Number((document.getElementById("ob-digest-hour") || {}).value) || 0,
+        weekday: Number((document.getElementById("ob-digest-weekday") || {}).value) || 0,
+    };
+}
+
+function obShowDigest(data, sent) {
+    const box = document.getElementById("ob-digest-preview");
+    if (!box) return;
+    box.hidden = false;
+    if (data.empty || (sent && !data.sent)) box.textContent = "Nothing was added since the last message, so there is nothing to send.";
+    else box.textContent = `${sent ? "Sent: " : ""}${data.title}\n${data.message}`;
+}
+
+async function obDigestPreview() {
+    const cfg = obDigestInputs() || { every: "day", hour: 9, weekday: 0 };
+    const query = new URLSearchParams({ every: cfg.every === "off" ? "day" : cfg.every, hour: cfg.hour, weekday: cfg.weekday });
+    obShowDigest(await api(`/api/v1/outbound/digest/preview?${query}`), false);
+}
+
+async function obDigestSend() {
+    const data = await api("/api/v1/outbound/digest/send", { method: "POST", body: {} });
+    obShowDigest(data, true);
+    notify(data.sent ? "Sent to the targets that have Added to the library ticked." : "Nothing was added, so nothing was sent.", "info");
 }
 
 function obRepaint() {
@@ -77,6 +128,8 @@ function rememberOutbound() {
     if (!obDraft || !document.getElementById("ob-list")) return;
     obReadInputs();
     state.settings.outbound = obDraft.map((item) => ({ ...item }));
+    const digest = obDigestInputs();
+    if (digest) state.settings.outbound_digest = digest;
 }
 
 function obAdd() {
@@ -108,6 +161,11 @@ async function obTest(id) {
 }
 
 document.addEventListener("change", (event) => {
+    if (event.target && event.target.id === "ob-digest-every") {
+        const field = document.getElementById("ob-digest-weekday-field");
+        if (field) field.hidden = event.target.value !== "week";
+        return;
+    }
     const select = event.target && event.target.matches && event.target.matches("[data-ob-type]") ? event.target : null;
     if (!select) return;
     obReadInputs();

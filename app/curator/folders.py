@@ -6,8 +6,8 @@ import os
 from resonance.errors import AppError
 from resonance.paths import inside
 
-KEYS = {"music": "music_paths", "movies": "movie_paths", "tv": "tv_paths"}
-LABELS = {"music": "music", "movies": "movie", "tv": "TV"}
+KEYS = {"music": "music_paths", "movies": "movie_paths", "tv": "tv_paths", "musicvideos": "musicvideo_paths"}
+LABELS = {"music": "music", "movies": "movie", "tv": "TV", "musicvideos": "music video"}
 
 
 def kind_for_media(media):
@@ -121,6 +121,19 @@ def owner(path):
     if sets and (real == sets or inside(sets, real)):
         return "sets"
     return None
+
+def library_kind(path):
+    """Which library holds this path: movies, tv, music, musicvideos or sets, or None."""
+    found = owner(path)
+    if found:
+        return found
+    real = os.path.realpath(path)
+    for kind in ("music", "musicvideos"):
+        for root in mounted(kind):
+            if real == root or inside(root, real):
+                return kind
+    return None
+
 
 _volume_cache = {"at": 0.0, "roots": None}
 

@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from curator import bazarr, sonarr
+from curator import arr_versions, bazarr, sonarr
 from resonance import db
 from resonance.errors import AppError
 
@@ -32,7 +32,7 @@ def _uuid(value):
 def lidarr_test(body: Connection):
     from resonance import lidarr
 
-    return {"message": lidarr.test(_typed(body.url), _typed(body.key))}
+    return {"message": lidarr.test(_typed(body.url), _typed(body.key)), "versions": arr_versions.all_versions()}
 
 
 @router.post("/lidarr/options")
@@ -44,7 +44,7 @@ def lidarr_options(body: Connection):
 
 @router.post("/sonarr/test")
 def sonarr_test(body: Connection):
-    return {"message": sonarr.test(_typed(body.url), _typed(body.key))}
+    return {"message": sonarr.test(_typed(body.url), _typed(body.key)), "versions": arr_versions.all_versions()}
 
 
 @router.post("/sonarr/options")
@@ -54,7 +54,7 @@ def sonarr_options(body: Connection):
 
 @router.post("/bazarr/test")
 def bazarr_test(body: Connection):
-    return {"message": bazarr.test(_typed(body.url), _typed(body.key))}
+    return {"message": bazarr.test(_typed(body.url), _typed(body.key)), "versions": arr_versions.all_versions()}
 
 
 class SonarrSearch(BaseModel):
@@ -76,11 +76,27 @@ def _show(show_id):
     return row
 
 
+def _sonarr_show(show_id):
+    """A show Sonarr can find: by TVDB id, or by TMDB id when Sonarr is version 5 or newer."""
+    row = db.fetchone("SELECT title, tvdb_id, tmdb_id FROM tv_shows WHERE id = %s", (_uuid(show_id),))
+    if not row:
+        raise AppError("That show is not in the library", 404)
+    if not sonarr_can_find(row):
+        raise AppError(f"{row['title']} has no TVDB id. Scrape it first. Sonarr 5 and newer can also use the TMDB id.", 400)
+    return row
+
+
+def sonarr_can_find(row):
+    if str(row.get("tvdb_id") or "").strip():
+        return True
+    return bool(str(row.get("tmdb_id") or "").strip()) and sonarr.tmdb_ok()
+
+
 @router.post("/sonarr/missing")
 def sonarr_missing(body: SonarrSearch):
     from curator.arr_queue import enqueue
 
-    row = _show(body.show_id)
+    row = _sonarr_show(body.show_id)
     title = row["title"] or "the show"
     if body.episode_number is not None and body.season_number is not None:
         label = f"{title} S{int(body.season_number):02d}E{int(body.episode_number):02d}"
@@ -89,7 +105,8 @@ def sonarr_missing(body: SonarrSearch):
     else:
         label = title
     enqueue("sonarr", f"Sonarr search · {label}", "sonarr", {
-        "tvdb_id": str(row["tvdb_id"]),
+        "tvdb_id": str(row["tvdb_id"] or ""),
+        "tmdb_id": str(row["tmdb_id"] or ""),
         "season": body.season_number,
         "episode": body.episode_number,
     })
@@ -105,7 +122,7 @@ def sonarr_episodes(body: SonarrEpisodes):
         raise AppError("Pick at least one episode", 400)
     rows = db.fetchall(
         """
-        SELECT e.title, e.season_number, e.episode_number, sh.tvdb_id, sh.title AS show_title
+        SELECT e.title, e.season_number, e.episode_number, sh.tvdb_id, sh.tmdb_id, sh.title AS show_title
         FROM tv_episodes e JOIN tv_shows sh ON sh.id = e.show_id
         WHERE e.id = ANY(%s::uuid[])
         """,
@@ -113,8 +130,8 @@ def sonarr_episodes(body: SonarrEpisodes):
     )
     if not rows:
         raise AppError("Those episodes are not in the library", 404)
-    if any(not str(row["tvdb_id"] or "").strip() for row in rows):
-        raise AppError("A show has no TVDB id. Scrape it first.", 400)
+    if any(not sonarr_can_find(row) for row in rows):
+        raise AppError("A show has no TVDB id. Scrape it first. Sonarr 5 and newer can also use the TMDB id.", 400)
     payload = [dict(row) for row in rows]
     labels = []
     for row in payload:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from urllib.parse import urlsplit
 
@@ -13,7 +14,7 @@ SPACING = {
     "api.themoviedb.org": 0.03,
     "api4.thetvdb.com": 0.1,
     "www.omdbapi.com": 0.2,
-    "api.trakt.tv": 0.35,
+    "api.trakt.tv": 0.65,        # Trakt allows 500 GETs per 5 minutes: one every 0.6 s
     "api.tvmaze.com": 0.25,
     "webservice.fanart.tv": 0.1,
     "www.rottentomatoes.com": 3.0,
@@ -21,7 +22,12 @@ SPACING = {
     "api.crawlbase.com": 3.0,
     "graphql.anilist.co": 1.0,
     "www.ofdb.de": 2.0,
+    "ofdb.cc": 0.5,
 }
+
+
+PAGE_MISS_LIMIT = 4                          # page requests in a row without an answer before a host is skipped for the run
+RATE_LIMIT_WAITS = 8                         # how many times a 429 is waited out before the request fails
 
 
 class ScrapeError(Exception):
@@ -55,6 +61,7 @@ class Client:
             timeout=timeout, follow_redirects=True, headers={"User-Agent": USER_AGENT}
         )
         self.gates = {}
+        self.misses = {}                     # page hosts: how many requests in a row got no answer
 
     async def close(self):
         await self.http.aclose()
@@ -67,7 +74,10 @@ class Client:
 
     async def json(self, method, url, *, params=None, headers=None, body=None, retries=2, missing_ok=True):
         gate = self.gate(url)
-        for attempt in range(retries + 1):
+        limited = 0                          # "too many requests" answers: waited out, not counted as failures
+        attempt = -1
+        while True:
+            attempt += 1
             await gate.wait()
             try:
                 response = await self.http.request(method, url, params=params, headers=headers, json=body)
@@ -77,6 +87,11 @@ class Client:
                     _connection(url, message)
                     raise ScrapeError(message) from exc
                 await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            if response.status_code == 429 and limited < RATE_LIMIT_WAITS:
+                limited += 1
+                attempt -= 1
+                gate.hold(_retry_after(response.headers.get("Retry-After"), min(4.0 * 2 ** limited, 120.0) * (0.75 + random.random() / 2), cap=300.0))
                 continue
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt >= retries:
@@ -94,27 +109,40 @@ class Client:
             if response.status_code >= 400:
                 raise ScrapeError(_message(response), response.status_code)
             _connection(url, "", ok=True)
+            if response.status_code == 204 or not response.content.strip():
+                return None          # "no content": the source has nothing for this title, which is not an error
             try:
                 return response.json()
             except ValueError as exc:
-                raise ScrapeError(f"{urlsplit(url).hostname} sent something that is not JSON") from exc
+                kind = (response.headers.get("content-type") or "no content type").split(";")[0].strip()
+                raise ScrapeError(
+                    f"{urlsplit(url).hostname} sent something that is not JSON (HTTP {response.status_code}, {kind}, {urlsplit(url).path})"
+                ) from exc
         return None
 
     async def get(self, url, **kwargs):
         return await self.json("GET", url, **kwargs)
 
     async def text(self, url, *, params=None, headers=None, timeout=10.0):
-        """GET a page as text. Returns (headers, body). Used for public rating pages."""
+        """GET a page as text. Returns (headers, body). Used for public rating pages.
+
+        A host that does not answer PAGE_MISS_LIMIT requests in a row (down, or blocking this address) is left alone
+        for the rest of this run, so one dead site cannot slow every title down or be hammered further."""
         gate = self.gate(url)
+        host = urlsplit(url).hostname or ""
+        if self.misses.get(host, 0) >= PAGE_MISS_LIMIT:
+            raise ScrapeError(f"{host} did not answer {PAGE_MISS_LIMIT} requests in a row, so it is skipped for the rest of this run")
         for attempt in range(2):
             await gate.wait()
             try:
                 response = await self.http.get(url, params=params, headers=headers, timeout=timeout)
             except httpx.HTTPError as exc:
                 if attempt >= 1:
+                    self.misses[host] = self.misses.get(host, 0) + 1
                     raise ScrapeError(f"{urlsplit(url).hostname}: {exc.__class__.__name__}") from exc
                 await asyncio.sleep(1.0)
                 continue
+            self.misses[host] = 0
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt >= 1:
                     raise ScrapeError(f"{urlsplit(url).hostname} answered {response.status_code}", response.status_code)
@@ -162,9 +190,9 @@ def _connection(url, message, ok=False):
         note_url(url, message)
 
 
-def _retry_after(value, default):
+def _retry_after(value, default, cap=30.0):
     try:
-        return max(0.5, min(float(value), 30.0))
+        return max(0.5, min(float(value), cap))
     except (TypeError, ValueError):
         return default
 

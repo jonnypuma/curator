@@ -75,7 +75,7 @@ function onKeyDown(event) {
         return;
     }
     if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
-        const media = { Digit1: "music", Digit2: "movies", Digit3: "sets", Digit4: "tv" }[event.code];
+        const media = { Digit1: "music", Digit2: "movies", Digit3: "sets", Digit4: "tv", Digit5: "musicvideos" }[event.code];
         if (media) {
             event.preventDefault();
             if (state.media !== media) switchMedia(media);
@@ -149,7 +149,7 @@ function toggleCurrentAlbumCheck() {
 function treeAlbums() {
     const albums = [];
     const grid = state.musicViewMode === "grid";
-    pendingArtists(orderedArtists(state.artists)).forEach((artist) => {
+    musicShownArtists().forEach((artist) => {
         if (!grid && !state.expanded.has(artist.id)) return;
         (artist.albums || []).forEach((album) => albums.push({ artist, album }));
     });

@@ -66,6 +66,18 @@ def _loop():
                 last_fired = {k: v for k, v in last_fired.items() if k in current_keys}
         except Exception:
             logger.exception("curator schedule check failed")
+        try:
+            from curator import digest
+
+            digest.tick()
+        except Exception:
+            logger.exception("the library digest check failed")
+        try:
+            from curator.video import filter_actions
+
+            filter_actions.tick()
+        except Exception:
+            logger.exception("the saved filter actions check failed")
         time.sleep(15)
 
 

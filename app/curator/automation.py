@@ -220,21 +220,15 @@ def env_hints():
 def map_path(path, mappings, source):
     """Translate a path reported by Radarr, Sonarr, Bazarr or Lidarr into the container path.
 
-    Rows for that source and rows for any source are tried longest remote prefix first. Unmapped paths
-    come back unchanged.
+    Rows for that source and rows for any source are tried longest remote prefix first (curator.path_map). Unmapped
+    paths come back unchanged.
     """
+    from curator import path_map
+
     text = clean_path(path)
     if not text:
         return ""
-    ranked = [row for row in mappings or [] if row.get("source") in ("any", source)]
-    ranked.sort(key=lambda row: (len(row["remote"]), row.get("source") != "any"), reverse=True)
-    folded = text.lower() if _windows_style(text) else text
-    for row in ranked:
-        remote = row["remote"].lower() if _windows_style(row["remote"]) else row["remote"]
-        if folded == remote or folded.startswith(remote + "/"):
-            return row["local"] + text[len(remote):]
-    return text
+    mapped = path_map.from_source(text, mappings, source)
+    return mapped if mapped is not None else text
 
 
-def _windows_style(path):
-    return len(path) > 1 and path[1] == ":"

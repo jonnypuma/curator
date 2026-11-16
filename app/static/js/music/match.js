@@ -615,7 +615,7 @@ async function applyMatch() {
     if (data.warnings && data.warnings.length) notify(data.warnings.join(" "), "warning");
     else notify("Match applied.", "info");
     showUndo("Album saved");
-    await loadLibrary();
+    await refreshLibraryItems([albumId]);
     renderCenter();
     renderEditor();
 }
@@ -668,24 +668,5 @@ async function applyAllMatches(only) {
     stashProposal();
     const ids = (only || Object.keys(state.pending)).filter((id) => state.pending[id]);
     if (!ids.length) return;
-    let done = 0;
-    const errors = [];
-    for (const id of ids) {
-        const proposal = state.pending[id];
-        if (!proposal) continue;
-        try {
-            await api(`/api/albums/${id}/apply`, { method: "POST", body: proposal });
-            setPending(id, null);
-            if (state.album && state.album.album.id === id) state.proposal = null;
-            (proposal.tracks || []).forEach((track) => { delete state.tagDrafts[track.id]; });
-            done += 1;
-        } catch (error) {
-            errors.push(error.message);
-        }
-    }
-    await loadLibrary();
-    renderCenter();
-    renderEditor();
-    if (errors.length) notify(`Applied ${done}. ${errors[0]}`, "warning");
-    else notify(`Applied ${done} ${done === 1 ? "match" : "matches"}.`, "info");
+    return applyMatchesInBulk(ids);
 }

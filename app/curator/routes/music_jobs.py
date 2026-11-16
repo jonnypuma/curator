@@ -89,6 +89,44 @@ async def save_album_profile(album_id: str, body: dict | None = JsonBody):
     return await run(work)
 
 
+@router.post("/api/bulk")
+async def start_bulk(body: dict | None = JsonBody):
+    """One background job for a bulk album or artist action (resonance.bulk). Answers at once with the job."""
+    from resonance import bulk
+
+    payload = body_dict(body)
+
+    def work():
+        row, started = bulk.start(str(payload.get("action") or ""), payload.get("ids") or [], payload.get("proposals") or {})
+        return cleaned({"job": row, "started": started})
+
+    return await run(work)
+
+
+@router.get("/api/bulk/{job_id}")
+async def bulk_job(job_id: str):
+    from resonance import db
+    from resonance.errors import AppError
+
+    def work():
+        library.require_uuid(job_id)
+        row = db.fetchone("SELECT id, kind, status, message, processed, total, log FROM work_jobs WHERE id = %s", (job_id,))
+        if not row:
+            raise AppError("That job is gone", 404)
+        from resonance import bulk
+
+        return cleaned({**dict(row), **bulk.results(job_id)})
+
+    return await run(work)
+
+
+@router.post("/api/bulk/cancel")
+async def cancel_bulk():
+    from resonance import bulk
+
+    return await run(lambda: {"stopping": bulk.cancel()})
+
+
 @router.post("/api/albums/{album_id}/compilation")
 async def album_compilation(album_id: str, body: dict | None = JsonBody):
     enabled = body_dict(body).get("enabled", True)
@@ -192,14 +230,38 @@ async def album_lyrics(album_id: str):
     return await run(work)
 
 
+@router.post("/api/lyrics/download")
+async def download_lyrics(body: dict | None = JsonBody):
+    payload = body_dict(body)
+
+    def work():
+        job, started = lyrics.start_download(payload.get("album_ids") or [], payload.get("artist_ids") or [])
+        return cleaned({**job, "started": started})
+
+    return await run(work)
+
+
 @router.get("/api/duplicates")
-async def list_duplicates(focus: str | None = None):
+async def list_duplicates(focus: str | None = None, lidarr: int = 1):
     from resonance import duplicates
 
     def work():
         if focus:
             library.require_uuid(focus)
-        return cleaned(duplicates.groups(focus))
+        return cleaned(duplicates.groups(focus, lidarr=bool(lidarr)))
+
+    return await run(work)
+
+
+@router.get("/api/duplicates/lidarr")
+async def duplicate_lidarr_labels(focus: str | None = None):
+    """Which copy Lidarr uses, asked after the Duplicate window opened."""
+    from resonance import duplicates
+
+    def work():
+        if focus:
+            library.require_uuid(focus)
+        return cleaned(duplicates.lidarr_labels(focus))
 
     return await run(work)
 

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import httpx
 
 from curator import trakt
-from resonance import db
+from resonance import db, history
 from resonance.errors import AppError
 
 logger = logging.getLogger(__name__)
@@ -296,7 +296,7 @@ def start(mode="both"):
             return False
         _log.clear()
         _state.update({"status": "running", "message": "Starting", "result": {},
-                       "started_at": datetime.now().isoformat(timespec="seconds"), "finished_at": None})
+                       "started_at": datetime.now().astimezone().isoformat(timespec="seconds"), "finished_at": None})
     threading.Thread(target=_run, args=(mode,), name="trakt-sync", daemon=True).start()
     return True
 
@@ -313,9 +313,10 @@ def _run(mode):
         logger.exception("Trakt sync failed")
         result, message, final = {}, str(exc), "failed"
     _say(message)
+    history.record("synced", "Trakt watched sync", "", "", message)
     with _lock:
         _state.update({"status": final, "message": message, "result": result,
-                       "finished_at": datetime.now().isoformat(timespec="seconds")})
+                       "finished_at": datetime.now().astimezone().isoformat(timespec="seconds")})
 
 
 def start_timer():
@@ -339,5 +340,7 @@ def _timer_loop():
                 continue
             if time.time() - trakt.last_synced() >= hours * 3600:
                 start(cfg.get("trakt_sync_mode") or "both")
+        except AppError as exc:
+            logger.warning("scheduled Trakt sync skipped: %s", exc)
         except Exception:
             logger.exception("scheduled Trakt sync failed")

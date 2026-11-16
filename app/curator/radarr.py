@@ -61,54 +61,20 @@ def _settings():
 
 
 def _api(method, path, url, key, payload=None, params=None, timeout=20):
-    import requests
+    from curator import arr_client
 
-    from resonance.connections import clear, note
-
-    if not url or not key:
-        message = "Radarr is not set up. Add its address and API key under Settings, Integrations."
-        note("radarr", message)
-        raise AppError(message, 400)
-    try:
-        response = requests.request(method, f"{url}/api/v3{path}", headers={"X-Api-Key": key},
-                                    json=payload, params=params, timeout=timeout)
-    except requests.Timeout as exc:
-        message = f"Radarr did not answer in time: {exc}"
-        note("radarr", message)
-        raise AppError(message, 502) from exc
-    except requests.RequestException as exc:
-        message = f"Radarr could not be reached: {exc}"
-        note("radarr", message)
-        raise AppError(message, 502) from exc
-    if response.status_code in (401, 403):
-        note("radarr", "Radarr refused the API key")
-        raise AppError("Radarr refused the API key", 502)
-    if response.status_code >= 400:
-        detail = ""
-        try:
-            body = response.json()
-            if isinstance(body, list) and body:
-                detail = body[0].get("errorMessage") or ""
-            elif isinstance(body, dict):
-                detail = body.get("message") or body.get("title") or ""
-        except ValueError:
-            detail = response.text[:200]
-        message = f"Radarr answered {response.status_code}{': ' + detail if detail else ''}"
-        note("radarr", message)
-        raise AppError(message, 502)
-    clear("radarr")
-    if not response.content:
-        return None
-    try:
-        return response.json()
-    except ValueError:
-        return None
+    return arr_client.request("radarr", method, url, key, f"/api/v3{path}", payload, params, timeout)
 
 
 def test(url=None, key=None):
+    from curator import arr_versions
+
     saved_url, saved_key, _cfg = _settings()
-    status = _api("GET", "/system/status", (url or saved_url).rstrip("/"), key or saved_key)
-    return f"Connected to Radarr {(status or {}).get('version') or ''}".strip()
+    address = (url or saved_url).rstrip("/")
+    status = _api("GET", "/system/status", address, key or saved_key)
+    version = (status or {}).get("version") or ""
+    arr_versions.record("radarr", version, address, "v3")
+    return f"Connected to Radarr {version}".strip()
 
 
 def options(url=None, key=None):

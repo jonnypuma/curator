@@ -76,7 +76,9 @@ function onLiveMessage(message) {
         refreshQueuePanelSoon();
     } else if (message.type === "QUEUE_EVENT") {
         const data = message.data || {};
-        notify(webhookReceivedText(data), data.outcome === "unmapped" || data.outcome === "error" ? "warning" : "info");
+        // The end of a run is announced once, by QUEUE_FLUSH below; its own event only speaks up when the run failed.
+        const runSummary = String(data.source || "") === "curator" && String(data.event || "") === "Run" && data.outcome !== "error";
+        if (!runSummary) notify(webhookReceivedText(data), data.outcome === "unmapped" || data.outcome === "error" ? "warning" : "info");
         refreshQueuePanelSoon();
     } else if (message.type === "QUEUE_FLUSH") {
         const data = message.data || {};
@@ -118,6 +120,19 @@ function paintQueueBadge(id, buttonId, count) {
         button.title = label;
         button.setAttribute("aria-label", label);
     }
+}
+
+// "3 of 12 done, 5 more waiting" for a webhook batch that is running, or "" when none is.
+function webhookProgressText(queue) {
+    if (!queue || !queue.running) return "";
+    const total = Number(queue.batch_total) || 0;
+    const done = Math.min(total, Number(queue.batch_done) || 0);
+    const waiting = Number(queue.queued_items_count) || 0;
+    const parts = [];
+    if (total) parts.push(`${done.toLocaleString()} of ${total.toLocaleString()} done`);
+    if (queue.stage) parts.push(`this stage ${queue.stage}`);
+    if (waiting) parts.push(`${waiting.toLocaleString()} more waiting`);
+    return parts.join(", ");
 }
 
 function queueCountdownText(queue) {

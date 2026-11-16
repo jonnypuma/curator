@@ -7,16 +7,17 @@ logger = logging.getLogger(__name__)
 KEEP = 1000
 
 
-def note(lane, source, event, title, path="", outcome="done", message=""):
+def note(lane, source, event, title, path="", outcome="done", message="", quality=None):
     try:
+        from psycopg.types.json import Jsonb
         from resonance import db
 
         if db.pool is None:
             return
         db.execute(
             """
-            INSERT INTO work_events (lane, source, event_type, title, path, outcome, message)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO work_events (lane, source, event_type, title, path, outcome, message, quality)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 str(lane or "")[:8],
@@ -26,6 +27,7 @@ def note(lane, source, event, title, path="", outcome="done", message=""):
                 str(path or "")[:1000],
                 str(outcome or "done")[:20],
                 str(message or "")[:2000],
+                Jsonb(list(quality or [])),
             ),
         )
         db.execute(
@@ -52,6 +54,7 @@ def note(lane, source, event, title, path="", outcome="done", message=""):
                 "path": path,
                 "outcome": outcome,
                 "message": message,
+                "quality": list(quality or []),
             },
         )
     except Exception:
@@ -65,7 +68,7 @@ def recent(lane, limit=60):
         return []
     rows = db.fetchall(
         """
-        SELECT id::text AS id, received_at, source, event_type, title, path, outcome, message
+        SELECT id::text AS id, received_at, source, event_type, title, path, outcome, message, quality
         FROM work_events WHERE lane = %s
         ORDER BY received_at DESC LIMIT %s
         """,

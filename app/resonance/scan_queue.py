@@ -15,6 +15,9 @@ _items = []
 _running = None
 _active = False
 _retry_timer = None
+_action_running = False
+
+_NEW_KINDS = ("files", "action")
 
 
 def snapshot():
@@ -115,6 +118,12 @@ def cancel(item_id):
         from curator.video import relocate
 
         return bool(relocate.cancel()) if hasattr(relocate, "cancel") else False
+    if kind == "files":
+        from curator.video import files
+
+        return bool(files.cancel())
+    if kind == "action":
+        return False
     if kind == "scrape" or media == "sets" or kind == "sets":
         from curator.video import scrape
 
@@ -220,6 +229,9 @@ def _library_duplicate(spec):
             ):
                 return True
         return False
+    if spec.get("kind") in _NEW_KINDS:
+        keys = ("kind", "op", "action", "media", "dest", "ids", "args")
+        return any(all(item.get(key) == spec.get(key) for key in keys) for item in _items if item.get("kind") in _NEW_KINDS)
     if spec.get("kind") == "schedule":
         return False
     if spec.get("kind") == "scrape":
@@ -232,15 +244,19 @@ def _library_duplicate(spec):
                 and list(item.get("ids") or []) == list(spec.get("ids") or [])
                 and (item.get("policy") or "") == (spec.get("policy") or "")
                 and bool(item.get("art_only")) == bool(spec.get("art_only"))
+                and sorted(item.get("art_levels") or []) == sorted(spec.get("art_levels") or [])
                 and list(item.get("groups") or []) == list(spec.get("groups") or [])
                 and list(item.get("fields") or []) == list(spec.get("fields") or [])
                 and list(item.get("art") or []) == list(spec.get("art") or [])
                 and (item.get("primary") or "") == (spec.get("primary") or "")
+                and bool(item.get("ratings_only")) == bool(spec.get("ratings_only"))
+                and sorted(item.get("rating_sources") or []) == sorted(spec.get("rating_sources") or [])
+                and (item.get("rating_filter") or {}) == (spec.get("rating_filter") or {})
             ):
                 return True
         return False
     for item in _items:
-        if item.get("kind") in ("schedule", "scrape"):
+        if item.get("kind") in ("schedule", "scrape") + _NEW_KINDS:
             continue
         if (
             item.get("media") == spec.get("media")
@@ -273,6 +289,8 @@ def _webhooks_first():
 def _label(item):
     if item.get("label"):
         return item["label"]
+    if item.get("kind") in _NEW_KINDS:
+        return str(item.get("op") or item.get("action") or "Job").replace("_", " ").capitalize()
     media = {"movies": "movie", "tv": "TV", "music": "music", "sets": "movie set"}.get(item.get("media") or "music", "library")
     kind = item.get("kind") or "library"
     if kind == "scrape" or item.get("media") == "sets" or kind == "sets":
@@ -418,7 +436,7 @@ def _public(item):
     return {
         "id": item.get("id") or "",
         "media": item.get("media") or "music",
-        "mode": item.get("mode") or ("" if kind == "scrape" else "incremental"),
+        "mode": item.get("mode") or ("" if kind == "scrape" or kind in _NEW_KINDS else "incremental"),
         "scope": item.get("scope") or "",
         "kind": kind,
         "label": _label(item),
@@ -433,6 +451,8 @@ def _busy():
     from curator.video import files, scanner, scrape
     from resonance import jobs
 
+    if _action_running:
+        return True
     job = jobs.current_job() or {}
     if job.get("status") == "running":
         return True
@@ -461,7 +481,68 @@ def depth():
     return waiting + (1 if _busy() else 0)
 
 
+def _apply_waiting_match(spec):
+    """A Fix Match that had to wait writes its new ids now, just before its scrape reads them."""
+    match = spec.get("match")
+    if not match:
+        return
+    try:
+        from curator.video import store
+
+        store.set_match(match["kind"], match["id"], match["source"], match["source_id"], match.get("ids"))
+    except Exception:
+        logger.exception("the waiting Fix Match could not be applied")
+
+
+def _launch_files(spec):
+    from curator.video import files
+    from resonance import backup
+    from resonance.errors import AppError
+
+    ids = list(spec.get("ids") or [])
+    try:
+        if not spec.get("snapshotted") and not files.running():
+            backup.snapshot_before("a file job", len(ids))
+            spec["snapshotted"] = True
+        return bool(files.start(spec.get("op"), spec.get("media"), ids, label=spec.get("label"), dest=spec.get("dest"),
+                                players=spec.get("players"), art_types=spec.get("art_types"),
+                                fill_missing=spec.get("fill_missing", True) is not False))
+    except AppError as exc:
+        logger.info("file job waits: %s", exc)
+        return False
+
+
+def _launch_action(spec):
+    global _action_running
+    from curator import queued_actions
+
+    func = queued_actions.ACTIONS.get(spec.get("action"))
+    if func is None:
+        logger.error("unknown queued action %s", spec.get("action"))
+        threading.Thread(target=finished, daemon=True).start()
+        return True
+    _action_running = True
+
+    def work():
+        global _action_running
+        try:
+            message = func(*list(spec.get("args") or []))
+            logger.info("%s: %s", _label(spec), message)
+        except Exception:
+            logger.exception("queued action %s failed", spec.get("action"))
+        finally:
+            _action_running = False
+            finished()
+
+    threading.Thread(target=work, name=f"queued-{spec.get('action')}", daemon=True).start()
+    return True
+
+
 def _launch(spec):
+    if spec.get("kind") == "files":
+        return _launch_files(spec)
+    if spec.get("kind") == "action":
+        return _launch_action(spec)
     if spec.get("kind") == "move":
         if spec.get("media") == "music":
             from resonance import relocate as music_move
@@ -473,6 +554,7 @@ def _launch(spec):
     if spec.get("kind") == "scrape":
         from curator.video import scrape
 
+        _apply_waiting_match(spec)
         return bool(scrape.start(
             spec.get("media"),
             spec.get("scope") or "missing",
@@ -489,6 +571,10 @@ def _launch(spec):
             fields=spec.get("fields"),
             art=spec.get("art"),
             art_primary=spec.get("art_primary"),
+            ratings_only=bool(spec.get("ratings_only")),
+            rating_sources=spec.get("rating_sources"),
+            rating_filter=spec.get("rating_filter"),
+            art_levels=spec.get("art_levels"),
         ))
     if spec.get("media") == "sets" or spec.get("kind") == "sets":
         from curator.video import scrape
@@ -549,6 +635,10 @@ def _arm_retry():
 
 def _retry():
     if _busy():
+        with _guard:
+            waiting = bool(_items)
+        if waiting:
+            _arm_retry()
         return
     finished()
 

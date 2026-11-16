@@ -60,17 +60,20 @@ def preferred_index(tracks, lang, kind):
 
 
 def plan(audio, subs, lang, pick=None):
-    """Indexes to write. A pick overrides the preferred track. An existing single default is left alone."""
-    pick = pick or {}
+    """Indexes to write. A pick overrides the preferred track and limits the save to what was picked.
+    A file with no pick gets the preferred tracks. An existing single default is left alone."""
+    pick = {key: value for key, value in (pick or {}).items() if value is not None}
     chosen = {}
     for kind, tracks in (("audio", audio or []), ("subtitle", subs or [])):
+        if pick and kind not in pick:
+            continue   # the user picked something for this file: only that is written
         if kind in pick and pick[kind] is not None:
             index = int(pick[kind])
         else:
             index = preferred_index(tracks, lang, kind)
         if index is None or index < 0 or index >= len(tracks):
             continue
-        if _already(tracks, index):
+        if _already(tracks, index, kind):
             continue
         chosen[kind] = index
     return chosen
@@ -128,14 +131,11 @@ def search(mode, lang, filename="", scope="", offset=0):
 
 
 def start_save(lang, ids, picks):
-    from curator.video import files, scanner
     from curator.video.languages import normalize_lang
 
     code = normalize_lang(lang)
     if not code or code == "und":
         raise AppError("Choose a language", 400)
-    if scanner.running() or files.running():
-        raise AppError("Wait for the running scan or file job to finish", 409)
     chosen = [str(item) for item in (ids or []) if str(item).strip()][:PAGE]
     if not chosen:
         raise AppError("Nothing on this page to save", 400)
@@ -158,6 +158,7 @@ def _save(lang, ids, picks):
 
     failed = []
     processed = 0
+    changed = 0
     try:
         for file_id in ids:
             row = db.fetchone("SELECT * FROM video_files WHERE id = %s", (file_id,))
@@ -180,10 +181,13 @@ def _save(lang, ids, picks):
                     tracks.apply(path, "subtitle", chosen["subtitle"], subs)
                 if chosen:
                     _refresh(row)
+                    tracks.mark_user_set(path)
+                    changed += 1
             except Exception as exc:
                 failed.append(f"{os.path.basename(path)}: {exc}")
             _touch(processed, failed)
-        message = "Default tracks saved." if not failed else f"Saved with {len(failed)} problem{'s' if len(failed) != 1 else ''}."
+        message = (f"{changed} file{'s' if changed != 1 else ''} changed, {processed - changed} already right."
+                   if not failed else f"Saved with {len(failed)} problem{'s' if len(failed) != 1 else ''}.")
     except Exception as exc:
         failed.append(str(exc))
         message = "The language save stopped."
@@ -344,10 +348,12 @@ def _default_is(tracks, lang, kind="audio"):
     return _same_lang(_sole_default(tracks, kind), lang)
 
 
-def _already(tracks, index):
-    if not tracks[index].get("default"):
-        return False
-    return sum(1 for track in tracks if track.get("default")) == 1
+def _already(tracks, index, kind="subtitle"):
+    """True when this track is already the one default, so there is nothing to write."""
+    flagged = sum(1 for track in tracks if track.get("default"))
+    if not flagged:
+        return kind == "audio" and index == 0       # unflagged audio plays the first track
+    return bool(tracks[index].get("default")) and flagged == 1
 
 
 def _like(text):

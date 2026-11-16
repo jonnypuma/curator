@@ -7,6 +7,7 @@ only when the app has no file yet and exactly one copy sits in that folder.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -287,6 +288,7 @@ def episode_groups(groups):
                 if isinstance(series, dict):
                     series = [series]
                 files = []
+                linked = {}
                 for show in series if isinstance(series, list) else []:
                     if str(show.get("tvdbId") or "") != str(tvdb_id) or not show.get("id"):
                         continue
@@ -295,7 +297,8 @@ def episode_groups(groups):
                         local = _mapped(episode_file.get("path") or "", mappings, "sonarr")
                         if local and episode_file.get("id"):
                             files.append((local, str(episode_file["id"])))
-                return tvdb_id, {"files": files}
+                    linked.update(episode_links(sonarr._api("GET", "/episode", url, key, params={"seriesId": show["id"]}) or []))
+                return tvdb_id, {"files": files, "linked": linked}
             except Exception as exc:
                 logger.info("Sonarr lookup for %s did not finish: %s", tvdb_id, exc)
                 return tvdb_id, None
@@ -327,14 +330,43 @@ def episode_groups(groups):
                     if any(_same(path, candidate) for candidate in _copy_files(item)):
                         own = ident
                         break
-                records.append({"id": own, "files": [path for path, ident in found["files"] if ident == own] if own else [], "folders": []})
+                records.append({"id": own, "files": [path for path, ident in found["files"] if ident == own] if own else [], "folders": [],
+                                "linked": found.get("linked") or {}})
             label_copies(items, "Sonarr", [
                 {"id": (record or {}).get("id") or "", "files": (record or {}).get("files") or [], "folders": []}
                 if record is not None else None
                 for record in records
             ])
+            for item, record in zip(items, records):
+                mark_episode_link(item, (record or {}).get("linked"))
     except Exception as exc:
         logger.info("Sonarr ids were not added to the copies: %s", exc)
+
+
+def episode_links(episodes):
+    """{Sonarr file id: ["S01E01", ...]} from Sonarr's episode list: which episodes each file is attached to."""
+    links = {}
+    for episode in episodes if isinstance(episodes, list) else []:
+        file_id = str(episode.get("episodeFileId") or "")
+        if not file_id or file_id == "0" or episode.get("seasonNumber") is None or episode.get("episodeNumber") is None:
+            continue
+        links.setdefault(file_id, []).append(f"S{int(episode['seasonNumber']):02d}E{int(episode['episodeNumber']):02d}")
+    return links
+
+
+def mark_episode_link(item, linked):
+    """Say whether Sonarr attaches this copy's file to this episode.
+
+    Sonarr can keep a file record that belongs to another episode, or to none, next to the one it uses. Only the
+    attached copy is the one Sonarr manages for this episode."""
+    arr = (item or {}).get("arr") if isinstance(item, dict) else None
+    if not arr or not arr.get("id") or linked is None:
+        return
+    episodes = list((linked or {}).get(str(arr["id"])) or [])
+    arr["episodes"] = episodes
+    season, number = item.get("season_number"), item.get("episode_number")
+    if season is not None and number is not None:
+        arr["linked"] = f"S{int(season):02d}E{int(number):02d}" in episodes
 
 
 def episodes(copies):
@@ -344,6 +376,15 @@ def episodes(copies):
 def album_groups(groups):
     """Label album copies from the Lidarr track files, not the shared release group id."""
     groups = _groups(groups)
+
+    def _has_group(item):
+        return isinstance(item, dict) and (item.get("release_group") or item.get("musicbrainz_release_group_id"))
+
+    # Albums without a MusicBrainz release group cannot be looked up by it: find them through Lidarr's artist folder.
+    unmatched = [items for items in groups if not any(_has_group(item) for item in items)]
+    if unmatched:
+        _album_groups_by_folder(unmatched)
+        groups = [items for items in groups if any(_has_group(item) for item in items)]
     flat = [item for items in groups for item in items if isinstance(item, dict)]
     release_groups = []
     for item in flat:
@@ -372,11 +413,10 @@ def album_groups(groups):
         def _fetch_release_group(group):
             k = group.lower()
             try:
-                rows = lidarr._lookup("/api/v1/album/lookup", url, key, params={"term": f"mbid:{group}"})
+                # The albums Lidarr holds: quick, and no MusicBrainz search. This window can ask about many albums.
+                rows = lidarr._api("GET", "/api/v1/album", url, key, params={"foreignAlbumId": group}) or []
             except Exception as exc:
                 logger.info("Lidarr lookup for %s did not finish: %s", group, exc)
-                return k, None
-            if rows is None:
                 return k, None
             ident = ""
             for row in rows if isinstance(rows, list) else []:
@@ -417,19 +457,89 @@ def album_groups(groups):
 
         for items in groups:
             records = []
+            shared = next((str(item.get("release_group") or item.get("musicbrainz_release_group_id") or "").strip().lower()
+                           for item in items if isinstance(item, dict)
+                           and (item.get("release_group") or item.get("musicbrainz_release_group_id"))), "")
             for item in items:
                 if not isinstance(item, dict):
                     records.append({"id": "", "files": [], "folders": [], "match": "contain"})
                     continue
                 group = str(item.get("release_group") or item.get("musicbrainz_release_group_id") or "").strip().lower()
-                if not group:
-                    records.append({"id": "", "files": [], "folders": [], "match": "contain"})
-                    continue
-                found = known.get(group)
-                records.append(found if group in known else {"id": "", "files": [], "folders": [], "match": "contain"})
+                # A copy without a release group id is looked up through its peer: these are copies of one album.
+                records.append(known.get(group or shared))
             label_copies(items, "Lidarr", records)
+            _finish_album_labels(items, records)
     except Exception as exc:
         logger.info("Lidarr ids were not added to the copies: %s", exc)
+
+
+def _album_groups_by_folder(groups):
+    """Label album copies that have no release group id: Lidarr's artist folder holds the copy whose files it lists.
+
+    The copy whose folder holds Lidarr's track files is the one Lidarr uses (its album id is shown). A copy with none
+    of them is Not in. Nothing is labeled when Lidarr has no artist for the folder or does not answer."""
+    try:
+        from resonance import lidarr
+
+        url, key = lidarr._api_credentials()
+        if not url or not key:
+            return
+        mappings = _mappings()
+        hit, cached = _get_cached(_LIDARR_CACHE, "artists-by-folder")
+        if hit:
+            artists = cached["rows"]
+        else:
+            rows = lidarr._api("GET", "/api/v1/artist", url, key, timeout=60) or []
+            artists = [(_mapped(row.get("path") or "", mappings, "lidarr"), row["id"])
+                       for row in rows if isinstance(row, dict) and row.get("id") and row.get("path")]
+            _set_cached(_LIDARR_CACHE, "artists-by-folder", {"rows": artists})
+
+        def _files(artist_id):
+            ok, got = _get_cached(_LIDARR_CACHE, f"files:{artist_id}")
+            if ok:
+                return got["rows"]
+            rows = lidarr._api("GET", "/api/v1/trackfile", url, key, params={"artistId": artist_id}) or []
+            made = [(_mapped(row.get("path") or "", mappings, "lidarr"), row.get("albumId"))
+                    for row in rows if isinstance(row, dict) and row.get("path")]
+            _set_cached(_LIDARR_CACHE, f"files:{artist_id}", {"rows": made})
+            return made
+
+        for items in groups:
+            for item in items:
+                folder = str((item or {}).get("path") or "")
+                owners = [(len(clean_path(path)), artist_id) for path, artist_id in artists
+                          if path and (_same(folder, path) or _inside(folder, path))]
+                if not folder or not owners:
+                    continue
+                files = _files(max(owners)[1])
+                albums = [album for path, album in files if album and _inside(path, folder)]
+                if albums:
+                    item["arr"] = {"app": "Lidarr", "id": str(max(set(albums), key=albums.count)), "linked": True}
+                elif any(os.path.exists(path) for path, _album in files) or not files:
+                    item["arr"] = {"app": "Lidarr", "id": ""}
+    except Exception as exc:
+        logger.info("Lidarr ids were not added to the copies by folder: %s", exc)
+
+
+def _finish_album_labels(items, records):
+    """Mark the copy Lidarr uses as in use, and say Not in on a copy Lidarr has no files in.
+
+    Both copies can be Not in: Lidarr may use a third copy. A record whose files are not on disk leaves its copy
+    unmarked, because the path mappings are then the likely reason nothing matched.
+    """
+    for item, record in zip(items, records):
+        if not isinstance(item, dict) or record is None:
+            continue
+        arr = item.get("arr")
+        if arr and arr.get("id"):
+            arr["linked"] = True
+        elif not arr and _files_reachable(record):
+            item["arr"] = {"app": "Lidarr", "id": ""}
+
+
+def _files_reachable(record):
+    files = record.get("files") or []
+    return not files or any(os.path.exists(path) for path in files)
 
 
 def albums(copies):

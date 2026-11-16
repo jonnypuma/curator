@@ -73,7 +73,7 @@ def _open(phase):
     global _phase, _mark, _wall, _processed, _total
     _phase = str(phase or "")
     _mark = time.monotonic()
-    _wall = datetime.now().isoformat(timespec="seconds")
+    _wall = datetime.now().astimezone().isoformat(timespec="seconds")
     _processed = 0
     _total = 0
 

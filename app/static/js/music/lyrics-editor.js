@@ -529,7 +529,14 @@ async function lyricsSyncOk() {
 
 async function restoreLyricsBackup() {
     if (!_trackId || !_hasBackup) return;
-    if (_dirty && !confirm("Discard the unsaved changes and put back the lyrics from before the last save?")) return;
+    if (_dirty) {
+        return askDanger("Discard unsaved changes?", "The lyrics from before the last save are put back, and the changes you have not saved are lost.",
+            "Discard and restore", () => _restoreLyricsBackupNow(), true);
+    }
+    return _restoreLyricsBackupNow();
+}
+
+async function _restoreLyricsBackupNow() {
     try {
         const res = await api(`/api/tracks/${_trackId}/lyrics/revert`, { method: "POST", body: {} });
         _lrcLines = _parseLrc(res.lyrics || "");

@@ -183,6 +183,23 @@ def canonical_source(label):
     return text[:40], None
 
 
+def _source_key(value):
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+_GROUP_KEY = {_source_key(label): _source_key(group) for label, group in SOURCE_PRESETS}
+
+
+def source_covered(group, label):
+    """True when the release format already says the source group: DVDRip is DVD, Blu-ray Remux is Blu-ray, UHD Remux
+    is UHD Blu-ray, WEB-DL is WEB. Then the group is not shown a second time. The page uses the same rule."""
+    group_key = _source_key(group)
+    if not group_key:
+        return True
+    label_key = _source_key(label)
+    return bool(label_key) and (group_key in label_key or _GROUP_KEY.get(label_key) == group_key)
+
+
 def video_source_for(label):
     _label, group = canonical_source(label)
     return group

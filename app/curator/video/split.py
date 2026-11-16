@@ -17,7 +17,7 @@ from datetime import datetime
 from psycopg.types.json import Jsonb
 
 from curator.video import naming, renamer
-from resonance import db
+from resonance import db, history
 from resonance.errors import AppError
 
 logger = logging.getLogger(__name__)
@@ -598,7 +598,7 @@ def _begin_run(queued):
             "status": "running", "message": "Splitting", "error": "",
             "episode_id": queued[0][0], "parked": "", "original": "",
             "index": 1, "total": len(queued), "results": [],
-            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         })
     threading.Thread(target=_apply_many, args=(queued,), name="episode-split", daemon=True).start()
 
@@ -639,7 +639,7 @@ def start_many(jobs):
         _state.update({
             "status": "running", "message": "Splitting", "error": "", "episode_id": queued[0][0],
             "parked": "", "original": "", "index": 1, "total": len(queued), "results": [],
-            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         })
     threading.Thread(target=_apply_many, args=(queued,), name="episode-split", daemon=True).start()
     return True
@@ -807,6 +807,8 @@ def _run_split(episode_id, times):
                 except OSError:
                     logger.warning("could not undo split rename %s", dest)
         raise
+    history.record("changed", os.path.basename(path), "episode", path,
+                   f"Split into {len(outputs)} episode files. The source was parked beside them.")
     return {
         "episode_id": str(episode["id"]), "status": "done",
         "message": f"Split into {len(outputs)} files", "parked": parked_path, "original": path,
@@ -899,9 +901,10 @@ def _split_rows(episode_id):
     return row["split_source"], row["split_original"], [db.clean(dict(item)) for item in rows]
 
 
-def restore(episode_id):
+def restore(episode_id, queued=False):
     """Put the parked file back under its original name and delete the parts."""
-    _ensure_idle()
+    if not queued:
+        _ensure_idle()
     parked, original, rows = _split_rows(episode_id)
     if not rows:
         raise AppError("This episode has no parked source file", 400)
@@ -937,12 +940,14 @@ def restore(episode_id):
                 """,
                 (original, nfo_path, Jsonb(artwork), Jsonb(span), row["id"]),
             )
+    history.record("restored", os.path.basename(original), "episode", original, "The split parts were removed and the source was put back")
     return {"message": "The original file is restored.", "path": original}
 
 
-def delete_source(episode_id):
+def delete_source(episode_id, queued=False):
     """Delete the parked source and keep the split parts."""
-    _ensure_idle()
+    if not queued:
+        _ensure_idle()
     parked, _original, rows = _split_rows(episode_id)
     if os.path.isfile(parked):
         os.remove(parked)
@@ -950,4 +955,8 @@ def delete_source(episode_id):
         "UPDATE tv_episodes SET split_source = NULL, split_original = NULL, updated_at = NOW() WHERE split_source = %s",
         (parked,),
     )
+    history.record("deleted", os.path.basename(parked), "episode", parked, "The parked source of a split, deleted")
+    from curator import library_queue
+
+    library_queue.request_clean("Clean after deleting a split source")
     return {"message": "The source file was deleted.", "episodes": len(rows)}

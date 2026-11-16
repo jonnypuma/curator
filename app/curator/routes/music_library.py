@@ -7,6 +7,8 @@ from fastapi import APIRouter, Query
 from curator.routes.music_http import JsonBody, body_dict, cleaned, run
 from resonance import backup, library, profile
 
+from curator.routes.fast_json import json_reply
+
 router = APIRouter()
 
 
@@ -43,12 +45,35 @@ async def get_library(filter: str = Query("all"), q: str = Query("")):
             "sort_ignore_the": library.sort_ignore_the(),
         }
         library.note_filter("sending", label="Sending the list")
-        result = cleaned(payload)
+        result = json_reply(cleaned(payload))
         mark("prepare reply")
         if marks[-1][1] - marks[0][1] > 3.0:
             steps = ", ".join(f"{marks[i + 1][0]} {marks[i + 1][1] - marks[i][1]:.1f}s" for i in range(len(marks) - 1))
             logging.getLogger(__name__).info("music library: %d artists, %s", len(artists), steps)
         return result
+
+    return await run(work)
+
+
+@router.post("/api/library/refresh")
+async def refresh_library_rows(body: dict | None = JsonBody):
+    """The artists an edit touched, read again under the open filter and search, so the page does not reload the
+    whole library after changing one album. An artist that no longer matches the filter is simply not returned."""
+    payload = body_dict(body)
+
+    def work():
+        named = [str(library.require_uuid(item)) for item in payload.get("artist_ids") or [] if item]
+        wanted = library.refresh_scope(payload.get("album_ids") or [], named)
+        artists = library.library(filter_name=str(payload.get("filter") or "all"),
+                                  query=str(payload.get("q") or "").strip(), artist_ids=wanted)
+        # An artist the page named that is gone (merged away, deleted) is in "requested" and not in "artists",
+        # so the page drops it.
+        return json_reply(cleaned({
+            "requested": list(dict.fromkeys([*named, *wanted])),
+            "artists": artists,
+            "totals": library.totals(),
+            "filter_counts": library.filter_counts(),
+        }))
 
     return await run(work)
 
@@ -114,10 +139,55 @@ async def delete_library_files(body: dict | None = JsonBody):
     payload = body_dict(body)
 
     def work():
-        backup.snapshot_before("deleting music", len(payload.get("artist_ids") or payload.get("album_ids") or []))
-        if payload.get("artist_ids"):
-            return cleaned(library.delete_artists_from_disk(payload.get("artist_ids") or []))
-        return cleaned(library.delete_albums_from_disk(payload.get("album_ids") or []))
+        import logging
+        import os
+
+        from curator.routes.scrape import BUSY_ITEM
+        from curator.video import activity
+        from resonance import db
+        from resonance.errors import AppError
+
+        artist_ids = [str(library.require_uuid(item)) for item in payload.get("artist_ids") or [] if item]
+        album_ids = [str(library.require_uuid(item)) for item in payload.get("album_ids") or [] if item]
+        # Leave out what a running batch or lookup is writing right now, the way the video delete does.
+        held_labels = []
+        if artist_ids:
+            rows = db.fetchall("SELECT id::text AS id, artist_id::text AS artist_id, title FROM albums "
+                               "WHERE artist_id = ANY(%s::uuid[])", (db.uuid_array(artist_ids),))
+            busy = set(activity.conflicts("album", [row["id"] for row in rows]))
+            held_artists = {row["artist_id"] for row in rows if row["id"] in busy}
+            held_labels = [row["title"] for row in rows if row["id"] in busy]
+            artist_ids = [item for item in artist_ids if item not in held_artists]
+        else:
+            free, held = activity.partition("album", album_ids)
+            if held:
+                rows = db.fetchall("SELECT title FROM albums WHERE id = ANY(%s::uuid[])", (db.uuid_array(held),))
+                held_labels = [row["title"] for row in rows]
+            album_ids = free
+        if held_labels and not (artist_ids or album_ids):
+            raise AppError(BUSY_ITEM, 409)
+        # The artist folders, read before the rows go, so the players can be told where to clean.
+        if artist_ids:
+            places = db.fetchall("SELECT path FROM artists WHERE id = ANY(%s::uuid[])", (db.uuid_array(artist_ids),))
+            folders = {row["path"] for row in places if row.get("path")}
+        else:
+            places = db.fetchall("SELECT path FROM albums WHERE id = ANY(%s::uuid[])", (db.uuid_array(album_ids),))
+            folders = {os.path.dirname(str(row["path"]).rstrip("/")) for row in places if row.get("path")}
+        backup.snapshot_before("deleting music", len(artist_ids or album_ids))
+        if artist_ids:
+            result = library.delete_artists_from_disk(artist_ids)
+        else:
+            result = library.delete_albums_from_disk(album_ids)
+        result["errors"] = list(result.get("errors") or []) + [f"{title}: {BUSY_ITEM}" for title in held_labels]
+        if result.get("deleted") and folders:
+            # Kodi and the other players keep a deleted album until they are cleaned, as with a video delete.
+            try:
+                from curator import notify
+
+                notify.request("music", folders=sorted(folders), clean=True)
+            except Exception:
+                logging.getLogger(__name__).info("the library clean after a music delete was not sent", exc_info=True)
+        return cleaned(result)
 
     return await run(work)
 

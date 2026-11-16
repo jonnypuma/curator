@@ -16,47 +16,28 @@ def _settings():
 
 
 def _api(method, path, url, key, params=None, timeout=30):
-    import requests
+    from curator import arr_client
 
-    from resonance.connections import clear, note
+    return arr_client.request("bazarr", method, url, key, f"/api/{path.lstrip('/')}", params=params, timeout=timeout)
 
-    if not url or not key:
-        message = "Bazarr is not set up. Add its address and API key under Settings, Integrations."
-        note("bazarr", message)
-        raise AppError(message, 400)
-    try:
-        response = requests.request(method, f"{url}/api/{path.lstrip('/')}", headers={"X-API-KEY": key},
-                                    params=params, timeout=timeout)
-    except requests.Timeout as exc:
-        message = f"Bazarr did not answer in time: {exc}"
-        note("bazarr", message)
-        raise AppError(message, 502) from exc
-    except requests.RequestException as exc:
-        message = f"Bazarr could not be reached: {exc}"
-        note("bazarr", message)
-        raise AppError(message, 502) from exc
-    if response.status_code in (401, 403):
-        note("bazarr", "Bazarr refused the API key")
-        raise AppError("Bazarr refused the API key", 502)
-    if response.status_code >= 400:
-        detail = (response.text or "").strip().splitlines()[0][:200] if response.text else ""
-        message = f"Bazarr answered {response.status_code}{': ' + detail if detail else ''}"
-        note("bazarr", message)
-        raise AppError(message, 502)
-    clear("bazarr")
-    if not response.content:
-        return None
-    try:
-        return response.json()
-    except ValueError:
-        return None
+
+def status_version(status):
+    """Bazarr's version from /api/system/status: {"data": {"bazarr_version": "1.5.1", ...}}.
+
+    The reply also lists sonarr_version and radarr_version, so only bazarr_version is read (plain version as a fallback).
+    """
+    data = status.get("data") if isinstance(status, dict) else None
+    data = data if isinstance(data, dict) else (status if isinstance(status, dict) else {})
+    return str(data.get("bazarr_version") or data.get("version") or "").strip()
 
 
 def test(url=None, key=None):
     saved_url, saved_key = _settings()
     status = _api("GET", "system/status", (url or saved_url).rstrip("/"), key or saved_key)
-    data = (status or {}).get("data") if isinstance(status, dict) else None
-    version = (data or status or {}).get("version") if isinstance(data or status, dict) else ""
+    version = status_version(status)
+    from curator import arr_versions
+
+    arr_versions.record("bazarr", version, (url or saved_url).rstrip("/"))
     return f"Connected to Bazarr {version or ''}".strip()
 
 

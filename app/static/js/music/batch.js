@@ -19,8 +19,17 @@ function visibleAlbums() {
     return rows;
 }
 
+/* The albums the column filters leave, whether or not their artist is open. */
+function shownAlbums() {
+    const rows = [];
+    for (const artist of applyMusicColumnFilters(state.artists)) {
+        for (const album of artist.albums || []) rows.push({ artist, album });
+    }
+    return rows;
+}
+
 function selectByTier(tier) {
-    selectionReplace("album", visibleAlbums().filter((row) => (
+    selectionReplace("album", shownAlbums().filter((row) => (
         tier === "new" ? row.album.status === "NEW" : albumTier(row.album) === tier
     )).map((row) => row.album.id));
     renderTree();
@@ -29,7 +38,7 @@ function selectByTier(tier) {
 }
 
 function selectVisible(on) {
-    selectionReplace("album", on ? visibleAlbums().map((row) => row.album.id) : []);
+    selectionReplace("album", on ? shownAlbums().map((row) => row.album.id) : []);
     renderTree();
     renderBatchBar();
     refreshOpenLookup();
@@ -61,7 +70,6 @@ function renderBatchBar() {
     const nfo = document.querySelector("#batch-bar [data-action='batch-nfo']");
     const processed = document.querySelector("#batch-bar [data-action='batch-processed']");
     const lockBtn = document.querySelector("#batch-bar [data-action='batch-lock']");
-    const forget = document.querySelector("#batch-bar [data-action='batch-forget']");
     const removeDisk = document.querySelector("#batch-bar [data-action='batch-delete']");
     const rescan = document.querySelector("#batch-bar [data-action='batch-rescan']");
     if (review) review.textContent = `Review batch${mark}`;
@@ -71,8 +79,11 @@ function renderBatchBar() {
     if (nfo) nfo.textContent = `Write .nfo${mark}`;
     if (processed) processed.textContent = `Mark processed${mark}`;
     if (lockBtn) lockBtn.textContent = `${rows.length && rows.every((row) => row.album.locked) ? "Unlock" : "Lock"}${mark}`;
-    if (forget) forget.textContent = `Remove from library${mark}`;
-    if (removeDisk) removeDisk.textContent = `Delete from disk${mark}`;
+    if (removeDisk) {
+        if (!removeDisk.firstElementChild && typeof trashSvg === "function") removeDisk.innerHTML = trashSvg();
+        removeDisk.title = `Remove${mark ? mark : ""} - from the library (files stay) or from disk`;
+        removeDisk.setAttribute("aria-label", `Remove${mark ? mark : ""}`);
+    }
     if (rescan) {
         const mode = state.batchRescanMode || rescan.dataset.mode || "deep";
         const labels = { incremental: "Incremental", full: "Full", deep: "Deep" };
@@ -557,7 +568,7 @@ function syncActivity() {
     const host = document.getElementById("activity-chips");
     if (host) host.innerHTML = idle ? "" : chips.map(activityChipHtml).join("");
     const now = document.getElementById("queue-now");
-    if (now) now.innerHTML = idle ? "" : chips.map(activityChipHtml).join("");
+    if (now) now.innerHTML = idle ? `<span class="queue-now-idle muted">Idle</span>` : chips.map(activityChipHtml).join("");
     const local = document.getElementById("lookup-activity");
     if (!local) return;
     const lookupOn = state.lookupPhase === "running" || state.lookupPhase === "applying" || state.lookupPhase === "loading";

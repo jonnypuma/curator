@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 from psycopg.errors import UniqueViolation
 
-from resonance import db
+from resonance import db, history
 from resonance.errors import AppError
 from resonance.fields import ascii_hyphen, title_with_type, year_from
 from resonance.paths import inside, music_roots
@@ -246,6 +246,8 @@ def commit(album_id, options):
         for path in prune_empty(album["path"], plan["root"], [move.dest for move in completed]):
             lines.append(f"{label}: removed empty folder {path}")
     if completed:
+        history.record("renamed", label, "album", album["path"],
+                       f"{len(completed)} file{'s' if len(completed) != 1 else ''} renamed or moved")
         fresh = db.fetchone("SELECT * FROM albums WHERE id = %s", (album_id,))
         try:
             from resonance import artwork

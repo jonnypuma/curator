@@ -702,14 +702,30 @@ def _backup(path):
         shutil.copy2(path, path + ".bak")
 
 
-def write_artist(directory, profile, artist, dialect="kodi", backup=True):
+def same_text(path, text):
+    """True when the file already holds exactly this text (line endings aside), so writing it changes nothing."""
+    try:
+        with open(path, encoding="utf-8", errors="replace", newline="") as handle:
+            return handle.read().replace("\r\n", "\n") == str(text or "").replace("\r\n", "\n")
+    except OSError:
+        return False
+
+
+def write_artist(directory, profile, artist, dialect="kodi", backup=True, report=None):
+    """Write artist.nfo. A file that already holds the same text is left alone, without a .bak.
+    report, when a dict, gets "changed": whether the file was written."""
     from resonance.paths import assert_library_writable
 
     assert_library_writable(directory)
     path = os.path.join(directory, artist_filename(profile))
-    if backup:
-        _backup(path)
-    atomic_write(path, artist_document(artist, dialect))
+    text = artist_document(artist, dialect)
+    changed = not same_text(path, text)
+    if changed:
+        if backup:
+            _backup(path)
+        atomic_write(path, text)
+    if isinstance(report, dict):
+        report["changed"] = changed
     return path
 
 
@@ -727,16 +743,23 @@ def album_root(directory):
     return directory
 
 
-def write_album(directory, profile, album, tracks, dialect="kodi", backup=True):
+def write_album(directory, profile, album, tracks, dialect="kodi", backup=True, report=None):
+    """Write album.nfo. A file that already holds the same text is left alone, without a .bak.
+    report, when a dict, gets "changed": whether the file was written."""
     from resonance.paths import assert_library_writable
 
     root = album_root(directory)
     assert_library_writable(root)
     path = os.path.join(root, album_filename(profile))
-    if backup:
-        _backup(path)
-    atomic_write(path, album_document(album, tracks, dialect))
+    text = album_document(album, tracks, dialect)
+    changed = not same_text(path, text)
+    if changed:
+        if backup:
+            _backup(path)
+        atomic_write(path, text)
     _remove_disc_nfos(root, path)
+    if isinstance(report, dict):
+        report["changed"] = changed
     return path
 
 

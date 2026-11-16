@@ -13,6 +13,7 @@
         "resonance.density", "resonance.theme", "resonance.reviewCollapsed", "resonance.bioCollapsed",
         "curator.movieColumns", "curator.tvColumns", "curator.movieWidths", "curator.tvWidths",
         "curator.movieSort", "curator.tvSort", "curator.setSort", "curator.videoLeft", "curator.videoRight",
+        "curator.musicColumns", "curator.musicWidths", "curator.musicSort",
     ];
     const watched = new Set(KEYS);
     const nativeSet = Storage.prototype.setItem;

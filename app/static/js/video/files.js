@@ -7,11 +7,17 @@ const VIDEO_FILE_OPS = {
     trailers: { title: "Download trailers", verb: "Download", note: "The YouTube trailer found by the scraper is fetched with yt-dlp. A movie, show or season that already has a local trailer is skipped. Quality is the highest chosen in Settings, Files." },
     themes: { title: "Download theme songs", verb: "Download", note: "Searches YouTube for the official theme song and saves it as theme.mp3 in the movie or show folder. Folders that already have a theme file are skipped." },
     thumbs: { title: "Generate episode thumbnails", verb: "Generate", note: "Uses ffmpeg to sample a non-black frame from mid-episode and saves <episode>-thumb.jpg beside each video file that is missing a thumbnail." },
+    origlang: { title: "Switch to original language", verb: "Switch", note: "The default audio of each MKV is set to the original language from the scrape, or to the language that is not dubbed when the release name says German.DL, French.DUBBED and so on. The default subtitle follows the preferred subtitle languages in Settings, Files. Files whose default tracks were set by hand are changed too. Other containers need a remux and are left alone." },
+    integrity: { title: "Quick integrity check", verb: "Check", note: "ffmpeg decodes the first and the last minute of each video file. A decode error marks the file Corrupt (a pill and the Corrupt filter). This finds most broken or cut-off downloads in seconds. Nothing is changed on disk." },
+    integrity_full: { title: "Full integrity check", verb: "Check", note: "ffmpeg decodes each video file from start to end. This takes about as long as the file needs to decode, often several minutes for a 4K movie. A decode error marks the file Corrupt. Nothing is changed on disk." },
+    cleanfanart: { title: "Clean artwork", verb: "Clean", note: "" },
+    cleanfanart_any: { title: "Clean artwork", verb: "Clean", note: "" },
+    cleanfanart_suggested: { title: "Clean artwork", verb: "Clean", note: "" },
     move: { title: "Move", verb: "Move", note: "The folder is copied into the other library folder. The original is removed after the copy matches. Scans wait until the move finishes." },
 };
 
 // File jobs that show what they would change before they run (a dry run).
-const VIDEO_PREVIEW_OPS = ["rename", "extras", "subtitles"];
+const VIDEO_PREVIEW_OPS = ["rename", "extras", "subtitles", "origlang"];
 
 function videoFilesRunning() {
     return (state.videoFiles || {}).status === "running";
@@ -77,6 +83,7 @@ async function startVideoFiles() {
     if (!target) return;
     const data = await api("/api/v1/files/run", { method: "POST", body: { op: target.op, kind: target.kind, ids: target.ids } });
     applyVideoFiles(data.files || {});
+    if (data.queued) notify("Queued. It runs when the running job finishes, and shows in the Jobs window.", "info");
     pollVideoFiles();
 }
 
@@ -117,11 +124,21 @@ function onVideoFilesLive(snapshot) {
     if (!wasRunning && videoFilesRunning()) pollVideoFiles();
 }
 
+// A status older than the one on screen is dropped: three sources report the file job (the live channel, the Jobs
+// panel and this window's own refresh), and one sent before a new job started can arrive after it.
+function staleVideoFiles(previous, job) {
+    if (!job || job.seq == null || previous.seq == null) return false;
+    return job.boot === previous.boot && Number(job.seq) < Number(previous.seq);
+}
+
 function applyVideoFiles(job) {
     const previous = state.videoFiles || {};
+    if (staleVideoFiles(previous, job)) return;
     const log = job.log !== undefined ? job.log : previous.log;
     state.videoFiles = { ...job, log };
-    if (previous.status === "running" && job.status !== "running") {
+    // The end of a job is announced only for the job that was seen running, never for an earlier one.
+    const sameJob = !previous.job || !job.job || previous.job === job.job;
+    if (previous.status === "running" && job.status !== "running" && sameJob) {
         const result = job.result || {};
         const failed = Number(result.failed) || 0;
         const queue = state.videoFilesQueue || [];
@@ -139,7 +156,10 @@ function applyVideoFiles(job) {
             return;
         }
         state.videoFilesQueue = [];
-        notify(`${(VIDEO_FILE_OPS[job.op] || {}).title || "File job"}: ${Number(result.changed) || 0} changed, ${Number(result.skipped) || 0} unchanged${failed ? `, ${failed} failed` : ""}.`, failed ? "error" : "info");
+        const checking = job.op === "integrity" || job.op === "integrity_full";
+        notify(checking
+            ? `${(VIDEO_FILE_OPS[job.op] || {}).title}: ${Number(result.changed) || 0} with errors, ${Number(result.skipped) || 0} OK${failed ? `, ${failed} failed` : ""}.`
+            : `${(VIDEO_FILE_OPS[job.op] || {}).title || "File job"}: ${Number(result.changed) || 0} changed, ${Number(result.skipped) || 0} unchanged${failed ? `, ${failed} failed` : ""}.`, failed ? "error" : "info");
         if (job.op === "move") {
             if (state.media === "music" && state.artistId && typeof selectArtist === "function") selectArtist(state.artistId);
             else {
@@ -150,10 +170,20 @@ function applyVideoFiles(job) {
             const plans = (state.videoFilesPreview || {}).plans || [];
             rewriteVideoPaths(plans.flatMap((plan) => plan.moves || []));
             reloadOpenItem();
-        } else if (job.op === "subtitles" || job.op === "themes" || job.op === "thumbs") {
+        } else if (job.op === "subtitles" || job.op === "themes" || job.op === "thumbs" || job.op === "origlang") {
             reloadOpenItem();
+        } else if (job.op === "integrity" || job.op === "integrity_full") {
+            if (Number(result.corrupt)) notify(`${Number(result.corrupt)} corrupt file${Number(result.corrupt) === 1 ? "" : "s"} found. Use the Corrupt filter to list them.`, "error");
+            const kind = (state.videoFilesTarget || {}).kind || (state.media === "tv" ? "show" : "movie");
+            if (kind === "musicvideo") loadMusicVideos().then(renderMusicVideoEditor).catch((error) => notify(error.message, "error"));
+            else refreshVideoItems(kind).catch((error) => notify(error.message, "error"));
         } else if (job.op === "trailers") {
             reloadOpenTrailer();
+        } else if (String(job.op || "").startsWith("cleanfanart")) {
+            // The new pictures keep the old file names: load them again instead of the copies the page already holds.
+            (result.art_paths || []).forEach((path) => noteArtVersion(path));
+            if (typeof renderVideoList === "function") renderVideoList();
+            reloadOpenItem();
         }
         state.videoFilesPreview = false;
     }
@@ -167,7 +197,7 @@ function videoFilesPreviewHtml(preview) {
     return preview.plans.map((plan) => `<div class="vfiles-plan${plan.error ? " has-error" : ""}">
         <h4>${escapeHtml(plan.title)}</h4>
         ${plan.error ? `<p class="vfiles-error">${escapeHtml(plan.error)}</p>` : ""}
-        <ul>${plan.moves.map((move) => `<li title="${escapeHtml(move.from)} → ${escapeHtml(move.to)}"><span class="vfiles-from">${short(move.from)}</span><span class="vfiles-to">${/^(Re-encode|Left alone|Remove|Duplicate)/.test(move.to) ? escapeHtml(move.to) : short(move.to)}${move.dir ? "/" : ""}</span></li>`).join("")}</ul>
+        <ul>${plan.moves.map((move) => `<li title="${escapeHtml(move.from)} → ${escapeHtml(move.to)}"><span class="vfiles-from">${short(move.from)}</span><span class="vfiles-to">${/^(Re-encode|Left alone|Remove|Duplicate|Audio|Subtitle)/.test(move.to) ? escapeHtml(move.to) : short(move.to)}${move.dir ? "/" : ""}</span></li>`).join("")}</ul>
     </div>`).join("");
 }
 
@@ -245,7 +275,7 @@ function moveIdsFromSelection() {
     if (state.media === "movies") return [...selectionChecked("movie")];
     if (state.media !== "tv") return [];
     const ids = [];
-    selectionChecked("tv").forEach((key) => {
+    tvScopedKeys().forEach((key) => {
         const text = String(key);
         const split = text.indexOf(":");
         if (split > 0 && text.slice(0, split) === "show") ids.push(text.slice(split + 1));

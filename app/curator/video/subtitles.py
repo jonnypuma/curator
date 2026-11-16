@@ -322,7 +322,9 @@ def purge_duplicates(video_path, cfg, log):
             continue
         try:
             writes.check(path)
-            os.remove(path)
+            from resonance import trash
+
+            trash.discard(path, kind="subtitle")
             removed += 1
             log(f"Removed {os.path.basename(path)}: same text as {kept}")
         except (OSError, AppError) as exc:

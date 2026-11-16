@@ -292,8 +292,27 @@ def _interrupt_restarted_jobs():
         )
 
 
+def _fill_album_audio():
+    """Format, bit depth, sample rate and bitrate of every album, for the music list columns.
+
+    It runs first and has its own error handling: it takes seconds, while the jobs after it can take minutes
+    or fail, and the columns stay blank until it has run.
+    """
+    try:
+        from resonance.library import store_album_audio
+
+        filled = store_album_audio()
+        if filled:
+            logger.info("filled the audio columns of %d albums", filled)
+    except Exception:
+        logger.exception("the audio columns of the albums could not be filled")
+
+
 def maintain_catalog():
-    """Fill original years and rehome tagged albums after the server is listening."""
+    """Fill the audio columns and original years, and rehome tagged albums, after the server is listening."""
+    # The audio columns first and outside the guard below, so a rehome left running from the previous start
+    # cannot keep them blank.
+    _fill_album_audio()
     try:
         with psycopg.connect(database_url(), autocommit=True, row_factory=dict_row) as conn:
             if catalogue_maintenance_running(conn):

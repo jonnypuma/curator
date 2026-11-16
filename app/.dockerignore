@@ -10,3 +10,12 @@ movies.json
 tmm.json
 tvShows.json
 screenshot.png
+# Never bake mounted data or downloaded IMDb datasets into the image.
+data
+cache
+*.tsv
+*.tsv.gz
+imdb.sqlite*
+# The shipped badge images travel as one file, media.zip (python scripts/pack-media.py), not as thousands of files.
+media
+Thumbs.db

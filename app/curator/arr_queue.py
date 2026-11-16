@@ -114,7 +114,8 @@ def snapshot():
         return []
     rows = db.fetchall(
         """
-        SELECT id::text AS id, kind, title, source, status, priority, payload, started_at
+        SELECT id::text AS id, kind, title, source, status, priority, payload, started_at,
+               GREATEST(0, EXTRACT(EPOCH FROM (LOCALTIMESTAMP - started_at)))::int AS running_for
         FROM work_queue
         WHERE lane = 'arr' AND status IN ('queued', 'running')
         ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, priority ASC, created_at ASC
@@ -126,9 +127,9 @@ def snapshot():
 def _running_seconds(row):
     if (row.get("status") or "") != "running":
         return None
-    from curator.queue_time import seconds_since
+    from curator.queue_time import elapsed
 
-    return seconds_since(row.get("started_at"))
+    return elapsed(row)
 
 
 def _public(row):
@@ -261,7 +262,7 @@ def _execute(row):
         if payload.get("episodes"):
             sonarr.search_episodes(payload["episodes"])
         else:
-            sonarr.search_missing(payload.get("tvdb_id"), payload.get("season"), payload.get("episode"))
+            sonarr.search_missing(payload.get("tvdb_id"), payload.get("season"), payload.get("episode"), payload.get("tmdb_id"))
         return
     if kind == "lidarr":
         from resonance import lidarr

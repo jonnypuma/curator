@@ -191,7 +191,12 @@ function orderedArtists(artists) {
         if (mode === "modified") return b.newestChange - a.newestChange || byName;
         return byName;
     });
-    return rows.map((row) => ({ ...row.artist, albums: row.albums }));
+    return musicApplyColumnSort(rows).map((row) => ({ ...row.artist, albums: row.albums }));
+}
+
+/* What the list shows: the library order, the loaded-matches view, then the column filters. */
+function musicShownArtists() {
+    return applyMusicColumnFilters(pendingArtists(orderedArtists(state.artists)));
 }
 
 function syncLibraryTools() {
@@ -240,6 +245,7 @@ function renderMusicRibbons() {
     const counts = {
         all: allAlbums.length,
         new: allAlbums.filter(({ artist, album }) => album.status === "NEW" || artist.status === "NEW").length,
+        latest: Number((state.filterCounts || {}).latest) || allAlbums.filter(({ album }) => Date.now() - addedStamp(album) < 30 * 86400000).length,
         unmatched: allAlbums.filter(({ album }) => albumTier(album) === "unmatched").length,
         gold: allAlbums.filter(({ album }) => albumTier(album) === "gold").length,
         silver: allAlbums.filter(({ album }) => albumTier(album) === "silver").length,
@@ -249,11 +255,13 @@ function renderMusicRibbons() {
         duplicates: allAlbums.filter(({ album }) => album.duplicate_release).length,
         upgrade: allAlbums.filter(({ album }) => album.upgrade).length,
         "prune-held": allAlbums.filter(({ album }) => album.prune_held).length,
+        corrupt: allAlbums.filter(({ album }) => album.corrupt).length,
     };
     // The rest (100%, No Art, No NFO, Duplicates, Upgrade, ...) are in the filter menu.
     const pills = [
         ["all", "All", counts.all],
         ["new", "New", counts.new],
+        ["latest", "Latest added", counts.latest],
         ["unmatched", "Unmatched", counts.unmatched],
         ["silver", "Partial", counts.silver],
         ["nfo-changes", "NFO Change", counts["nfo-changes"]],
@@ -341,7 +349,8 @@ function renderTree() {
     renderMusicRibbons();
     if (typeof paintSelectToggle === "function") paintSelectToggle();
     syncLibraryTools();
-    const artists = pendingArtists(orderedArtists(state.artists));
+    renderMusicHead(false);
+    const artists = musicShownArtists();
     const albumCount = artists.reduce((sum, artist) => sum + (artist.albums || []).length, 0);
     const treeStats = document.getElementById("tree-stats");
     if (treeStats) {
@@ -357,12 +366,26 @@ function renderTree() {
     }
     if (!state.artists.length) {
         state.treeRows = [];
+        const filtered = !state.libraryError && ((state.filter && state.filter !== "all" && state.filter !== "pending") || state.query);
+        if (filtered) {
+            root.innerHTML = `<div class="empty-state">Nothing matches these filters. <button type="button" class="link" data-action="music-filters-clear">Clear filters</button></div>`;
+            return;
+        }
         const message = state.libraryError || "No artists in this view. Scan a mounted music path to index the library.";
         root.innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
         return;
     }
     if (!artists.length) {
         state.treeRows = [];
+        if (state.query && !musicSearchArtists(state.artists).length) {
+            root.innerHTML = `<div class="empty-state">Nothing matches these filters. <button type="button" class="link" data-action="music-filters-clear">Clear filters</button></div>`;
+            return;
+        }
+        if (musicColumnFiltersOn() && state.musicViewMode !== "grid") {
+            renderMusicHead(true);
+            root.innerHTML = `<div class="empty-state">No albums match the column filters. <button type="button" class="link" data-action="music-col-clear-filters">Clear the column filters</button></div>`;
+            return;
+        }
         root.innerHTML = `<div class="empty-state">No loaded matches. Find metadata, then load the releases you want to review.</div>`;
         return;
     }
@@ -371,6 +394,7 @@ function renderTree() {
         renderMusicPosterGrid(artists);
         return;
     }
+    renderMusicHead(true);
     const rows = [];
     artists.forEach((artist) => {
         rows.push({ kind: "artist", artist });
@@ -442,9 +466,37 @@ function paintTreeWindow(force) {
     state.treeWindow = { start, end, count: rows.length, token };
     const html = rows.slice(start, end).map(treeRowHtml).join("");
     state.treePainting = true;
-    root.innerHTML = `<div class="tree-spacer" style="height:${rows.length * height}px"><div class="tree-window" style="top:${start * height}px">${html}</div></div>`;
+    const template = musicTemplate(musicColumns());
+    root.innerHTML = `<div class="tree-spacer" style="height:${rows.length * height}px;min-width:${template.total}px;--mm-cols:${template.cols}"><div class="tree-window" style="top:${start * height}px">${html}</div></div>`;
     pinTreeScroll(root, scroll);
     syncArtistChecks();
+    syncMusicHeadScroll();
+    queueTreeSettle();
+}
+
+// A refresh (the end of a scan, say) rebuilds the rows while the browser may clamp or reset the pane's scroll
+// position. Some time after the last paint, check that the rows drawn are the ones at the position the pane really
+// has, and draw them again from that position when they are not, so the list is never left blank until a scroll.
+let treeSettleTimer = 0;
+
+function queueTreeSettle() {
+    clearTimeout(treeSettleTimer);
+    treeSettleTimer = setTimeout(settleTree, 450);
+}
+
+function settleTree() {
+    const root = document.getElementById("tree");
+    const rows = state.treeRows || [];
+    if (!root || !root.isConnected || state.musicViewMode === "grid" || !rows.length || !root.clientHeight) return;
+    if (performance.now() - (state.treeScrollAt || 0) < 400) return queueTreeSettle();
+    const painted = state.treeWindow;
+    const first = Math.floor(root.scrollTop / TREE_ROW_HEIGHT);
+    const last = Math.min(rows.length, Math.ceil((root.scrollTop + root.clientHeight) / TREE_ROW_HEIGHT));
+    const drawn = root.querySelectorAll(".tree-window > *").length;
+    if (painted && painted.count === rows.length && painted.start <= first && painted.end >= last && drawn) return;
+    state.treePainting = false;
+    state.treeScroll = root.scrollTop;
+    paintTreeWindow(true);
 }
 
 function revealTreeAlbum(albumId) {
@@ -476,100 +528,130 @@ function treeRowHtml(row) {
 
 function treeMissingHtml(artist, release) {
     const year = release.year || "----";
-    return `<div class="album-line is-missing">
-        <span class="album-check-spacer" aria-hidden="true"></span>
-        <button type="button" class="album-item" data-open-artist="${escapeHtml(artist.id)}">
-            <span class="match-icon unmatched">○</span>
-            <span class="album-label">${escapeHtml(`${year} - ${release.title}`)}</span>
-            <span class="tree-pills"><span class="tag-pill missing-pill">Not on disk</span></span>
-        </button>
+    const columns = musicColumns();
+    const pill = `<span class="tree-pills"><span class="tag-pill missing-pill">Not on disk</span></span>`;
+    return `<div class="album-line mm-row is-missing">
+        <span class="mm-name">
+            <span class="album-check-spacer" aria-hidden="true"></span>
+            <button type="button" class="album-item" data-open-artist="${escapeHtml(artist.id)}">
+                <span class="match-icon unmatched">○</span>
+                <span class="album-label">${escapeHtml(`${year} - ${release.title}`)}</span>
+            </button>
+        </span>${musicBlankCellsHtml(columns, { status: pill })}
     </div>`;
 }
 
+/* The pills at the end of an album row, as the Status column shows them. */
+function albumStatusHtml(album) {
+    const showProcessed = (typeof videoCfg === "function" ? videoCfg() : {}).ui_music_processed !== false;
+    return [
+        album.status === "IGNORED" ? `<span class="tag-pill" title="Left out of scans and scrapes">Ignored</span>` : "",
+        album.locked ? `<span class="tag-pill" title="Scans and scrapes leave this album alone">Locked</span>` : "",
+        state.pending[album.id] ? `<span class="tag-pill pending-pill" title="Loaded match, not applied">Match</span>` : "",
+        album.upgrade ? `<button type="button" class="tag-pill upgrade-pill" title="A better copy of this album is in the library. Click to compare them.">Upgrade available</button>` : "",
+        album.prune_held ? `<span class="tag-pill prune-held-pill" title="Not found at the last scan, but kept because removing it would break a prune safety limit. Remove it from the database if it is really gone.">Not found</span>` : "",
+        album.duplicate_release ? `<button type="button" class="tag-pill duplicate-pill" title="Another copy of this release is in the library. Click to compare them.">Duplicate</button>` : "",
+        album.corrupt ? `<span class="tag-pill bad" title="Audit audio found a track that does not decode cleanly. Open the album to see which.">Corrupt</span>` : "",
+        state.dirtyAlbums.has(album.id) ? changesPill() : "",
+        state.staleNfoAlbums.has(album.id) || album.nfo_stale ? nfoStalePill("album.nfo", album.id) : "",
+        album.status === "NEW" ? `<span class="badge-new">NEW</span>` : "",
+    ].filter(Boolean).join("");
+}
+
+/* The same states as words, for sorting and for the filter list. */
+function albumStatusTokens(album) {
+    return [
+        album.status === "IGNORED" ? "Ignored" : "",
+        album.locked ? "Locked" : "",
+        state.pending[album.id] ? "Loaded match" : "",
+        album.upgrade ? "Upgrade available" : "",
+        album.prune_held ? "Not found" : "",
+        album.duplicate_release ? "Duplicate" : "",
+        album.corrupt ? "Corrupt" : "",
+        state.dirtyAlbums.has(album.id) ? "Changes" : "",
+        state.staleNfoAlbums.has(album.id) || album.nfo_stale ? "NFO changes" : "",
+        album.status === "NEW" ? "NEW" : "",
+    ].filter(Boolean);
+}
+
 function treeAlbumHtml(artist, album) {
-    const active = state.album && state.album.album.id === album.id ? " active" : "";
+    const isActive = !!(state.album && state.album.album && state.album.album.id === album.id);
+    const active = isActive ? " active" : "";
     const pending = state.pending[album.id] ? " has-pending" : "";
     const badge = [
         album.gap_expected && album.gap_present < album.gap_expected ? `<span class="tag-pill">Incomplete album (${album.gap_present}/${album.gap_expected})</span>` : "",
     ].join("");
-    const musicCfg = typeof videoCfg === "function" ? videoCfg() : {};
-    const added = musicCfg.ui_music_date_added === false ? "" : addedLabel(album);
-    const showProcessed = musicCfg.ui_music_processed !== false;
-    const tracks = Number(album.total_tracks) || 0;
-    const trackTitle = tracks === 1 ? "1 track" : `${tracks} tracks`;
-    const duplicate = !!album.duplicate_release;
-    const trailing = [
-        countryFlag(album.country),
-        album.status === "IGNORED"
-            ? `<span class="tag-pill" title="Left out of scans and scrapes">Ignored</span>`
-            : !showProcessed ? ""
-            : album.status === "PROCESSED"
-            ? `<span class="process-mark ok" title="Processed">✓</span>`
-            : `<span class="process-mark bad" title="Not processed">✕</span>`,
-        album.locked ? `<span class="tag-pill" title="Scans and scrapes leave this album alone">Locked</span>` : "",
-        state.pending[album.id] ? `<span class="tag-pill pending-pill" title="Loaded match, not applied">Match</span>` : "",
-        album.upgrade ? `<span class="tag-pill upgrade-pill">Upgrade available</span>` : "",
-        album.prune_held ? `<span class="tag-pill prune-held-pill" title="Not found at the last scan, but kept because removing it would break a prune safety limit. Remove it from the database if it is really gone.">Not found</span>` : "",
-        duplicate ? `<span class="tag-pill duplicate-pill" title="Another copy of this release is in the library">Duplicate</span>` : "",
-        state.dirtyAlbums.has(album.id) ? changesPill() : "",
-        state.staleNfoAlbums.has(album.id) || album.nfo_stale ? nfoStalePill("album.nfo", album.id) : "",
-        album.status === "NEW" ? `<span class="badge-new">NEW</span>` : "",
-    ].join("");
     const checked = state.selected.has(album.id) ? "checked" : "";
-    return `<div class="album-line${pending}">
-        <input type="checkbox" data-check-album="${escapeHtml(album.id)}" ${checked} aria-label="Select ${escapeHtml(album.title)}">
-        <button type="button" class="album-item${active}" data-album="${escapeHtml(album.id)}" data-artist-id="${escapeHtml(artist.id)}">
-            <span class="match-icon ${escapeHtml(album.match_tier || "unmatched")}">${matchIcon(album.match_tier)}</span>
-            <span class="album-label">${escapeHtml(albumLabel(album))}</span>
-            ${badge}
-            <span class="album-count" title="${escapeHtml(trackTitle)}">${tracks}</span>
-            ${album.version && (typeof videoCfg !== "function" || videoCfg().ui_music_edition_badge !== false) ? `<span class="tag-pill version-pill" title="${escapeHtml(album.version)}">${escapeHtml(album.version)}</span>` : ""}
-            ${added ? `<span class="added-date" title="Added to the library">${escapeHtml(added)}</span>` : ""}
-            ${trailing ? `<span class="tree-pills">${trailing}</span>` : ""}
-        </button>
+    const cells = musicColumns().slice(1).map((column) => musicAlbumCellHtml(column, album)).join("");
+    return `<div class="album-line mm-row${pending}${isActive ? " is-active" : ""}" data-album="${escapeHtml(album.id)}" data-artist-id="${escapeHtml(artist.id)}">
+        <span class="mm-name">
+            <input type="checkbox" data-check-album="${escapeHtml(album.id)}" ${checked} aria-label="Select ${escapeHtml(album.title)}">
+            <button type="button" class="album-item${active}" data-album="${escapeHtml(album.id)}" data-artist-id="${escapeHtml(artist.id)}">
+                <span class="match-icon ${escapeHtml(album.match_tier || "unmatched")}">${matchIcon(album.match_tier)}</span>
+                <span class="album-label">${escapeHtml(albumLabel(album))}</span>
+                ${badge}
+            </button>
+        </span>${cells}
     </div>`;
 }
 
-function treeArtistHtml(artist) {
-    const open = state.expanded.has(artist.id);
-    const activeArtist = state.center === "artist" && state.artistId === artist.id ? " active" : "";
-    const pendingCount = (artist.albums || []).filter((album) => state.pending[album.id]).length;
-    const newAlbums = (artist.albums || []).filter((album) => album.status === "NEW").length;
+/* The pills at the end of an artist row, as the Status column shows them. */
+function artistStatusHtml(artist) {
+    const albums = artist.albums || [];
+    const pendingCount = albums.filter((album) => state.pending[album.id]).length;
+    const newAlbums = albums.filter((album) => album.status === "NEW").length;
     const missingCount = (artist.missing_releases || []).length;
-    const artistCfg = typeof videoCfg === "function" ? videoCfg() : {};
-    const artistAdded = artistCfg.ui_music_date_added === false ? "" : addedLabel(artist);
-    const albumTotal = state.filter === "missing-releases" ? missingCount : (artist.albums || []).length;
-    const albumCountTitle = state.filter === "missing-releases"
-        ? (albumTotal === 1 ? "1 studio album not on disk" : `${albumTotal} studio albums not on disk`)
-        : (albumTotal === 1 ? "1 album" : `${albumTotal} albums`);
-    const artistDirty = state.dirtyArtists.has(artist.id) || (artist.albums || []).some((album) => state.dirtyAlbums.has(album.id));
-    const staleAlbum = (artist.albums || []).find((album) => state.staleNfoAlbums.has(album.id) || album.nfo_stale);
-    const albumNfoStale = !!staleAlbum;
+    const artistDirty = state.dirtyArtists.has(artist.id) || albums.some((album) => state.dirtyAlbums.has(album.id));
+    const albumNfoStale = albums.some((album) => state.staleNfoAlbums.has(album.id) || album.nfo_stale);
     const newAlbumsTitle = newAlbums === 1 ? "1 album is not processed yet" : `${newAlbums} albums are not processed yet`;
     const newAlbumsLabel = newAlbums === 1 ? "New album" : `New albums (${newAlbums})`;
-    const folderTitle = state.filter === "case-folders" && artist.path ? ` title="${escapeHtml(artist.path)}"` : "";
-    const artistPills = [
+    return [
         newAlbums ? `<span class="tag-pill new-albums-pill" title="${escapeHtml(newAlbumsTitle)}">${escapeHtml(newAlbumsLabel)}</span>` : "",
         missingCount ? `<span class="tag-pill missing-pill" title="Studio albums in the stored discography that are not on disk">${missingCount === 1 ? "1 missing" : `${missingCount} missing`}</span>` : "",
         pendingCount ? `<span class="tag-pill pending-pill" title="Loaded matches, not applied">${pendingCount === 1 ? "1 match" : `${pendingCount} matches`}</span>` : "",
         artistDirty ? changesPill() : "",
         state.staleNfoArtists.has(artist.id) || artist.nfo_stale ? nfoStalePill("artist.nfo", null, artist.id) : "",
         albumNfoStale ? `<span class="tag-pill changes-pill" title="The database has changes that are not in a stored album.nfo">NFO changes</span>` : "",
-        artist.duplicate ? `<span class="tag-pill duplicate-pill" title="Another artist entry has the same name, for example the same band in another library path. Merge with… on the artist page joins them.">Duplicate</span>` : "",
+        artist.duplicate ? `<button type="button" class="tag-pill duplicate-pill" data-action="twin-artists" data-id="${escapeHtml(artist.id)}" title="Another artist folder is the same artist (the same MusicBrainz id, or the same name). Click to compare them and merge.">Duplicate</button>` : "",
         artist.status === "IGNORED" ? `<span class="tag-pill" title="Left out of scans and scrapes">Ignored</span>` : "",
         artist.locked ? `<span class="tag-pill" title="Scans and scrapes leave this artist alone">Locked</span>` : "",
         artist.status === "NEW" ? `<span class="badge-new">NEW</span>` : "",
     ].filter(Boolean).join("");
-    return `<div class="artist-row${activeArtist}${pendingCount ? " has-pending" : ""}" data-open-artist="${escapeHtml(artist.id)}">
-        <button type="button" class="caret-btn" data-toggle-artist="${escapeHtml(artist.id)}" aria-label="Expand">${open ? "▼" : "▶"}</button>
-        <input type="checkbox" class="artist-check" data-check-artist="${escapeHtml(artist.id)}" aria-label="Select all albums by ${escapeHtml(artist.name)}">
-        <button type="button" class="artist-name"${folderTitle}>${escapeHtml(artist.name)}</button>
-        <span class="album-count" title="${escapeHtml(albumCountTitle)}">${albumTotal}</span>
-        ${artistAdded ? `<span class="added-date" title="Added to the library">${escapeHtml(artistAdded)}</span>` : ""}
-        ${artistCfg.ui_music_processed === false ? "" : artist.status === "PROCESSED"
-            ? `<span class="process-mark ok" title="Processed">✓</span>`
-            : `<span class="process-mark bad" title="Not processed">✕</span>`}
-        ${artistPills ? `<span class="tree-pills">${artistPills}</span>` : ""}
+}
+
+function artistStatusTokens(artist) {
+    const albums = artist.albums || [];
+    return [
+        albums.some((album) => album.status === "NEW") ? "New albums" : "",
+        (artist.missing_releases || []).length ? "Missing albums" : "",
+        albums.some((album) => state.pending[album.id]) ? "Loaded matches" : "",
+        state.dirtyArtists.has(artist.id) || albums.some((album) => state.dirtyAlbums.has(album.id)) ? "Changes" : "",
+        state.staleNfoArtists.has(artist.id) || artist.nfo_stale || albums.some((album) => state.staleNfoAlbums.has(album.id) || album.nfo_stale) ? "NFO changes" : "",
+        artist.duplicate ? "Duplicate" : "",
+        artist.status === "IGNORED" ? "Ignored" : "",
+        artist.locked ? "Locked" : "",
+        artist.status === "NEW" ? "NEW" : "",
+    ].filter(Boolean);
+}
+
+function treeArtistHtml(artist) {
+    const open = state.expanded.has(artist.id);
+    const activeArtist = state.center === "artist" && state.artistId === artist.id ? " active" : "";
+    const pendingCount = (artist.albums || []).filter((album) => state.pending[album.id]).length;
+    const missingCount = (artist.missing_releases || []).length;
+    const albumTotal = state.filter === "missing-releases" ? missingCount : (artist.albums || []).length;
+    const albumCountTitle = state.filter === "missing-releases"
+        ? (albumTotal === 1 ? "1 studio album not on disk" : `${albumTotal} studio albums not on disk`)
+        : (albumTotal === 1 ? "1 album" : `${albumTotal} albums`);
+    const folderTitle = state.filter === "case-folders" && artist.path ? ` title="${escapeHtml(artist.path)}"` : "";
+    const cells = musicColumns().slice(1).map((column) => musicArtistCellHtml(column, artist)).join("");
+    return `<div class="artist-row mm-row${activeArtist}${pendingCount ? " has-pending" : ""}" data-open-artist="${escapeHtml(artist.id)}">
+        <span class="mm-name">
+            <button type="button" class="caret-btn" data-toggle-artist="${escapeHtml(artist.id)}" aria-label="Expand">${open ? "▼" : "▶"}</button>
+            <input type="checkbox" class="artist-check" data-check-artist="${escapeHtml(artist.id)}" aria-label="Select all albums by ${escapeHtml(artist.name)}">
+            <button type="button" class="artist-name"${folderTitle}>${escapeHtml(artist.name)}</button>
+            <span class="album-count" title="${escapeHtml(albumCountTitle)}">${albumTotal}</span>
+        </span>${cells}
     </div>`;
 }
 
@@ -588,6 +670,7 @@ function syncArtistChecks() {
         box.indeterminate = picked > 0 && picked < ids.length;
         box.checked = ids.length > 0 && picked === ids.length;
     });
+    syncMusicMasterBox();
 }
 
 function albumLabel(album) {

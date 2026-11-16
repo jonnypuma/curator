@@ -32,6 +32,7 @@ async function openSettings() {
         const [cfg, system] = await Promise.all([api("/api/settings"), api("/api/system")]);
         state.settings = cfg;
         state.mounts = system.mounts || [];
+        state.ownFolders = system.own_folders || [];
         state.offlinePaths = system.offline_paths || {};
         state.unreadablePaths = system.unreadable_paths || {};
         state.emptyPaths = system.empty_paths || {};
@@ -95,9 +96,32 @@ function renderSettings() {
             </label>
             <p class="muted">This is CMM_API_KEY from docker-compose. Paste it where a webhook address says YOUR_KEY. Changing it here does not save a new key.</p>
         </section>
+        <section class="settings-section" data-tab="general"><h3>Recycle bin</h3>
+            <label class="choice"><input type="checkbox" id="trash-enabled" ${cfg.trash_enabled !== false ? "checked" : ""}> Move deleted files to the recycle bin</label>
+            <label>Keep them for
+                <input id="trash-days" type="number" min="1" max="365" value="${Math.min(365, Math.max(1, Number(cfg.trash_days) || 30))}"> days
+            </label>
+            <p class="muted">Delete from disk moves movies, episodes, albums, artists, extra copies and duplicate subtitles into a hidden .curator-trash folder at the top of their own library folder, so nothing is copied and a large file moves at once. Restore puts an item back where it was and scans it back into the library. Items are deleted for good after the number of days above. Scans skip the folder, and marker files keep Kodi, Plex and Jellyfin out of it. When this is off, Delete from disk deletes at once.</p>
+            <p><button type="button" class="btn-ghost" data-action="trash-open">Open recycle bin</button></p>
+            <label>Warn when a library drive has less than
+                <input id="disk-alert-gb" type="number" min="0" value="${Number(cfg.disk_alert_gb) || 0}"> GB free (0 = off)
+            </label>
+            <label class="choice"><input type="checkbox" id="disk-alert-empty-bin" ${cfg.disk_alert_empty_bin ? "checked" : ""}> Then delete the oldest recycle bin items on that drive for good until it is above the limit</label>
+            <p class="muted">Checked every hour. The warning goes out once a day per folder through Notifications (event "A library drive is low on space").</p>
+        </section>
         <section class="settings-section" data-tab="general"><h3>Logging</h3>
             <label class="choice"><input type="checkbox" id="verbose-logging" ${cfg.verbose_logging ? "checked" : ""}> Verbose logging</label>
             <p class="muted">Writes scan albums, artwork downloads, metadata lookups, match apply, and batch jobs to the container log (docker compose logs -f). Turn this on while troubleshooting, then save settings. The scan engine checkbox still turns the same album detail on for one scan.</p>
+        </section>
+        <section class="settings-section" data-tab="general"><h3>Time zone</h3>
+            <label class="field">Schedule time zone
+                <span class="path-field">
+                    <input id="schedule-timezone" class="mono" list="schedule-timezone-list" autocomplete="off" spellcheck="false" value="${escapeHtml(cfg.timezone || "")}" placeholder="${escapeHtml(cfg.timezone_server || "")}" aria-label="Schedule time zone">
+                    <button type="button" class="btn-ghost" id="schedule-timezone-reset" data-action="reset-schedule-timezone" title="Clear the saved zone and follow the server${cfg.timezone_server ? ` (${escapeHtml(cfg.timezone_server)}, from CMM_TIMEZONE or TZ)` : " (CMM_TIMEZONE, then TZ)"}" ${cfg.timezone ? "" : "disabled"}>Reset</button>
+                </span>
+            </label>
+            <datalist id="schedule-timezone-list">${(cfg.timezone_zones || []).map((name) => `<option value="${escapeHtml(name)}"></option>`).join("")}</datalist>
+            <p class="muted">The clock that scheduled scans, library cleans and backups run by, and the time in backup file names. Start typing a name such as Europe/Oslo. Leave it empty to use the server's zone${cfg.timezone_server ? `, now ${escapeHtml(cfg.timezone_server)}` : ""}, which comes from CMM_TIMEZONE or TZ in docker-compose. Reset clears the box to do that; press Save settings to apply it. A zone saved here wins over both and applies at once, with no restart. It is one zone for the whole server and does not follow the browser you use. Logs and the database keep the container's TZ.</p>
         </section>
         <section class="settings-section" data-tab="general"><h3>Library behaviour</h3>
             <label>Probe workers
@@ -139,6 +163,11 @@ function renderSettings() {
             <p class="muted">Every checked biography source is read. The longest text is kept, and a scan replaces a shorter biography you did not edit yourself. The list above still decides which sources are used, and it breaks a tie. Turn this off to keep the first source in that list that has a biography, and to leave a stored biography as it is.</p>
             ${metaPriorityList(cfg, "review", "Album review")}
             ${metaPriorityList(cfg, "descriptors", "Styles, moods, and themes")}
+            <h4>Duplicates and upgrades</h4>
+            <p class="muted">A special release is a Deluxe, Expanded, Anniversary, Special, Limited, Collector's, Extended or box set edition, an album with bonus tracks, or a copy with a different number of tracks. A remix album never counts as a copy of the studio album.</p>
+            <label class="choice"><input type="checkbox" id="dup-count-special" ${cfg.dup_count_special_releases ? "checked" : ""}> Count special releases as duplicates of the regular album</label>
+            <label class="choice"><input type="checkbox" id="upgrade-count-special" ${cfg.upgrade_count_special_releases ? "checked" : ""}> Count a better-sounding special release as an upgrade of the regular album</label>
+            <p class="muted">Both are off by default: a Deluxe edition is then neither a duplicate nor an upgrade. Turn on only the second to have a Deluxe edition offered as an upgrade without it being marked a duplicate. A change records the Duplicate and Upgrade available marks again at once.</p>
             <label class="choice"><input type="checkbox" id="nfo-on-bio-save" ${cfg.nfo_on_bio_save !== false ? "checked" : ""}> Update artist.nfo when a biography is saved</label>
             <p class="muted">Saving a biography also rewrites the artist .nfo in that artist’s folder. Emby writes folder.nfo. Turn this off to keep the file until you press Write artist.nfo.</p>
             <p class="muted">Choose which release types are written at the end of the album title. Album is off, because a normal album title usually stays as it is. A selected type is written as (single), (EP), (live), (compilation), or (album). A title that already ends with one of those is updated instead of repeated. Folder names that use the album title include it too. The release type is always stored as its own tag either way.</p>
@@ -157,10 +186,14 @@ function renderSettings() {
             <p class="muted">A full or deep scan copies blank MusicBrainz fields onto an album that already has a release id. Titles, artist names, and track numbers that are already stored stay as they are. An incremental deep scan does this only when this is on, and only for albums that are new or changed. An album with no release id is left for Find metadata.</p>
             <label class="choice"><input type="checkbox" id="fill-missing-during-scan" ${cfg.fill_missing_during_scan !== false ? "checked" : ""}> Download missing metadata and artwork during a scan</label>
             <p class="muted">After the sidecar audit, a scan fills a blank biography or album review and downloads artwork that is still missing. It looks for every type checked under Artwork to fetch. An incremental deep scan only does this for albums that are new or changed, and for their artists. A full or deep scan still checks the whole library. A shorter biography is replaced when Use the longest biography is on, unless you edited that biography yourself. Turn this off to leave those steps out of the scan.</p>
+            <label class="choice"><input type="checkbox" id="scan-refresh-metadata" ${cfg.scan_refresh_metadata ? "checked" : ""}> Update client libraries for items with updated metadata</label>
+            <label class="choice"><input type="checkbox" id="scan-refresh-artwork" ${cfg.scan_refresh_artwork ? "checked" : ""}> Update client libraries for items with updated artwork</label>
+            <label class="choice"><input type="checkbox" id="scan-refresh-dry" ${cfg.scan_refresh_dry_run ? "checked" : ""}> Dry run: only log what would be refreshed</label>
+            <p class="muted">The last step of any scan (incremental, full or deep) refreshes the artists and albums whose stored metadata (including tags written into the tracks) or artwork changed during the scan, also when a missing value was filled in, and albums the scan added. Emby and Jellyfin mark those folders as changed, so they read them again, and Plex scans them; both need path rows under Integrations. Kodi and Navidrome already get a music library scan after every music scan, which reads changed tags; Kodi has no way to refresh one album's album.nfo or artwork, so use Refresh in Kodi for those.</p>
             <label class="choice"><input type="checkbox" id="limited-artwork-during-scan" ${cfg.limited_artwork_during_scan ? "checked" : ""}> Limited artwork search during scan</label>
             <p class="muted">When this is on, the artwork step only looks for a missing artist thumb or album cover. When it is off, that step looks for every artwork type that is checked under Artwork to fetch and is still missing from the folder.</p>
             <label class="choice"><input type="checkbox" id="scan-rewrite-nfo" ${cfg.scan_rewrite_nfo ? "checked" : ""}> Rewrite .nfo files at the end of a scan</label>
-            <p class="muted">The last stage writes an album.nfo that is missing, and it rewrites album.nfo for a new or changed album that already has a MusicBrainz id. The file is written after reviews, countries, and original years are stored. When this is on, that stage also replaces every artist.nfo and album.nfo in the scanned folders. A full or deep scan without this box still writes files that are missing.</p>
+            <p class="muted">The last stage writes an album.nfo that is missing, and it rewrites album.nfo for a new or changed album that already has a MusicBrainz id. The file is written after reviews, countries, and original years are stored. When this is on, a full or deep scan also rewrites every artist.nfo and album.nfo in the scanned folders; an incremental scan still writes only the new and changed albums. A full or deep scan without this box still writes files that are missing. A file that already holds the same text is left alone, without a .bak, and is not counted as written.</p>
             <label>Skip a metadata miss for
                 <input id="metadata-miss-days" type="number" min="0" max="3650" value="${Math.max(0, Math.min(3650, Number(cfg.metadata_miss_days) || 0))}"> days
             </label>
@@ -281,6 +314,7 @@ function renderSettings() {
     syncBackupButton();
     paintStorage();
     bindGeneralRuntime();
+    if (typeof loadImdbDataStatus === "function") loadImdbDataStatus();
 }
 
 function bindGeneralRuntime() {
@@ -935,12 +969,26 @@ function rememberSettingsForm() {
     if (scanRewriteNfo) state.settings.scan_rewrite_nfo = scanRewriteNfo.checked;
     const longestBio = document.getElementById("biography-longest");
     if (longestBio) state.settings.biography_longest = longestBio.checked;
+    const dupSpecial = document.getElementById("dup-count-special");
+    if (dupSpecial) state.settings.dup_count_special_releases = dupSpecial.checked;
+    const upgradeSpecial = document.getElementById("upgrade-count-special");
+    if (upgradeSpecial) state.settings.upgrade_count_special_releases = upgradeSpecial.checked;
     const musicFolder = document.getElementById("music-rename-folder");
     const musicFile = document.getElementById("music-rename-file");
     if (musicFolder) state.settings.rename_folder_pattern = musicFolder.value.trim();
     if (musicFile) state.settings.rename_file_pattern = musicFile.value.trim();
     const verboseLogging = document.getElementById("verbose-logging");
     if (verboseLogging) state.settings.verbose_logging = verboseLogging.checked;
+    const trashEnabled = document.getElementById("trash-enabled");
+    const trashDays = document.getElementById("trash-days");
+    if (trashEnabled) state.settings.trash_enabled = trashEnabled.checked;
+    if (trashDays) state.settings.trash_days = Math.max(1, Math.min(365, Number(trashDays.value) || 30));
+    const diskAlert = document.getElementById("disk-alert-gb");
+    const diskEmpty = document.getElementById("disk-alert-empty-bin");
+    if (diskAlert) state.settings.disk_alert_gb = Math.max(0, Number(diskAlert.value) || 0);
+    if (diskEmpty) state.settings.disk_alert_empty_bin = diskEmpty.checked;
+    const scheduleZone = document.getElementById("schedule-timezone");
+    if (scheduleZone) state.settings.timezone = scheduleZone.value.trim();
     const pruneSafety = document.getElementById("prune-safety");
     if (pruneSafety) state.settings.prune_safety = pruneSafety.checked;
     if (lyrics) state.settings.lyrics_mode = lyrics.value;
@@ -967,6 +1015,12 @@ function rememberSettingsForm() {
     if (fillMb) state.settings.fill_mb_metadata_during_incremental = fillMb.checked;
     if (fillMissing) state.settings.fill_missing_during_scan = fillMissing.checked;
     if (limitedArtwork) state.settings.limited_artwork_during_scan = limitedArtwork.checked;
+    const refreshMeta = document.getElementById("scan-refresh-metadata");
+    const refreshArt = document.getElementById("scan-refresh-artwork");
+    if (refreshMeta) state.settings.scan_refresh_metadata = refreshMeta.checked;
+    if (refreshArt) state.settings.scan_refresh_artwork = refreshArt.checked;
+    const refreshDry = document.getElementById("scan-refresh-dry");
+    if (refreshDry) state.settings.scan_refresh_dry_run = refreshDry.checked;
     const missDays = document.getElementById("metadata-miss-days");
     if (missDays) state.settings.metadata_miss_days = Math.max(0, Math.min(3650, Number(missDays.value) || 0));
     if (refreshDiscography) state.settings.refresh_discography_during_scan = refreshDiscography.checked;
@@ -1071,6 +1125,22 @@ function setSettingsStatus(message, kind) {
     line.className = `settings-status ${kind || ""}`.trim();
 }
 
+function syncTimezoneReset() {
+    const input = document.getElementById("schedule-timezone");
+    const button = document.getElementById("schedule-timezone-reset");
+    if (input && button) button.disabled = !input.value.trim();
+}
+
+function resetScheduleTimezone() {
+    const input = document.getElementById("schedule-timezone");
+    if (!input) return;
+    input.value = "";
+    syncTimezoneReset();
+    const server = (state.settings || {}).timezone_server;
+    setSettingsStatus(`Time zone cleared. After you save, schedules follow the server${server ? ` (${server})` : ""}.`);
+    input.focus();
+}
+
 async function copyCmmApiKey() {
     const text = state.cmmApiKey || "";
     if (!text) {
@@ -1091,25 +1161,13 @@ async function copyCmmApiKey() {
     }
 }
 
-async function saveSettings(options) {
-    const keepOpen = !!(options && options.keepOpen);
-    const button = document.getElementById("save-settings");
-    const scheduleButton = document.getElementById("save-scan-schedule");
-    if (!rememberSettingsForm()) {
-        setSettingsStatus("The settings form is not ready.", "error");
-        notify("The settings form is not ready.", "error");
-        return;
-    }
-    const body = { ...state.settings };
-    delete body.key_sources;
-    delete body.key_status;
-    delete body.schedule_summary;
-    delete body.schedule_presets;
-    delete body.backup_summary;
-    delete body.backup_default;
-    delete body.scan_schedule_summaries;
-    delete body.outbound_catalog;
-    const clear = Object.keys(state.clearKeys || {}).filter((key) => state.clearKeys[key]);
+// The body PUT /api/settings expects: the whole settings object without the values the server only reports, and the
+// keys to clear. A blank secret keeps the saved one. Used by the Settings window and the setup wizard.
+function settingsPutBody(source, clearKeys) {
+    const body = { ...(source || {}) };
+    ["key_sources", "key_status", "schedule_summary", "schedule_presets", "backup_summary", "backup_default",
+        "scan_schedule_summaries", "outbound_catalog", "timezone_server", "timezone_zones"].forEach((key) => { delete body[key]; });
+    const clear = Object.keys(clearKeys || {}).filter((key) => clearKeys[key]);
     ["lastfm_key", "lastfm_secret", "fanart_key", "acoustid_key", "lidarr_api_key", "radarr_api_key", "sonarr_api_key", "bazarr_api_key", "tmdb_key", "tvdb_key", "omdb_key", "crawlbase_token", "opensubtitles_key", "opensubtitles_password",
         "kodi_password", "kodi_library_password", "jellyfin_token", "plex_token", "emby_token",
         "webhook_emby_key", "webhook_jellyfin_key", "webhook_navidrome_key", "webhook_plex_key"].forEach((field) => {
@@ -1119,6 +1177,19 @@ async function saveSettings(options) {
         }
     });
     body.clear_keys = clear;
+    return body;
+}
+
+async function saveSettings(options) {
+    const keepOpen = !!(options && options.keepOpen);
+    const button = document.getElementById("save-settings");
+    const scheduleButton = document.getElementById("save-scan-schedule");
+    if (!rememberSettingsForm()) {
+        setSettingsStatus("The settings form is not ready.", "error");
+        notify("The settings form is not ready.", "error");
+        return;
+    }
+    const body = settingsPutBody(state.settings, state.clearKeys);
     if (button) button.disabled = true;
     if (scheduleButton) scheduleButton.disabled = true;
     setSettingsStatus("Saving settings…", "info");
@@ -1282,11 +1353,13 @@ function clearKey(field) {
 }
 
 async function openPathBrowser(purpose) {
-    state.pathPick = purpose === "set-folder" || purpose === "backup-folder" || purpose === "map-local" ? purpose : "library";
-    rememberSettingsForm();
+    state.pathPick = purpose === "set-folder" || purpose === "backup-folder" || purpose === "map-local" || purpose === "setup-folder" ? purpose : "library";
+    if (purpose !== "setup-folder") rememberSettingsForm();
     const mounts = purpose === "backup-folder"
         ? (state.mounts || []).filter((mount) => mount.writable)
-        : libraryMounts(state.settings || {}, state.mounts || []);
+        : purpose === "set-folder"
+            ? volumeMounts(state.settings || {}, state.mounts || [])
+            : libraryMounts(state.settings || {}, state.mounts || []);
     if (!mounts.length) {
         notify("No mounts were detected. Add a volume in docker-compose and recreate the container.", "warning");
         return;
@@ -1294,7 +1367,8 @@ async function openPathBrowser(purpose) {
     const select = document.getElementById("path-mount");
     select.innerHTML = mounts.map((mount) => `<option value="${escapeHtml(mount.path)}">${escapeHtml(mount.path)} (${mount.writable ? "rw" : "ro"})</option>`).join("");
     const media = document.getElementById("path-media");
-    if (media && state.pathPick !== "set-folder") media.value = scanKind();
+    if (media && state.pathPick === "setup-folder") media.value = state.setupPickMedia || "music";
+    else if (media && state.pathPick !== "set-folder") media.value = scanKind();
     syncPathModalMedia();
     document.getElementById("path-modal").classList.remove("hidden");
     try {
@@ -1387,7 +1461,7 @@ function useBrowsedPath() {
         const note = state.pathPick === "backup-folder"
             ? "Backup folder selected. Save settings to keep it."
             : state.pathPick === "map-local"
-                ? "Local path selected. Save settings to keep it."
+                ? (state.setup ? "Local path selected." : "Local path selected. Save settings to keep it.")
                 : "Movie set folder selected. Save settings to keep it.";
         notify(note, "info");
         return;
@@ -1396,6 +1470,11 @@ function useBrowsedPath() {
     const media = document.getElementById("path-media").value;
     if (!current) {
         notify("Choose a folder first.", "warning");
+        return;
+    }
+    if (state.pathPick === "setup-folder") {
+        document.getElementById("path-modal").classList.add("hidden");
+        setupAddFolder(current, media, kind);
         return;
     }
     addLibraryPath(current, media, "library", kind);
@@ -1436,10 +1515,12 @@ async function purgeStorage(folder) {
     const warning = folder === "data"
         ? "Delete every uploaded and replaced artwork file? They are removed from the artwork windows and cannot be brought back."
         : "Delete everything in the cache? Thumbnails and downloaded artwork are made again when needed.";
-    if (!confirm(warning)) return;
-    const data = await api(`/api/storage/purge/${encodeURIComponent(folder)}`, { method: "POST" });
-    notify(`Deleted ${data.removed} file${data.removed === 1 ? "" : "s"}, ${formatArtBytes(data.bytes)}.`, "success");
-    paintStorage();
+    askDanger(folder === "data" ? "Purge the data folder?" : "Purge the cache?", warning,
+        folder === "data" ? "Delete the artwork files" : "Empty the cache", async () => {
+            const data = await api(`/api/storage/purge/${encodeURIComponent(folder)}`, { method: "POST" });
+            notify(`Deleted ${data.removed} file${data.removed === 1 ? "" : "s"}, ${formatArtBytes(data.bytes)}.`, "success");
+            paintStorage();
+        }, true);
 }
 
 async function loadMissingLogos(media) {

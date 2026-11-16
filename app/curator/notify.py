@@ -29,9 +29,48 @@ _worker = {"video": False, "music": False}
 _queue = {"video": deque(), "music": deque()}
 _jobs = {"video": None, "music": None}
 _job_log = {"video": [], "music": []}
+_job_titles = {"video": [], "music": []}   # what the running Kodi job scanned, named in its finish message
+# The folder Kodi is scanning now for each library kind: {"current", "path", "started", "done", "total"}, or None.
+_progress = {"video": None, "music": None}
+
+
+def kodi_progress(kind):
+    """{"done", "total", "current", "path", "current_seconds"} for the Kodi job running on this library kind, or
+    None when none is. The Queue window shows it on the running Library updates row and in its banner."""
+    with _guard:
+        found = _progress.get(kind)
+        if not found:
+            return None
+        return {"done": found["done"], "total": found["total"], "current": found["current"], "path": found["path"],
+                "current_seconds": max(0, int(time.monotonic() - found["started"]))}
+
+
+def _begin_item(kind, title, path, total=None):
+    """Kodi starts on one folder. total: how many this job has; else one more than what is still queued."""
+    with _guard:
+        found = _progress.get(kind) or {"done": 0, "total": 0}
+        if total is None:
+            total = max(found["total"], found["done"] + 1 + len(_queue.get(kind) or ()))
+        _progress[kind] = {"done": found["done"], "total": max(int(total), found["done"] + 1), "current": title or "",
+                           "path": path or "", "started": time.monotonic()}
+
+
+def _end_item(kind):
+    with _guard:
+        found = _progress.get(kind)
+        if found:
+            found["done"] += 1
+
+
+def _end_job(kind):
+    with _guard:
+        _progress[kind] = None
 # Kodi can take a while to raise Library.IsScanningVideo after it accepts a scan.
 _POLL_SECONDS = 5
 _SCAN_START_GRACE = 90
+_QUICK_WINDOW = 10          # seconds after a scan is sent: a short scan has usually come and gone by then
+_QUICK_POLL_SECONDS = 0.5
+_IDLE_POLL_SECONDS = 2
 
 
 def _jsonrpc_url(host):
@@ -47,8 +86,22 @@ def _jsonrpc_url(host):
     return text if text.endswith("/jsonrpc") else f"{text}/jsonrpc"
 
 
+# One request at a time per Kodi. Every Kodi request in Curator goes through kodi_call (library updates, watched sync, the
+# Kodi report, connection tests, on-screen notices), each from its own thread; this lock makes them wait for each other,
+# so a Kodi on a small box never gets several at once. A call holds the lock only while it waits for its answer, never
+# during a pause between calls (waiting for a Kodi scan to end polls with a sleep outside the lock).
+_kodi_gates = {}
+_kodi_gates_guard = threading.Lock()
+
+
+def _kodi_gate(url):
+    with _kodi_gates_guard:
+        return _kodi_gates.setdefault(url.lower(), threading.Lock())
+
+
 def kodi_call(host, user, password, method, params=None, timeout=None):
-    """One JSON-RPC call. Returns the result, or raises RuntimeError with a readable reason."""
+    """One JSON-RPC call. Returns the result, or raises RuntimeError with a readable reason. Calls to the same Kodi run
+    one after the other, each waiting for the answer to the one before."""
     url = _jsonrpc_url(host)
     if not url:
         raise RuntimeError("No Kodi host is set")
@@ -57,7 +110,8 @@ def kodi_call(host, user, password, method, params=None, timeout=None):
         body["params"] = params
     auth = (user, password) if user else None
     try:
-        response = requests.post(url, json=body, auth=auth, timeout=TIMEOUT if timeout is None else timeout)
+        with _kodi_gate(url):
+            response = requests.post(url, json=body, auth=auth, timeout=TIMEOUT if timeout is None else timeout)
     except requests.RequestException as exc:
         raise RuntimeError(f"Kodi at {url} did not answer: {exc}") from exc
     if response.status_code == 401:
@@ -142,11 +196,31 @@ def _activity(message, outcome="done", path="", title=""):
         logger.exception("could not record the Kodi update")
 
 
+def _note_title(kind, title):
+    if title:
+        with _guard:
+            if title not in _job_titles[kind]:
+                _job_titles[kind].append(title)
+
+
+def _with_titles(message, titles):
+    """'Kodi video library scan finished: Heat (1995), Alien (1979).'"""
+    if not titles or not message:
+        return message
+    from curator import job_history
+
+    names = job_history.names_text(titles, shown=5)
+    return f"{message.rstrip('.')}: {names}."
+
+
 def _job_note(kind, message, status=None, create=True):
     """One Jobs row per library kind. Later steps update that row until the scan finishes."""
     from resonance import jobs
 
     with _guard:
+        if status:
+            message = _with_titles(message, _job_titles[kind])
+            _job_titles[kind] = []
         lines = _job_log[kind]
         if message and (not lines or lines[-1] != message):
             lines.append(message)
@@ -197,7 +271,7 @@ def _skip_reason(cfg, kind):
     return f"Kodi {noun} library update skipped. No Kodi library address is set."
 
 
-def request(kind, folders=(), clean=False, message=None, queue_ids=(), front=False, media=None, items=()):
+def request(kind, folders=(), clean=False, message=None, queue_ids=(), front=False, media=None, items=(), quality=None):
     """Hand changed folders to the library queue. One job per enabled player.
 
     The webhook row is removed by the caller without waiting for any player.
@@ -213,11 +287,12 @@ def request(kind, folders=(), clean=False, message=None, queue_ids=(), front=Fal
     notice = notice_kind(kind, message)
     if notice:
         announce(notice, message)
-    if not handoff(media_name, folders, clean, message or "", items):
+    queued = handoff(media_name, folders, clean, message or "", items, quality)
+    if not queued:
         text = _skip_reason(cfg, kind)
         _activity(text, "noted")
         _job_note(kind, text, status="completed")
-    return
+    return queued
 
 
 def run_kodi(kind, folders=(), clean=False, message=None, items=()):
@@ -247,21 +322,26 @@ def run_kodi(kind, folders=(), clean=False, message=None, items=()):
     path = (jobs[0].get("directory") or "") if count == 1 else ""
     _activity(text, "done", path, summary)
     _job_note(kind, text)
-    for job in jobs:
-        _run_one(kind, job)
+    with _guard:
+        _progress[kind] = {"done": 0, "total": count, "current": "", "path": "", "started": time.monotonic()}
+    try:
+        for job in jobs:
+            _run_one(kind, job, total=count)
+    finally:
+        _end_job(kind)
     _job_note(kind, f"Kodi {noun} library scan finished.", status="completed", create=False)
     if not folders or (count == 1 and jobs[0]["directory"] is None):
         return f"Kodi finished scanning the {noun} library."
     return f"Kodi updated {len(folders)} folder{'s' if len(folders) != 1 else ''}."
 
 
-def _pause():
+def _pause(seconds=None):
     """Wait one poll, and stop when this library job was cancelled."""
     from curator.library_queue import Cancelled, aborted
 
     if aborted():
         raise Cancelled()
-    time.sleep(_POLL_SECONDS)
+    time.sleep(_POLL_SECONDS if seconds is None else seconds)
     if aborted():
         raise Cancelled()
 
@@ -433,27 +513,23 @@ _SERVER_START_GRACE = 45
 
 
 def _kodi_folder(folder, mappings):
-    """Kodi path for one local folder, with a trailing slash. None when nothing maps it."""
-    if not folder:
+    """Kodi path for one local folder, with a trailing slash. None when nothing maps it.
+
+    A folder that is already a Kodi path (a player address, or a path under a Kodi root) is kept as it is."""
+    from curator import path_map
+
+    text = str(folder or "").strip()
+    if not text:
         return None
-    text = str(folder).strip()
-    if any(text.startswith(scheme) for scheme in KODI_SCHEMES):
+    if text.startswith(KODI_SCHEMES):
         return text.rstrip("/") + "/"
-    clean = automation.clean_path(text)
-    ranked = sorted(mappings or [], key=lambda row: len(automation.clean_path(row.get("local") or "")), reverse=True)
-    for row in ranked:
-        kodi_root = str(row.get("kodi") or row.get("remote") or "").rstrip("/")
-        if kodi_root and (clean == kodi_root or clean.startswith(kodi_root + "/")):
+    clean = path_map.clean(text)
+    for row in mappings or []:
+        kodi_root = path_map.clean(row.get("kodi") or row.get("remote") or "")
+        if kodi_root and path_map._under(clean, kodi_root) is not None:
             return clean.rstrip("/") + "/"
-    for row in ranked:
-        local = automation.clean_path(row.get("local") or "")
-        kodi_target = str(row.get("kodi") or row.get("remote") or "").rstrip("/")
-        if not local or not kodi_target:
-            continue
-        if clean == local or clean.startswith(local + "/"):
-            rest = clean[len(local):]
-            return (kodi_target + rest).rstrip("/") + "/"
-    return None
+    mapped = path_map.to_player(text, mappings)
+    return mapped.rstrip("/") + "/" if mapped else None
 
 
 def jobs_for_folders(folders, folder_ids, mappings, clean=False):
@@ -589,6 +665,8 @@ def _drain(kind):
     except Exception:
         logger.exception("Kodi %s scan queue failed", kind)
         _job_note(kind, f"Kodi {noun} library scan queue failed.", status="failed")
+    finally:
+        _end_job(kind)
         with _guard:
             _busy[kind] = False
             _worker[kind] = False
@@ -602,18 +680,9 @@ def _local_from_kodi(kodi_path, mappings):
     the user mapped it to) can be checked against the live filesystem the container sees.
     Longest-match wins, so a nested mapping beats a parent one.
     """
-    clean = str(kodi_path or "").replace("\\", "/").strip()
-    if not clean:
-        return ""
-    ranked = sorted(mappings or [], key=lambda row: len(str(row.get("kodi") or row.get("remote") or "")), reverse=True)
-    for row in ranked:
-        kodi_root = str(row.get("kodi") or row.get("remote") or "").rstrip("/")
-        local_root = automation.clean_path(row.get("local") or "")
-        if not kodi_root or not local_root:
-            continue
-        if clean == kodi_root or clean.startswith(kodi_root + "/"):
-            return local_root + clean[len(kodi_root):]
-    return ""
+    from curator import path_map
+
+    return path_map.from_player(kodi_path, mappings) or ""
 
 
 def _prune_stale_kodi(kind, cfg, directory):
@@ -661,6 +730,129 @@ def _prune_stale_kodi(kind, cfg, directory):
     return removed
 
 
+def _kodi_result(answer):
+    """kodi_call already returns Kodi's "result". The removal code below read it a second time, so it never found an
+    entry; this takes the answer either way."""
+    if isinstance(answer, dict) and isinstance(answer.get("result"), dict):
+        return answer["result"]
+    return answer if isinstance(answer, dict) else {}
+
+
+def _gone(local):
+    """True only when the file is not on disk and the library folder that should hold it is mounted and can be read.
+
+    A mount that is away looks exactly like files that are gone, and a Kodi entry is only removed for the second."""
+    if not local or os.path.isfile(local):
+        return False
+    from curator import folders
+    from resonance.paths import inside, readable_dir
+
+    roots = [root for kind in ("movies", "tv", "music", "musicvideos") for root in folders.mounted(kind)]
+    real = os.path.realpath(local)
+    holders = [root for root in roots if real == root or inside(root, real)]
+    return bool(holders) and readable_dir(max(holders, key=len))
+
+
+def prune_stale_shows(shows):
+    """Remove the Kodi episode entries whose file is gone, for these shows only. Returns how many were removed.
+
+    A Kodi show is the same show by an id they share, or by title (and year, when both have one), so it is found even
+    when the show folder was renamed. An episode is removed only when its path maps through kodi_paths and the file is
+    not on disk. A show whose Curator folder is not there is skipped (an offline mount looks like every file gone).
+    Failure is logged and swallowed."""
+    _, cfg = automation.current()
+    target = _library_target(cfg)
+    mappings = cfg.get("kodi_paths") or []
+    shows = [row for row in shows or [] if row.get("path") and os.path.isdir(row["path"])]
+    if not target or not mappings or not shows:
+        return 0
+
+    removed = 0
+    try:
+        listed = kodi_call(*target, "VideoLibrary.GetTVShows", {"properties": ["title", "year", "imdbnumber", "uniqueid"]})
+        for kodi_show in _kodi_result(listed).get("tvshows") or []:
+            if not _same_title(kodi_show, shows):
+                continue
+            response = kodi_call(*target, "VideoLibrary.GetEpisodes", {"tvshowid": kodi_show["tvshowid"], "properties": ["file"]})
+            episodes = _kodi_result(response).get("episodes") or []
+            kept = 0
+            for episode in episodes:
+                local = _local_from_kodi(str(episode.get("file") or ""), mappings)
+                if not _gone(local):
+                    kept += 1
+                    continue
+                kodi_call(*target, "VideoLibrary.RemoveEpisode", {"episodeid": int(episode["episodeid"])})
+                removed += 1
+            if episodes and not kept:
+                kodi_call(*target, "VideoLibrary.RemoveTVShow", {"tvshowid": int(kodi_show["tvshowid"])})
+    except (RuntimeError, KeyError, ValueError) as exc:
+        logger.warning("Kodi stale episodes were not removed: %s", exc)
+    except Exception:
+        logger.exception("Kodi stale episodes were not removed")
+    if removed:
+        logger.info("Kodi: removed %d stale episode entrie(s)", removed)
+        _activity(f"Kodi: removed {removed} stale episode entr{'y' if removed == 1 else 'ies'} of files that are gone.")
+    return removed
+
+
+def _same_title(kodi_row, rows):
+    """True when a Kodi movie or show is one of these library rows: an id they share, else the title (and the year when
+    both have one). A renamed folder still matches."""
+    from resonance.fields import norm_name
+
+    theirs = {str(value).strip().lower() for value in [kodi_row.get("imdbnumber"), *(kodi_row.get("uniqueid") or {}).values()] if value}
+    for row in rows:
+        mine = {str(value).strip().lower() for value in (row.get("imdb_id"), row.get("tmdb_id"), row.get("tvdb_id")) if value}
+        if mine & theirs:
+            return True
+        if norm_name(row.get("title")) and norm_name(row.get("title")) == norm_name(kodi_row.get("title")):
+            if not (row.get("year") and kodi_row.get("year")) or int(row["year"]) == int(kodi_row["year"]):
+                return True
+    return False
+
+
+def _kodi_parts(path):
+    """The files of one Kodi entry: a stacked movie (stack://a , b) is several."""
+    text = str(path or "")
+    if text.startswith("stack://"):
+        return [part.strip() for part in text[len("stack://"):].split(" , ") if part.strip()]
+    return [text] if text else []
+
+
+def prune_stale_movies(movies):
+    """Remove the Kodi movie entries whose file is gone, for these movies only. Returns how many were removed.
+
+    A Kodi movie is the same movie by a shared id, else by title and year, so an entry left behind by an upgrade into a
+    renamed folder is found too. An entry goes only when every one of its files maps through kodi_paths and none is on
+    disk; another copy of the movie whose file is there stays. A movie whose Curator folder is not there is skipped (an
+    offline mount looks like every file gone). Failure is logged and swallowed."""
+    _, cfg = automation.current()
+    target = _library_target(cfg)
+    mappings = cfg.get("kodi_paths") or []
+    movies = [row for row in movies or [] if (row.get("folder") or row.get("path")) and os.path.isdir(row.get("folder") or row["path"])]
+    if not target or not mappings or not movies:
+        return 0
+    removed = 0
+    try:
+        listed = kodi_call(*target, "VideoLibrary.GetMovies", {"properties": ["title", "year", "imdbnumber", "uniqueid", "file"]})
+        for kodi_movie in _kodi_result(listed).get("movies") or []:
+            if not _same_title(kodi_movie, movies):
+                continue
+            local = [_local_from_kodi(part, mappings) for part in _kodi_parts(kodi_movie.get("file"))]
+            if not local or not all(_gone(path) for path in local):
+                continue
+            kodi_call(*target, "VideoLibrary.RemoveMovie", {"movieid": int(kodi_movie["movieid"])})
+            removed += 1
+    except (RuntimeError, KeyError, ValueError) as exc:
+        logger.warning("Kodi stale movies were not removed: %s", exc)
+    except Exception:
+        logger.exception("Kodi stale movies were not removed")
+    if removed:
+        logger.info("Kodi: removed %d stale movie entrie(s)", removed)
+        _activity(f"Kodi: removed {removed} stale movie entr{'y' if removed == 1 else 'ies'} of files that are gone.")
+    return removed
+
+
 def _prune_stale_video(target, mappings, prefix):
     """Remove stale episode and movie rows whose file is no longer on disk."""
     removed = 0
@@ -672,15 +864,13 @@ def _prune_stale_video(target, mappings, prefix):
             "filter": {"field": "path", "operator": "startswith", "value": prefix},
             "properties": ["file"],
         })
-        rows = ((response or {}).get("result") or {}).get(media_key) or []
+        rows = _kodi_result(response).get(media_key) or []
         for row in rows:
             kodi_file = str(row.get("file") or "")
-            if not kodi_file:
-                continue
+            if not kodi_file or not kodi_file.startswith(prefix):
+                continue          # only the folder being scanned, whatever Kodi's filter returned
             local = _local_from_kodi(kodi_file, mappings)
-            if not local:
-                continue
-            if os.path.isfile(local):
+            if not _gone(local):
                 continue
             item_id = row.get(key_id)
             if item_id is None:
@@ -706,14 +896,14 @@ def _prune_stale_music(target, mappings, prefix):
         "filter": {"field": "path", "operator": "startswith", "value": prefix},
         "properties": ["file", "albumid"],
     })
-    songs = ((response or {}).get("result") or {}).get("songs") or []
+    songs = _kodi_result(response).get("songs") or []
     stale_album_ids = set()
     for song in songs:
         kodi_file = str(song.get("file") or "")
-        if not kodi_file:
-            continue
+        if not kodi_file or not kodi_file.startswith(prefix):
+            continue          # only the folder being scanned, whatever Kodi's filter returned
         local = _local_from_kodi(kodi_file, mappings)
-        if not local or os.path.isfile(local):
+        if not _gone(local):
             continue
         song_id = song.get("songid")
         if song_id is None:
@@ -733,7 +923,7 @@ def _prune_stale_music(target, mappings, prefix):
                 "filter": {"field": "albumid", "operator": "is", "value": str(album_id)},
                 "limits": {"start": 0, "end": 1},
             })
-            still = ((check or {}).get("result") or {}).get("limits", {}).get("total", 0)
+            still = (_kodi_result(check).get("limits") or {}).get("total", 0)
         except RuntimeError:
             continue
         if still:
@@ -746,10 +936,24 @@ def _prune_stale_music(target, mappings, prefix):
     return removed_songs
 
 
-def _run_one(kind, job):
+def _length(seconds):
+    """'12 s', '1 min 05 s' or '1 h 02 min' for a log line."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} s"
+    if seconds < 3600:
+        return f"{seconds // 60} min {seconds % 60:02d} s"
+    return f"{seconds // 3600} h {(seconds % 3600) // 60:02d} min"
+
+
+def _run_one(kind, job, total=None):
     where = job["directory"] or "the full library"
     path = job.get("directory") or ""
     title = job.get("title") or _scan_title(job.get("items"), job.get("directory"))
+    _note_title(kind, title or ("the full library" if not path else ""))
+    _begin_item(kind, title or where, path, total)
+    started = time.monotonic()
+    noun = "video" if kind == "video" else "music"
     for attempt in (1, 2):
         if _kodi_scanning(kind):
             noun = "video" if kind == "video" else "music"
@@ -766,6 +970,9 @@ def _run_one(kind, job):
             break
         if _wait_started(kind):
             _wait_idle(kind)
+            # One Recent webhooks row per finished folder, with how long Kodi took on it.
+            _activity(f"Kodi {noun} library scan finished for {where} ({_length(time.monotonic() - started)}).",
+                      "done", path, title)
             break
         if attempt == 1:
             message = f"Kodi has not reported a scan for {where}. It stays queued and will be asked again."
@@ -775,6 +982,7 @@ def _run_one(kind, job):
         message = f"Kodi did not report a scan for {where}. The rest of the queue will still run."
         _activity(message, "error", path, title)
         _job_note(kind, message)
+    _end_item(kind)
     _finish_queue(job.get("ids"))
     if job["clean"]:
         _send_clean(kind)
@@ -789,21 +997,31 @@ def _wait_idle(kind):
             return
         if state is None:
             misses += 1
-            if misses >= 12:
+            if misses * _IDLE_POLL_SECONDS >= 60:
                 return
         else:
             misses = 0
-        _pause()
+        _pause(_IDLE_POLL_SECONDS)
 
 
 def _wait_started(kind):
-    """True once Kodi reports a scan. Gives the flag _SCAN_START_GRACE seconds to come up."""
-    deadline = time.monotonic() + _SCAN_START_GRACE
-    while time.monotonic() < deadline:
-        if _kodi_scanning(kind):
+    """True once Kodi has run the scan it accepted, False when Kodi did not answer for _SCAN_START_GRACE seconds.
+
+    A one-folder scan often ends within a second, before a slow poll would see it. So the first _QUICK_WINDOW seconds
+    are polled every _QUICK_POLL_SECONDS, and a Kodi that answers "not scanning" all through that window has already
+    run it: asking for the same scan again would only repeat it."""
+    started = time.monotonic()
+    answered = False
+    while time.monotonic() - started < _SCAN_START_GRACE:
+        state = _kodi_scanning(kind)
+        if state:
             return True
-        _pause()
-    return _kodi_scanning(kind)
+        answered = answered or state is False
+        quick = time.monotonic() - started < _QUICK_WINDOW
+        if not quick and answered:
+            return True
+        _pause(_QUICK_POLL_SECONDS if quick else None)
+    return bool(_kodi_scanning(kind))
 
 
 def _send_scan(kind, directory, title=""):
@@ -1000,35 +1218,9 @@ def _base(url):
 
 def _mapped_paths(folders, mappings):
     """Server paths for the changed folders. None when any folder has no mapping, so the caller scans everything."""
-    if not folders:
-        return None
-    found = []
-    ranked = sorted(mappings or [], key=lambda row: len(automation.clean_path(row.get("local") or "")), reverse=True)
-    for folder in folders:
-        text = str(folder or "").strip()
-        if not text:
-            continue
-        if any(text.startswith(scheme) for scheme in KODI_SCHEMES):
-            if text not in found:
-                found.append(text)
-            continue
-        clean = automation.clean_path(text)
-        remote = ""
-        for row in ranked:
-            local = automation.clean_path(row.get("local") or "")
-            base = str(row.get("remote") or row.get("kodi") or "").strip().rstrip("/\\")
-            if not local or not base:
-                continue
-            if clean == local or clean.startswith(local + "/"):
-                rest = clean[len(local):]
-                slash = "\\" if "\\" in base and "/" not in base else "/"
-                remote = base + rest.replace("/", slash)
-                break
-        if not remote:
-            return None
-        if remote not in found:
-            found.append(remote)
-    return found
+    from curator import path_map
+
+    return path_map.to_players(folders, mappings)
 
 
 def _library_post(cfg, url_key, token_key, label, folders=()):
@@ -1133,6 +1325,53 @@ def hosted_kinds(player, cfg):
         return None
     _KIND_CACHE[key] = (time.monotonic(), set(kinds))
     return set(kinds)
+
+
+def library_locations(player, cfg):
+    """The folders of every library on an Emby, Jellyfin or Plex server, as that server names them.
+
+    Raises RuntimeError when the server cannot be asked. Used by the setup wizard to test a path mapping.
+    """
+    cfg = cfg or {}
+    label = {"emby": "Emby", "jellyfin": "Jellyfin", "plex": "Plex"}.get(player)
+    if not label:
+        raise RuntimeError(f"{player} has no library folders to read")
+    url = str(cfg.get(f"{player}_url") or "").strip()
+    token = str(cfg.get(f"{player}_token") or "").strip()
+    if not url or not token:
+        raise RuntimeError(f"Set the {label} address and API key first")
+    found = []
+    if player == "plex":
+        try:
+            sections = _plex_sections(cfg)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Plex did not answer: {exc}") from exc
+        for section in sections:
+            locations = section.get("Location") or []
+            if isinstance(locations, dict):
+                locations = [locations]
+            for location in locations:
+                path = str((location or {}).get("path") or "").strip()
+                if path:
+                    found.append({"library": str(section.get("title") or ""), "path": path})
+        return found
+    try:
+        response = requests.get(f"{_base(url)}/Library/VirtualFolders", headers=_auth_headers(player, token),
+                                timeout=TIMEOUT)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"{label} did not answer: {exc}") from exc
+    if response.status_code >= 400:
+        raise RuntimeError(f"{label} answered HTTP {response.status_code}")
+    payload = response.json() if response.content else []
+    if isinstance(payload, dict):
+        payload = payload.get("Items") or payload.get("VirtualFolders") or []
+    for item in payload or []:
+        if not isinstance(item, dict):
+            continue
+        for path in item.get("Locations") or []:
+            if str(path or "").strip():
+                found.append({"library": str(item.get("Name") or ""), "path": str(path).strip()})
+    return found
 
 
 def _plex_sections(cfg):
@@ -1472,3 +1711,279 @@ def _kodi_version(result):
     if version.get("major") is None:
         return ""
     return f"{version.get('major')}.{version.get('minor', 0)}"
+
+
+# ---- Refresh of items a scan changed ------------------------------------------------------------------------
+# A folder scan adds new items but leaves the ones a player already has as they were. After a scan has written new
+# metadata, artwork or ratings, Kodi and Plex are asked to refresh each changed item, and Emby and Jellyfin get the
+# item folders marked modified. An item the player does not have yet gets a scan of its folder instead.
+
+def refresh_items(player, media, items):
+    """Refresh changed items on one player. items: [{"kind", "path", "folder", "label"}] with local paths."""
+    _, cfg = automation.current()
+    label = {"kodi": "Kodi", "emby": "Emby", "jellyfin": "Jellyfin", "plex": "Plex"}.get(player, player)
+    items = [item for item in items or [] if item.get("folder") or item.get("path")]
+    if not items:
+        return f"{label} had nothing to refresh."
+    if player == "kodi":
+        return _kodi_refresh(cfg, media, items)
+    if player in {"emby", "jellyfin"}:
+        from curator.library_queue import scope_for
+
+        full, paths = scope_for(player, [item["folder"] for item in items], cfg)
+        if full:
+            return f"{label} was left out: a folder has no path row."
+        try:
+            _server_job(cfg, player, label, media, False, paths)
+        except (RuntimeError, requests.RequestException) as exc:
+            raise RuntimeError(f"{label} refresh failed. {exc}") from exc
+        return f"{label} is refreshing {len(items)} item{'s' if len(items) != 1 else ''}."
+    if player == "plex":
+        try:
+            return _plex_refresh_items(cfg, items)
+        except (RuntimeError, requests.RequestException) as exc:
+            raise RuntimeError(f"Plex refresh failed. {exc}") from exc
+    return ""
+
+
+def _stop_if_cancelled():
+    from curator.library_queue import Cancelled, aborted
+
+    if aborted():
+        raise Cancelled()
+
+
+def _remote(local, mappings):
+    found = _mapped_paths([local], mappings) if local else None
+    return found[0] if found else ""
+
+
+def _same_remote(left, right):
+    left = str(left or "").replace("\\", "/").rstrip("/")
+    right = str(right or "").replace("\\", "/").rstrip("/")
+    return bool(left) and left.lower() == right.lower()
+
+
+def kodi_match(rows, remote, field="file"):
+    """The Kodi row whose file is this path. A stacked movie (stack://a , b) matches any of its parts."""
+    for row in rows or []:
+        value = str(row.get(field) or "")
+        if _same_remote(value, remote):
+            return row
+        if value.startswith("stack://") and any(_same_remote(part.strip(), remote) for part in value[8:].split(" , ")):
+            return row
+    return None
+
+
+_KODI_ART = {
+    "movie": ("VideoLibrary.GetMovieDetails", "VideoLibrary.SetMovieDetails", "movieid", "moviedetails"),
+    "tvshow": ("VideoLibrary.GetTVShowDetails", "VideoLibrary.SetTVShowDetails", "tvshowid", "tvshowdetails"),
+    "episode": ("VideoLibrary.GetEpisodeDetails", "VideoLibrary.SetEpisodeDetails", "episodeid", "episodedetails"),
+}
+
+
+def kodi_art_inner(url):
+    """The path inside a Kodi image:// address (image://smb%3a%2f%2fnas%2fa%2ffanart.jpg/ is smb://nas/a/fanart.jpg)."""
+    from urllib.parse import unquote
+
+    text = str(url or "")
+    if not text.startswith("image://"):
+        return text
+    return unquote(text[len("image://"):].rstrip("/"))
+
+
+def _kodi_forget_texture(target, url):
+    """Drop Kodi's cached copy of one picture, so the file is read again the next time it is shown. Returns how many."""
+    inner = kodi_art_inner(url)
+    if not inner:
+        return 0
+    found = kodi_call(*target, "Textures.GetTextures", {"filter": {"field": "url", "operator": "is", "value": inner},
+                                                        "properties": ["url"]}) or {}
+    removed = 0
+    for texture in found.get("textures") or []:
+        if texture.get("textureid") is None:
+            continue
+        kodi_call(*target, "Textures.RemoveTexture", {"textureid": int(texture["textureid"])})
+        removed += 1
+    return removed
+
+
+def _kodi_new_art(target, mappings, kind, item_id, art):
+    """Show changed artwork in Kodi without a rescan: forget the cached pictures and point the item at the new files.
+
+    art: {"fanart": local path, ...}. A kind whose file did not change name only loses its cached copy; one whose name
+    changed (another extension) is set to the new file as well. Returns 1 when anything was done, else 0."""
+    get, setter, id_key, details = _KODI_ART[kind]
+    current = ((kodi_call(*target, get, {id_key: item_id, "properties": ["art"]}) or {}).get(details) or {}).get("art") or {}
+    changes = {}
+    touched = False
+    for art_kind, local in (art or {}).items():
+        remote = _remote(local, mappings) if local else ""
+        old = current.get(art_kind) or ""
+        same = bool(remote) and _same_remote(kodi_art_inner(old), remote)
+        if old:
+            _kodi_forget_texture(target, old)
+            touched = True
+        if remote and not same:
+            _kodi_forget_texture(target, remote)       # a picture of that name Kodi may have cached earlier
+            changes[art_kind] = remote
+    if changes:
+        kodi_call(*target, setter, {id_key: item_id, "art": changes})
+        touched = True
+    return 1 if touched else 0
+
+
+def _kodi_refresh(cfg, media, items):
+    target = _library_target(cfg)
+    if not target or not _side_enabled(cfg, "video"):
+        return _skip_reason(cfg, "video")
+    from curator.library_queue import mappings_for
+
+    mappings = mappings_for("kodi", cfg)
+    refreshed, new_folders, unmapped, art_done = 0, [], 0, 0
+    keep = []   # watched state to put back after the refresh (a refresh can drop the resume point)
+    shows = None
+    for item in items:
+        _stop_if_cancelled()
+        kind = item.get("kind")
+        if kind in {"movie", "episode"}:
+            remote = _remote(item.get("path"), mappings)
+            if not remote:
+                unmapped += 1
+                continue
+            if kind == "movie":
+                method, key, id_key, refresh = "VideoLibrary.GetMovies", "movies", "movieid", "VideoLibrary.RefreshMovie"
+            else:
+                method, key, id_key, refresh = "VideoLibrary.GetEpisodes", "episodes", "episodeid", "VideoLibrary.RefreshEpisode"
+            name = remote.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+            found = kodi_call(*target, method, {"filter": {"field": "filename", "operator": "is", "value": name},
+                                                "properties": ["file", "playcount", "lastplayed", "resume"]}) or {}
+            row = kodi_match(found.get(key), remote)
+            if row and item.get("art"):
+                art_done += _kodi_new_art(target, mappings, "movie" if kind == "movie" else "episode", int(row[id_key]),
+                                          item["art"])
+                if not item.get("full"):
+                    continue
+            if row:
+                resume = row.get("resume") or {}
+                before = {"plays": int(row.get("playcount") or 0), "last": row.get("lastplayed") or None,
+                          "resume": float(resume.get("position") or 0), "total": float(resume.get("total") or 0)}
+                if before["plays"] or before["resume"]:
+                    keep.append((method, key, id_key, name, remote, before))
+                kodi_call(*target, refresh, {id_key: int(row[id_key]), "ignorenfo": False})
+                refreshed += 1
+            else:
+                new_folders.append(item.get("folder"))
+        elif kind == "show":
+            remote = _remote(item.get("folder"), mappings)
+            if not remote:
+                unmapped += 1
+                continue
+            if shows is None:
+                shows = (kodi_call(*target, "VideoLibrary.GetTVShows", {"properties": ["file"]}) or {}).get("tvshows") or []
+            row = kodi_match(shows, remote)
+            if row and item.get("art"):
+                art_done += _kodi_new_art(target, mappings, "tvshow", int(row["tvshowid"]), item["art"])
+                if not item.get("full"):
+                    continue
+            if row:
+                kodi_call(*target, "VideoLibrary.RefreshTVShow",
+                          {"tvshowid": int(row["tvshowid"]), "ignorenfo": False, "refreshepisodes": False})
+                refreshed += 1
+            else:
+                new_folders.append(item.get("folder"))
+    text = f"Kodi refreshed {refreshed} item{'s' if refreshed != 1 else ''}."
+    if art_done:
+        text = (text if refreshed else "") + f" Kodi shows the new artwork of {art_done} item{'s' if art_done != 1 else ''}."
+        text = text.strip()
+    if keep:
+        from curator.video import config
+
+        if config.current().get("kodi_keep_watched", True):
+            from curator import player_sync
+
+            try:
+                restored = player_sync.restore_after_refresh(kodi_call, target, keep)
+                if restored:
+                    text += f" Watched state put back on {restored}."
+            except RuntimeError as exc:
+                text += f" The watched state could not be checked after the refresh: {exc}"
+    folders = sorted({folder for folder in new_folders if folder})
+    if folders:
+        paths = [path for path in (_kodi_folder(folder, cfg.get("kodi_paths") or []) for folder in folders) if path]
+        if paths:
+            run_library("kodi", media, False, paths)
+            plural = len(paths) != 1
+            text += f" {len(paths)} folder{'s' if plural else ''} Kodi did not have yet {'were' if plural else 'was'} scanned."
+    if unmapped:
+        plural = unmapped != 1
+        text += f" {unmapped} item{'s' if plural else ''} had no Kodi path row and {'were' if plural else 'was'} left out."
+    return text
+
+
+def _plex_json(url, token, path, extra=None):
+    params = {"X-Plex-Token": token}
+    params.update(extra or {})
+    response = requests.get(f"{url}{path}", params=params, headers={"Accept": "application/json"}, timeout=60)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Plex answered HTTP {response.status_code}")
+    payload = response.json() if response.content else {}
+    rows = (payload.get("MediaContainer") or {}).get("Metadata") or []
+    return rows if isinstance(rows, list) else [rows]
+
+
+def plex_files(rows):
+    """[(file, ratingKey, grandparentRatingKey)] from a Plex section listing."""
+    found = []
+    for row in rows or []:
+        media = row.get("Media") or []
+        for entry in media if isinstance(media, list) else [media]:
+            parts = (entry or {}).get("Part") or []
+            for part in parts if isinstance(parts, list) else [parts]:
+                if (part or {}).get("file"):
+                    found.append((part["file"], str(row.get("ratingKey") or ""), str(row.get("grandparentRatingKey") or "")))
+    return found
+
+
+def _plex_refresh_items(cfg, items):
+    url = _base(cfg["plex_url"])
+    token = cfg["plex_token"]
+    mappings = cfg.get("plex_paths")
+    sections = _plex_sections(cfg)
+    listings = {}
+
+    def listing(section, kind):
+        if (section, kind) not in listings:
+            listings[(section, kind)] = plex_files(_plex_json(url, token, f"/library/sections/{section}/all", {"type": kind}))
+        return listings[(section, kind)]
+
+    keys, scans = set(), set()
+    for item in items:
+        _stop_if_cancelled()
+        kind = item.get("kind")
+        folder = _remote(item.get("folder"), mappings)
+        section = _plex_section_key(folder, sections) if folder else ""
+        if not section:
+            continue
+        rating_key = ""
+        if kind in {"movie", "episode"}:
+            remote = _remote(item.get("path"), mappings)
+            rows = listing(section, 1 if kind == "movie" else 4)
+            rating_key = next((key for file, key, _show in rows if _same_remote(file, remote)), "")
+        elif kind == "show":
+            prefix = folder.replace("\\", "/").rstrip("/").lower() + "/"
+            rows = listing(section, 4)
+            rating_key = next((show for file, _key, show in rows if show and file.replace("\\", "/").lower().startswith(prefix)), "")
+        if rating_key:
+            keys.add(rating_key)
+        else:
+            scans.add((section, folder))
+    for rating_key in sorted(keys):
+        _plex_put(url, token, f"/library/metadata/{rating_key}/refresh")
+    for section, folder in sorted(scans):
+        _plex_get(url, token, f"/library/sections/{section}/refresh", {"path": folder})
+    text = f"Plex is refreshing {len(keys)} item{'s' if len(keys) != 1 else ''}."
+    if scans:
+        plural = len(scans) != 1
+        text += f" {len(scans)} folder{'s' if plural else ''} {'were' if plural else 'was'} scanned instead."
+    return text

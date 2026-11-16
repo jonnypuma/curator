@@ -13,7 +13,7 @@ from curator.scrapers.tmdb import Tmdb
 from curator.scrapers.trakt import TraktRatings
 from curator.scrapers.tvdb import Tvdb
 from curator import trakt as trakt_auth
-from curator.video import activity, art_extra, art_pick, config, delete, exports, files, scanner, scrape, store
+from curator.video import activity, art_extra, art_pick, config, copies, delete, exports, files, scanner, scrape, store
 from resonance import backup
 from resonance.errors import AppError
 
@@ -21,20 +21,20 @@ router = APIRouter()
 
 TEXT = {"title", "name", "original_title", "sort_title", "tagline", "outline", "plot", "overview", "mpaa", "premiered", "aired",
         "show_status", "trailer", "edition", "original_language", "episode_order", "scrape_language"}
-NUMBERS = {"year", "runtime_minutes", "top250", "votes", "display_season", "display_episode"}
+NUMBERS = {"year", "runtime_minutes", "top250", "votes", "display_season", "display_episode", "season_number", "episode_number"}
 DECIMALS = {"rating", "user_rating"}
 SECONDS = {"resume_position", "resume_total"}
 LISTS = {"genres", "countries", "studios", "tags", "directors", "writers", "producers", "languages"}
 EDITABLE = {
     "movie": TEXT - {"name", "overview", "aired", "show_status", "episode_order"} | NUMBERS | DECIMALS | LISTS
-            | {"source_format", "is_hybrid", "release_group", "set_name", "set_overview", "set"},
+            | {"source_format", "is_hybrid", "release_group", "set_name", "set_overview", "set", "ids"},
     "show": (TEXT - {"name", "overview", "aired", "edition"}) | {"year", "runtime_minutes", "votes", "top250", "original_language", "trailer"} | DECIMALS
-            | {"genres", "countries", "studios", "tags", "directors"},
-    "episode": {"title", "plot", "aired", "runtime_minutes", "mpaa", "votes", "rating", "user_rating", "directors", "writers",
+            | {"genres", "countries", "studios", "tags", "directors", "ids"},
+    "episode": {"ids", "season_number", "episode_number", "title", "plot", "aired", "runtime_minutes", "mpaa", "votes", "rating", "user_rating", "directors", "writers",
                 "scrape_language",
                 "display_season", "display_episode", "resume_position", "resume_total",
                 "source_format", "is_hybrid", "edition", "release_group"},
-    "season": {"title", "season_name", "plot", "premiered", "year", "trailer"},
+    "season": {"title", "season_name", "plot", "premiered", "year", "trailer", "season_number"},
     "set": {"name", "overview"},
 }
 
@@ -46,8 +46,14 @@ def _uuid(value):
         raise AppError("Unknown item", 404) from exc
 
 
+# A batch can be as large as a whole library. Past this the request is refused, never silently cut short.
+MAX_BATCH_IDS = 500000
+
+
 def _ids(values):
-    return [_uuid(item) for item in values][:5000]
+    if len(values) > MAX_BATCH_IDS:
+        raise AppError(f"Too many items in one request (limit {MAX_BATCH_IDS}).", 400)
+    return [_uuid(item) for item in values]
 
 
 def _primary_choice(value):
@@ -88,6 +94,7 @@ class ScrapeBody(BaseModel):
     art: list[str] | None = None
     art_primary: dict[str, str] | None = None
     primary: str | dict[str, str] | None = None
+    art_levels: list[str] | None = None
 
 
 @router.post("/scrape")
@@ -140,6 +147,7 @@ def start_scrape(body: ScrapeBody):
         "art_policy": body.art_policy,
         "rewrite_nfo": body.rewrite_nfo,
         "art_only": body.art_only,
+        "art_levels": sorted(scrape.normalize_art_levels(body.art_levels) or []) if body.art_levels is not None else None,
         "groups": groups,
         "fields": body.fields,
         "art": body.art,
@@ -230,23 +238,50 @@ def apply_match(body: MatchBody):
     source_id = body.source_id.strip()
     if not _match_id_ok(body.source, source_id):
         raise AppError("That id does not look right", 400)
-    if scanner.running() or files.running():
-        raise AppError("Wait for the running scan or file job to finish", 409)
     item_id = _uuid(body.id)
+    media = "movies" if body.kind == "movie" else "sets" if body.kind == "set" else "tv"
+    if scanner.running() or files.running():
+        # A scan or file job is running: the match waits in the queue with the scrape, and is applied when its turn comes.
+        from resonance import scan_queue
+
+        outcome = scan_queue.submit({
+            "kind": "scrape", "media": media, "scope": "selected", "ids": [item_id], "policy": "overwrite",
+            "label": "Fix match",
+            "match": {"kind": body.kind, "id": item_id, "source": body.source, "source_id": source_id, "ids": body.ids},
+        })
+        return {"started": outcome == "started", "queued": max(1, scan_queue.depth()), "deferred": True,
+                "scrape": scrape.status(include_log=False), "peers": {}}
     try:
         peers = store.set_match(body.kind, item_id, body.source, source_id, body.ids)
     except ValueError as exc:
         raise AppError(f"{body.source} cannot match a {body.kind}", 400) from exc
     if peers is None:
         raise AppError("That item is locked or gone. Unlock it first.", 409)
-    media = "movies" if body.kind == "movie" else "sets" if body.kind == "set" else "tv"
-    if scrape.running():
-        place = scrape.queue_fix(media, item_id)
-        return {"started": False, "queued": place, "scrape": scrape.status(include_log=False), "peers": peers}
-    if not scrape.start(media, "selected", [item_id], policy="overwrite", label="fix match"):
-        place = scrape.queue_fix(media, item_id)
-        return {"started": False, "queued": place, "scrape": scrape.status(include_log=False), "peers": peers}
-    return {"started": True, "scrape": scrape.status(include_log=False), "peers": peers}
+    from resonance import scan_queue
+
+    # The shared queue, so a waiting Fix Match shows in the Jobs window like any other scrape.
+    outcome = scan_queue.submit({
+        "kind": "scrape", "media": media, "scope": "selected", "ids": [item_id], "policy": "overwrite",
+        "label": "Fix match",
+    })
+    if outcome == "started":
+        return {"started": True, "scrape": scrape.status(include_log=False), "peers": peers}
+    return {"started": False, "queued": max(1, scan_queue.depth()), "scrape": scrape.status(include_log=False), "peers": peers}
+
+
+class UndoMatchBody(BaseModel):
+    kind: str
+    id: str
+
+
+@router.post("/match/undo")
+def undo_match(body: UndoMatchBody):
+    """Put a movie or show back the way it was before its last Fix Match (kept 7 days)."""
+    from curator.video import match_undo
+
+    if body.kind not in {"movie", "show"}:
+        raise AppError("Undo Fix Match works on movies and shows", 400)
+    return match_undo.undo(body.kind, _uuid(body.id))
 
 
 @router.get("/match/pending")
@@ -265,9 +300,16 @@ class ApplyBody(BaseModel):
 
 @router.post("/match/apply")
 def apply_pending_matches(body: ApplyBody | None = None):
-    if scanner.running() or scrape.running() or files.running():
-        raise AppError("Wait for the running scan, scrape or file job to finish", 409)
+    from resonance import scan_queue
+
     ids = [_uuid(item) for item in body.ids] if body and body.ids is not None else None
+    if scan_queue.busy() or scrape.running():
+        # Something else holds the library: this waits its turn in the Jobs window.
+        outcome = scan_queue.submit({"kind": "action", "action": "apply_matches", "args": [ids], "label": "Apply match"})
+        if outcome == "duplicate":
+            raise AppError("Apply match is already queued", 409)
+        return {"started": outcome == "started", "queued": max(1, scan_queue.depth()),
+                "scrape": scrape.status(include_log=False)}
     if not scrape.apply_pending(ids):
         raise AppError("No unmatched movies or shows are waiting", 409)
     return {"started": True, "scrape": scrape.status(include_log=False)}
@@ -350,6 +392,7 @@ def save_scrape_prefs(body: PrefsBody):
 class ItemsBody(BaseModel):
     kind: str
     ids: list[str]
+    keep_copy: bool = False  # from the duplicate windows: an episode with a second file keeps that file
 
 
 class LockBody(ItemsBody):
@@ -375,28 +418,90 @@ def _without_busy(kind, ids):
     return free, held
 
 
+def _split_extra_files(kind, values):
+    """A second file of an episode is named file:<path>. Returns those names and the ordinary ids."""
+    values = list(values or [])
+    if kind != "episode":
+        return [], values
+    files = [item for item in values if str(item).startswith("file:")]
+    return files, [item for item in values if not str(item).startswith("file:")]
+
+
+def _note_removed(kind, removed, labels):
+    """History lines for items removed from the library (the files stay). A big selection is one line."""
+    from resonance import history
+
+    if len(removed) > 50 or not labels:
+        if removed:
+            history.record("removed", f"{len(removed)} {kind} item{'s' if len(removed) != 1 else ''}", kind, "",
+                           "Removed from the library. The files stay on disk.")
+        return
+    for item_id in removed:
+        history.record("removed", labels.get(str(item_id)) or str(item_id), kind, "",
+                       "Removed from the library. The files stay on disk.")
+
+
 @router.post("/remove")
 def remove_items(body: ItemsBody):
     if body.kind not in {"movie", "show", "season", "episode", "set"}:
         raise AppError("Unknown item type", 400)
-    free, held = _without_busy(body.kind, _ids(body.ids))
-    backup.snapshot_before("removing items", len(free))
+    files, wanted = _split_extra_files(body.kind, body.ids)
+    free, held = _without_busy(body.kind, _ids(wanted)) if wanted else ([], [])
+    backup.snapshot_before("removing items", len(free) + len(files))
+    promoted = {"ids": [], "peers": []}
+    if body.kind == "episode" and body.keep_copy and free:
+        # A two-part file is two episodes; the copy goes for both. An episode with a second file keeps that file.
+        free = copies.with_sharing_episodes(free)
+        keep = copies.with_extra_files(free)
+        if keep:
+            promoted = copies.drop_primary_file(keep, False)
+            free = [item for item in free if str(item) not in keep]
+    labels = {str(item): delete.label(body.kind, item) for item in free} if len(free) <= 50 else {}
     removed, peers = store.remove(body.kind, free) if free else ([], [])
-    return {"removed": len(removed), "ids": removed, "busy": len(held), "peers": peers}
+    _note_removed(body.kind, removed, labels)
+    peers = list(peers) + promoted["peers"]
+    if files:
+        extra = copies.drop_extra_files(files, False)
+        removed = list(removed) + extra["ids"]
+        peers = list(peers) + extra["peers"]
+    return {"removed": len(removed) + len(promoted["ids"]), "ids": list(removed), "promoted": promoted["ids"], "busy": len(held), "peers": peers}
 
 
 @router.post("/delete")
 def delete_items(body: ItemsBody):
     if body.kind not in delete.KINDS:
         raise AppError("Unknown item type", 400)
-    ids = _ids(body.ids)
-    if not ids:
+    files, wanted = _split_extra_files(body.kind, body.ids)
+    ids = _ids(wanted)
+    if not ids and not files:
         raise AppError("Pick at least one item to delete", 400)
-    free, held = _without_busy(body.kind, ids)
-    backup.snapshot_before("deleting items", len(free))
+    free, held = _without_busy(body.kind, ids) if ids else ([], [])
+    backup.snapshot_before("deleting items", len(free) + len(files))
+    promoted = {"ids": [], "names": [], "errors": [], "peers": []}
+    if body.kind == "episode" and body.keep_copy and free:
+        # A two-part file is two episodes; the copy goes for both. An episode with a second file keeps that file.
+        free = copies.with_sharing_episodes(free)
+        keep = copies.with_extra_files(free)
+        if keep:
+            promoted = copies.drop_primary_file(keep, True)
+            free = [item for item in free if str(item) not in keep]
     result = delete.delete_items(body.kind, free) if free else {"deleted": [], "errors": [], "ids": []}
+    result["deleted"] = list(result["deleted"]) + promoted["names"]
+    result["errors"] = list(result["errors"]) + promoted["errors"]
+    result["peers"] = list(result.get("peers") or []) + promoted["peers"]
+    result["promoted"] = promoted["ids"]
+    if files:
+        extra = copies.drop_extra_files(files, True)
+        result["deleted"] = list(result["deleted"]) + extra["names"]
+        result["errors"] = list(result["errors"]) + extra["errors"]
+        result["ids"] = list(result.get("ids") or []) + extra["ids"]
+        result["peers"] = list(result.get("peers") or []) + extra["peers"]
     for item_id in held:
         result["errors"].append(f"{delete.label(body.kind, item_id)}: {BUSY_ITEM}")
+    if result["deleted"]:
+        from curator import library_queue
+
+        library_queue.request_clean("Clean after deleting files")
     return result
 
 
@@ -405,13 +510,14 @@ def write_nfo(body: ItemsBody):
     cfg = config.current()
     ids = _ids(body.ids)
     written = 0
+    report = {"shared": []}
     try:
         if body.kind == "movie":
             for item_id in ids:
                 written += 1 if exports.write_movie(item_id, cfg) else 0
         elif body.kind == "show":
             for item_id in ids:
-                written += len(exports.write_show(item_id, cfg))
+                written += len(exports.write_show(item_id, cfg, report=report))
         elif body.kind == "season":
             for item_id in ids:
                 written += 1 if exports.write_season(item_id, cfg) else 0
@@ -425,12 +531,12 @@ def write_nfo(body: ItemsBody):
                 if detail:
                     shows.setdefault(str(detail["show_id"]), []).append(item_id)
             for show_id, episode_ids in shows.items():
-                written += len(exports.write_show(show_id, cfg, episode_ids=episode_ids))
+                written += len(exports.write_show(show_id, cfg, episode_ids=episode_ids, report=report))
         else:
             raise AppError("Unknown item type", 400)
     except OSError as exc:
         raise AppError(f"Could not write the .nfo: {exc}", 500) from exc
-    return {"written": written}
+    return {"written": written, "shared": report["shared"]}
 
 
 class ArtBody(BaseModel):
@@ -442,20 +548,25 @@ class ArtBody(BaseModel):
 def fetch_artwork(body: ArtBody):
     if body.kind not in {"movie", "show", "season", "episode", "set"}:
         raise AppError("Artwork download works on a movie, show, season, episode or set", 400)
-    if scanner.running() or scrape.running() or files.running():
-        raise AppError("Wait for the running scan, scrape or file job to finish", 409)
     if body.kind in {"season", "episode", "set"}:
         art_pick_result = art_pick.download_missing(body.kind, _uuid(body.id))
         return {"started": False, "saved": bool(art_pick_result.get("saved")), "scrape": scrape.status(include_log=False)}
+    from resonance import scan_queue
+
     media = "movies" if body.kind == "movie" else "tv"
-    if not scrape.start(media, "selected", [_uuid(body.id)], policy="missing", label="artwork", art_only=True):
-        raise AppError("A scrape is already running", 409)
-    return {"started": True, "scrape": scrape.status(include_log=False)}
+    outcome = scan_queue.submit({
+        "kind": "scrape", "media": media, "scope": "selected", "ids": [_uuid(body.id)], "policy": "missing",
+        "label": "Artwork", "art_only": True,
+    })
+    if outcome == "started":
+        return {"started": True, "scrape": scrape.status(include_log=False)}
+    return {"started": False, "queued": max(1, scan_queue.depth()), "scrape": scrape.status(include_log=False)}
 
 
 class ChoiceBody(BaseModel):
     url: str
     art_kind: str = "poster"
+    players: list[str] | None = None     # the players to update after the download (None: every enabled one)
 
 
 @router.get("/artwork/choices/{kind}/{item_id}")
@@ -469,7 +580,8 @@ def artwork_choices(kind: str, item_id: str):
 
 
 @router.post("/artwork/upload/{kind}/{item_id}")
-async def upload_artwork(kind: str, item_id: str, file: UploadFile = File(...), art_kind: str = Form("poster")):
+async def upload_artwork(kind: str, item_id: str, file: UploadFile = File(...), art_kind: str = Form("poster"),
+                         players: str | None = Form(None)):
     """Use an image from the user's computer as this item's artwork."""
     if kind not in {"movie", "show", "season", "episode", "set"}:
         raise AppError("Artwork works on a movie, show, season, episode or set", 400)
@@ -477,7 +589,8 @@ async def upload_artwork(kind: str, item_id: str, file: UploadFile = File(...), 
         raise AppError("Choose an image file", 400)
     data = await file.read(art_pick.MAX_UPLOAD_BYTES + 1)
     item = _uuid(item_id)
-    return await run_in_threadpool(art_pick.choose_upload, kind, item, data, art_kind)
+    chosen = None if players is None else [name.strip().lower() for name in players.split(",") if name.strip()]
+    return await run_in_threadpool(art_pick.choose_upload, kind, item, data, art_kind, chosen)
 
 
 @router.get("/artwork/extra/{extra_id}")
@@ -487,11 +600,70 @@ def kept_artwork(extra_id: str):
 
 
 @router.delete("/artwork/{kind}/{item_id}/{art_kind}")
-def remove_artwork(kind: str, item_id: str, art_kind: str):
-    """Delete one artwork image of a movie, show, season, episode or set."""
+def remove_artwork(kind: str, item_id: str, art_kind: str, path: str | None = None):
+    """Move one artwork image of a movie, show, season, episode or set to the recycle bin. path: the exact file."""
     if kind not in {"movie", "show", "season", "episode", "set"}:
         raise AppError("Artwork works on a movie, show, season, episode or set", 400)
-    return art_pick.remove(kind, _uuid(item_id), art_kind)
+    return art_pick.remove(kind, _uuid(item_id), art_kind, path)
+
+
+class ManyChoicesBody(BaseModel):
+    picks: list[dict] = []               # {"url", "art_kind"} each
+    players: list[str] | None = None
+
+
+class ManyRemoveBody(BaseModel):
+    items: list[dict] = []               # {"art_kind", "path"} each, as on the cards
+
+
+@router.post("/artwork/choices/{kind}/{item_id}/many")
+def choose_many_artwork(kind: str, item_id: str, body: ManyChoicesBody):
+    """Download several ticked candidates of one item, one after another."""
+    if kind not in {"movie", "show", "season", "episode", "set"}:
+        raise AppError("Artwork choices work on a movie, show, season, episode or set", 400)
+    if not body.picks:
+        raise AppError("Tick at least one image", 400)
+    if len(body.picks) > 60:
+        raise AppError("Tick at most 60 images at a time", 400)
+    return art_pick.choose_many(kind, _uuid(item_id), body.picks, body.players)
+
+
+class BanBody(BaseModel):
+    url: str = ""
+    art_kind: str = ""
+    picks: list[dict] = []               # several at once: {"url", "art_kind"} each
+
+
+@router.post("/artwork/ban/{kind}/{item_id}")
+def ban_artwork(kind: str, item_id: str, body: BanBody):
+    """Ban online pictures: never suggested, never picked by Clean artwork or a scrape."""
+    from curator.video import art_bans
+
+    if kind not in {"movie", "show", "season", "episode", "set"}:
+        raise AppError("Artwork works on a movie, show, season, episode or set", 400)
+    picks = body.picks or ([{"url": body.url, "art_kind": body.art_kind}] if body.url else [])
+    if not picks:
+        raise AppError("Choose a picture to ban", 400)
+    return art_bans.ban_many(picks[:60], kind, _uuid(item_id))
+
+
+@router.post("/artwork/unban")
+def unban_artwork(body: BanBody):
+    from curator.video import art_bans
+
+    if not body.url:
+        raise AppError("Choose a picture to unban", 400)
+    return art_bans.unban(body.url)
+
+
+@router.post("/artwork/{kind}/{item_id}/remove-many")
+def remove_many_artwork(kind: str, item_id: str, body: ManyRemoveBody):
+    """Move several ticked artwork files of one item to the recycle bin."""
+    if kind not in {"movie", "show", "season", "episode", "set"}:
+        raise AppError("Artwork works on a movie, show, season, episode or set", 400)
+    if not body.items:
+        raise AppError("Tick at least one image", 400)
+    return art_pick.remove_many(kind, _uuid(item_id), body.items)
 
 
 @router.post("/artwork/choices/{kind}/{item_id}")
@@ -499,13 +671,43 @@ def choose_artwork(kind: str, item_id: str, body: ChoiceBody):
     if kind not in {"movie", "show", "season", "episode", "set"}:
         raise AppError("Artwork choices work on a movie, show, season, episode or set", 400)
     try:
-        return art_pick.choose(kind, _uuid(item_id), body.url, body.art_kind)
+        return art_pick.choose(kind, _uuid(item_id), body.url, body.art_kind, body.players)
     except Exception as exc:
         raise AppError(str(exc), 400) from exc
 
 
 
+def _parse_ids(value):
+    """Accept {"tmdb": "1"} or "tmdb=1, tvdb=2" and return a dict of known provider ids."""
+    if isinstance(value, dict):
+        pairs = list(value.items())
+    else:
+        pairs = []
+        for part in re.split(r"[,;\n]", str(value or "")):
+            if not part.strip():
+                continue
+            if "=" not in part:
+                raise AppError(f"Write provider ids as tmdb=1022, tvdb=2405 ({part.strip()} has no =)", 400)
+            key, _, val = part.partition("=")
+            pairs.append((key, val))
+    ids = {}
+    for key, val in pairs:
+        key = str(key).strip().lower()
+        val = str(val if val is not None else "").strip()
+        if not key:
+            continue
+        if key not in store.EDITABLE_ID_KEYS:
+            raise AppError(f"Unknown provider {key}. Use: {', '.join(store.EDITABLE_ID_KEYS)}", 400)
+        if val:
+            if len(val) > 80 or re.search(r"\s", val):
+                raise AppError(f"{key} id looks wrong", 400)
+            ids[key] = val
+    return ids
+
+
 def _coerce(field, value):
+    if field == "ids":
+        return _parse_ids(value)
     if value is None or value == "":
         return [] if field in LISTS else None
     if field in LISTS:
@@ -551,18 +753,94 @@ def _coerce(field, value):
 
 class EditBody(BaseModel):
     fields: dict[str, Any]
+    renumber_episodes: bool = True
+    merge_seasons: bool = False
+
+
+class RatingsOneBody(BaseModel):
+    sources: list[str] | None = None
+
+
+@router.get("/ratings/sources")
+def rating_sources(kind: str = "movie"):
+    """The sources a ratings update can use, and which of them are set up."""
+    if kind not in {"movie", "show", "episode"}:
+        raise AppError("Ratings can be updated for movies, shows or episodes", 400)
+    return {"sources": scrape.rating_source_options(kind)}
 
 
 @router.post("/ratings/{kind}/{item_id}")
-def update_ratings(kind: str, item_id: str):
+def update_ratings(kind: str, item_id: str, body: RatingsOneBody | None = None):
     if kind not in {"movie", "show", "episode"}:
         raise AppError("Ratings can be updated for a movie, a show or an episode", 400)
-    if scrape.running() or scanner.running():
-        raise AppError("Wait for the running scan or scrape to finish", 409)
     try:
-        return scrape.refresh_ratings(kind, _uuid(item_id))
+        return scrape.refresh_ratings(kind, _uuid(item_id), body.sources if body else None)
     except ScrapeError as exc:
         raise AppError(str(exc), 400) from exc
+
+
+class RatingsBody(BaseModel):
+    kind: str
+    ids: list[str]
+    sources: list[str] | None = None
+    rating_filter: dict | None = None
+
+
+@router.post("/ratings")
+def update_ratings_batch(body: RatingsBody):
+    """Update the ratings of the picked movies, shows or episodes as one job. The local IMDb copy goes first."""
+    media = {"movie": "movies", "show": "tv", "episode": "episodes"}.get(body.kind)
+    if not media:
+        raise AppError("Ratings can be updated for movies, shows or episodes", 400)
+    ids = _ids(body.ids)
+    if not ids:
+        raise AppError("Pick at least one item to update", 400)
+    if backup.restoring():
+        raise AppError("Wait for the database restore to finish", 409)
+    from resonance import scan_queue
+
+    try:
+        picked = scrape.normalize_rating_sources(body.sources)
+        narrowed = scrape.normalize_rating_filter(body.rating_filter)
+    except ScrapeError as exc:
+        raise AppError(str(exc), 400) from exc
+    outcome = scan_queue.submit({
+        "kind": "scrape",
+        "media": media,
+        "scope": "selected",
+        "ids": ids,
+        "ratings_only": True,
+        "rating_sources": sorted(picked) if picked is not None else None,
+        "rating_filter": narrowed,
+        "label": "Ratings update",
+    })
+    place = scan_queue.depth()
+    return {
+        "started": outcome == "started",
+        "queued": outcome != "started",
+        "duplicate": outcome == "duplicate",
+        "count": len(ids),
+        "place": place,
+        "scrape": scrape.status(include_log=False),
+        "scan_queue": scan_queue.snapshot(),
+    }
+
+
+def _ask_sonarr(show_id):
+    """Ask Sonarr to rescan a show after a merge, so it picks up the files and the two apps agree. Returns True when asked."""
+    import threading
+
+    show = store.show_row(show_id)
+    tvdb = str((show or {}).get("tvdb_id") or "").strip()
+    if not tvdb:
+        return False
+    from curator import sonarr
+
+    url, key = sonarr._settings()
+    if not url or not key:
+        return False
+    threading.Thread(target=lambda: sonarr.rescan_series(tvdb_id=tvdb), name="sonarr-rescan-after-merge", daemon=True).start()
+    return True
 
 
 @router.patch("/items/{kind}/{item_id}")
@@ -589,6 +867,26 @@ def edit_item(kind: str, item_id: str, body: EditBody):
             raise AppError("That season is not in the library any more", 404)
         if row["locked"]:
             raise AppError("This season is locked. Unlock it to edit.", 409)
+        renumbered = None
+        if "season_number" in values:
+            new_number = values.pop("season_number")
+            if new_number is None or new_number < 0:
+                raise AppError("The season number must be 0 or more", 400)
+            try:
+                renumbered = store.renumber_season(row_id, new_number, body.renumber_episodes, body.merge_seasons)
+            except ValueError as exc:
+                raise AppError(str(exc), 409) from exc
+        merged = bool(renumbered) and body.merge_seasons and not store.season_row(row_id)
+        if merged:
+            # The edited season was folded into another one and is gone: write the show and tell Sonarr.
+            sonarr_asked = _ask_sonarr(row["show_id"])
+            cfg = config.current()
+            if cfg["write_on_edit"]:
+                try:
+                    exports.write_show(str(row["show_id"]), cfg)
+                except (OSError, AppError) as exc:
+                    return {"ok": True, "nfo_error": str(exc), "sonarr": sonarr_asked}
+            return {"ok": True, "nfo": None, "sonarr": sonarr_asked}
         naming = "season_name" in values
         season_name = values.pop("season_name", None) if naming else None
         locked = list(values)
@@ -608,7 +906,7 @@ def edit_item(kind: str, item_id: str, body: EditBody):
         if cfg["write_on_edit"]:
             try:
                 nfo = exports.write_season(row_id, cfg)
-                if naming:
+                if naming or renumbered:
                     exports.write_show(str(row["show_id"]), cfg)
             except (OSError, AppError) as exc:
                 return {"ok": True, "nfo_error": str(exc)}
@@ -629,6 +927,22 @@ def edit_item(kind: str, item_id: str, body: EditBody):
         raise AppError("This item is locked. Unlock it to edit.", 409)
     if file_values:
         store.update_item_file(kind, row_id, file_values)
+    if kind == "episode" and "season_number" in values:
+        new_number = values.pop("season_number")
+        if new_number is None or new_number < 0:
+            raise AppError("The season number must be 0 or more", 400)
+        try:
+            store.move_episode(row_id, new_number)
+        except ValueError as exc:
+            raise AppError(str(exc), 409) from exc
+    if kind == "episode" and "episode_number" in values:
+        new_number = values.pop("episode_number")
+        if new_number is None or new_number < 0:
+            raise AppError("The episode number must be 0 or more", 400)
+        try:
+            store.set_episode_number(row_id, new_number)
+        except ValueError as exc:
+            raise AppError(str(exc), 409) from exc
     if values:
         store.edit(kind, row_id, values)
     return _write_edit_nfo(kind, row_id)

@@ -126,7 +126,17 @@ def _note_work(chosen, count):
 
 
 def _commit(album_id, steps, lines, rename_on=False, rename_scope="both", gain_on=False):
-    """Find metadata, artwork, lyrics, album.nfo, then ReplayGain, rename, and mark processed."""
+    """Find metadata, artwork, lyrics, album.nfo, then ReplayGain, rename, and mark processed.
+
+    The album counts as busy while this runs, so a delete from disk leaves it alone (curator.video.activity)."""
+    from curator.video import activity
+
+    with activity.holding() as hold:
+        hold(album_id)
+        return _commit_album(album_id, steps, lines, rename_on, rename_scope, gain_on)
+
+
+def _commit_album(album_id, steps, lines, rename_on=False, rename_scope="both", gain_on=False):
     album, artist, _tracks = match._context(album_id)
     label = f"{artist['name']} — {album['title']}"
     active = set(steps)
@@ -613,6 +623,15 @@ def _item_label(album_id):
 
 
 def _apply_release(album_id, release_id, lines, job=None, processed=0, total=0, steps=None):
+    """Apply one looked-up release. The album counts as busy meanwhile, like _commit."""
+    from curator.video import activity
+
+    with activity.holding() as hold:
+        hold(album_id)
+        return _apply_release_now(album_id, release_id, lines, job, processed, total, steps)
+
+
+def _apply_release_now(album_id, release_id, lines, job=None, processed=0, total=0, steps=None):
     active = list(steps or ("tags", "nfo", "art", "lyrics", "processed"))
     label = _item_label(album_id)
 

@@ -8,11 +8,9 @@ from __future__ import annotations
 import os
 import xml.etree.ElementTree as ET
 
-from curator.video import store, writes
+from curator.video import config, store, writes
 
 SUFFIX = ".cmm_mediainfo.xml"
-# Set CMM_WRITE_SIDECARS=0 to disable writing sidecar .cmm_mediainfo.xml files entirely.
-_WRITE_SIDECARS = os.environ.get("CMM_WRITE_SIDECARS", "1").lower() not in ("0", "false", "no")
 _BOOLS = {"is_hybrid", "is_3d"}
 _INTS = {"duration_seconds", "width", "height", "bit_depth", "chapters"}
 _FLOATS = {"bitrate_mbps", "video_bitrate_mbps", "fps"}
@@ -25,8 +23,12 @@ def path_for(video_path):
     return os.path.join(folder, stem + SUFFIX)
 
 
-def write(video_path, summary, size):
+def write(video_path, summary, size, kind=None):
+    """Write the sidecar. kind is "movie" or "episode"; Settings has one switch for each (CMM_WRITE_SIDECARS sets both until
+    Settings is saved). Files that already exist are left alone when a switch is off."""
     if not summary or summary.get("probe_error"):
+        return None
+    if not config.writes_mediainfo(kind):
         return None
     root = ET.Element("mediainfo", {"version": "1"})
     file_node = ET.SubElement(root, "file")
@@ -56,8 +58,6 @@ def write(video_path, summary, size):
                     ET.SubElement(node, key).text = str(value)
     ET.indent(root, space="  ")
     text = '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n"
-    if not _WRITE_SIDECARS:
-        return None
     target = path_for(video_path)
     # Only write if the content actually changed (avoids touching mtime on every scan).
     try:

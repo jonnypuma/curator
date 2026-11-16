@@ -1,6 +1,6 @@
-const FOLDER_TYPES = ["music", "movies", "tv"];
-const FOLDER_TYPE_LABELS = { music: "Music", movies: "Movies", tv: "TV shows" };
-const FOLDER_KEYS = { music: "music_paths", movies: "movie_paths", tv: "tv_paths" };
+const FOLDER_TYPES = ["music", "movies", "tv", "musicvideos"];
+const FOLDER_TYPE_LABELS = { music: "Music", movies: "Movies", tv: "TV shows", musicvideos: "Music videos" };
+const FOLDER_KEYS = { music: "music_paths", movies: "movie_paths", tv: "tv_paths", musicvideos: "musicvideo_paths" };
 
 state.videoScanRoots = { movies: "", tv: "" };
 
@@ -41,6 +41,7 @@ function scanBusy() {
 
 function guessFolderType(path) {
     const name = String(path || "").toLowerCase();
+    if (/music[\s_-]?videos?/.test(name)) return "musicvideos";
     if (/(^|[\/_\-\s])(tv|shows?|series|television)([\/_\-\s]|$)/.test(name)) return "tv";
     if (/(^|[\/_\-\s])(movies?|films?|cinema)([\/_\-\s]|$)/.test(name)) return "movies";
     return "music";
@@ -113,13 +114,29 @@ function backupDefaultFolder() {
     return (state.settings || {}).backup_default || "/backups";
 }
 
-function libraryMounts(cfg, mounts) {
+// Curator's own config, cache and data folders (from /api/system): never offered or added as a library folder.
+function ownFolderClash(path) {
+    const value = normalizeClientPath(path);
+    if (!value) return "";
+    const holder = value.endsWith("/") ? value : `${value}/`;
+    return (state.ownFolders || []).map(normalizeClientPath).find((own) =>
+        own && (value === own || value.startsWith(`${own}/`) || own.startsWith(holder))) || "";
+}
+
+// Every volume except the backup folder: where a saved folder's mount is looked up.
+function volumeMounts(cfg, mounts) {
     const backups = [backupDefaultFolder(), cfg.backup_folder].filter(Boolean).map(normalizeClientPath);
     return mounts.filter((mount) => !backups.includes(normalizeClientPath(mount.path)));
 }
 
+// The volumes that can hold a library: also without Curator's own folders.
+function libraryMounts(cfg, mounts) {
+    return volumeMounts(cfg, mounts).filter((mount) => !ownFolderClash(mount.path));
+}
+
 function libraryFoldersSection(cfg, allMounts) {
-    const mounts = libraryMounts(cfg, allMounts);
+    // A folder saved before own folders were refused still finds its volume; only the offers leave them out.
+    const mounts = volumeMounts(cfg, allMounts);
     const loose = [];
     const rows = FOLDER_TYPES.map((type) => {
         const list = cfg[FOLDER_KEYS[type]] || [];
@@ -143,7 +160,7 @@ function libraryFoldersSection(cfg, allMounts) {
             ${loose.join("")}`
         : "";
     const used = FOLDER_TYPES.flatMap((type) => (cfg[FOLDER_KEYS[type]] || []).map((path) => [path, type]));
-    const available = mounts.filter((mount) => !used.some(([path]) => normalizeClientPath(path) === normalizeClientPath(mount.path)));
+    const available = libraryMounts(cfg, allMounts).filter((mount) => !used.some(([path]) => normalizeClientPath(path) === normalizeClientPath(mount.path)));
     const offers = available.length
         ? available.map((mount) => `<div class="path-row folder-row is-available"><span class="mono" title="${escapeHtml(mount.path)}">${escapeHtml(mount.path)} <span class="folder-mode">${mount.writable ? "rw" : "ro"}</span></span>
             ${folderTypeSelect("data-mount-media", mount.path, guessFolderType(mount.path))}
@@ -154,7 +171,7 @@ function libraryFoldersSection(cfg, allMounts) {
         <p class="muted">These are directories inside the container. Mount a host folder in docker-compose, recreate the container, then add the folder here and save settings.</p>
         <p class="muted">Each folder has one media type. The Scan button only scans folders of the library that is open: Music scans music folders, Movies and Movie sets scan movie folders, and TV shows scans TV folders. A folder can not sit inside a folder of another type. Exclude leaves the folder in the library and skips it on scans.</p>
         <p class="muted">For music folders, Many artists treats each subfolder as an artist and One artist treats the folder itself as the artist. Collection is music you keep and it counts as owned. Inbox is a drop folder for new arrivals: those albums show an Inbox tag and stay out of the owned count.</p>
-        <p class="muted">${mounts.length ? `Detected mounts: ${mounts.map((mount) => escapeHtml(mount.path)).join(", ")}` : "No mounts were detected yet. Add a volume in docker-compose and recreate the container."}</p>
+        <p class="muted">${libraryMounts(cfg, allMounts).length ? `Detected mounts: ${libraryMounts(cfg, allMounts).map((mount) => escapeHtml(mount.path)).join(", ")}` : "No mounts were detected yet. Add a volume in docker-compose and recreate the container."}</p>
         <p class="settings-warning hidden" data-offline-paths></p>
         <p class="settings-warning hidden" data-unreadable-paths></p>
         <p class="settings-warning hidden" data-empty-paths></p>
@@ -187,6 +204,11 @@ function addLibraryPath(path, media, role, kind) {
     }
     if (!value.startsWith("/")) {
         notify("Use the path inside the container. It needs to start with /.", "warning");
+        return;
+    }
+    const own = ownFolderClash(value);
+    if (own) {
+        notify(`${value} overlaps ${own}, Curator's own folder for settings, cache or artwork. Pick a library folder outside it.`, "warning");
         return;
     }
     const clash = libraryPathOwner(value);

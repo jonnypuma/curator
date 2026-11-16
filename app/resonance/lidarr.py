@@ -83,6 +83,7 @@ def locate(payload):
     root = _library_root(album, music_roots(), inside)
     if not root:
         return None, None, None, f"Album folder is outside the music library: {album}"
+    album = _whole_album(album)
     parent = os.path.dirname(album.rstrip(os.sep))
     if parent and inside(root, parent) and not _same(parent, root):
         artist = parent
@@ -95,10 +96,76 @@ def locate(payload):
     return album, artist, f"{artist_name} — {album_name}", None
 
 
+def _whole_album(folder):
+    """The album a folder belongs to, as a full scan sees it. A Retag call names one file, so its folder can be a disc
+    folder of a box set (Playback/HDCD5); the box set is the album and the folder above it the artist. The path keeps
+    the form Lidarr's mapped path has (no symlinks resolved), so a later call for the same album finds its queue row."""
+    from resonance.paths import inside
+    from resonance.scanner import album_folder
+
+    try:
+        grouped = album_folder(folder)
+    except Exception:
+        logger.exception("could not find the album folder of %s", folder)
+        return folder
+    current = os.path.normpath(folder)
+    while not _same(current, grouped) and inside(grouped, current):
+        upper = os.path.dirname(current)
+        if upper == current:
+            break
+        current = upper
+    return current if _same(current, grouped) else folder
+
+
+def locate_removed(artist_folder, scope, album_title="", release_group=""):
+    """The library folder a Lidarr AlbumDelete or ArtistDelete is about: (folder, artist folder, label, error).
+
+    Lidarr names the artist folder only. For an album, the album is found under that folder by its MusicBrainz release
+    group, else by its title. When two copies match, the one whose folder is already gone is the one Lidarr deleted.
+    Nothing is removed here: the queue decides that when it runs, and only for a folder that is really gone."""
+    from resonance import db
+    from resonance.paths import inside, like_prefix, music_roots
+    from resonance.settings import load
+
+    import posixpath
+
+    mapped = map_path(artist_folder, load().get("lidarr_paths") or []) or ""
+    folder = posixpath.normpath(mapped).rstrip("/") if mapped else ""
+    if not folder or folder == ".":
+        return None, None, None, "Lidarr did not include the artist folder."
+    if not _library_root(folder, music_roots(), inside):
+        return None, None, None, f"{folder} is not inside a mounted music folder."
+    if scope == "artist":
+        row = db.fetchone("SELECT name FROM artists WHERE rtrim(path, '/') = %s LIMIT 1", (folder.rstrip("/"),))
+        if not row:
+            return None, None, None, f"No artist in the library has the folder {folder}."
+        return folder, folder, row.get("name") or posixpath.basename(folder), None
+    rows = db.fetchall(
+        """
+        SELECT al.title, al.path, al.musicbrainz_release_group_id::text AS release_group, a.name AS artist_name
+        FROM albums al LEFT JOIN artists a ON a.id = al.artist_id
+        WHERE al.path LIKE %s ESCAPE '\\'
+        """,
+        (like_prefix(folder),),
+    )
+    group = str(release_group or "").strip().lower()
+    title = str(album_title or "").strip().lower()
+    picked = [row for row in rows if group and str(row.get("release_group") or "").lower() == group]
+    if not picked and title:
+        picked = [row for row in rows if str(row.get("title") or "").strip().lower() == title]
+    if not picked:
+        return None, None, None, f"No album {album_title or ''} was found in the library under {folder}.".replace("  ", " ")
+    gone = [row for row in picked if not os.path.lexists(row["path"])]
+    chosen = (gone or picked)[0]
+    label = " — ".join(part for part in (chosen.get("artist_name") or "", chosen.get("title") or "") if part)
+    return chosen["path"], folder, label or album_title, None
+
+
 def file_paths(payload):
     found = []
+    single = payload.get("trackFile")          # a Retag names the one file it rewrote
     for key in ("trackFiles", "tracks"):
-        for item in payload.get(key) or []:
+        for item in (payload.get(key) or []) + ([single] if key == "trackFiles" and isinstance(single, dict) else []):
             if isinstance(item, str) and item.strip():
                 found.append(item.strip())
             elif isinstance(item, dict):
@@ -109,23 +176,15 @@ def file_paths(payload):
 
 
 def map_path(path, pairs):
+    """A path Lidarr reported, as Curator sees it ({"lidarr", "resonance"} rows; curator.path_map rules)."""
+    from curator import path_map
+
     text = str(path or "").strip().replace("\\", "/")
     if not text:
         return ""
-    ranked = []
-    for item in pairs or []:
-        if not isinstance(item, dict):
-            continue
-        source = str(item.get("lidarr") or "").strip().replace("\\", "/").rstrip("/")
-        target = str(item.get("resonance") or "").strip().rstrip("/\\")
-        if source and target:
-            ranked.append((source, target))
-    ranked.sort(key=lambda item: len(item[0]), reverse=True)
-    for source, target in ranked:
-        if text == source or text.startswith(source + "/"):
-            rest = text[len(source):]
-            return os.path.normpath(target + rest.replace("/", os.sep))
-    return os.path.normpath(text.replace("/", os.sep))
+    rows = [(item.get("lidarr"), item.get("resonance")) for item in pairs or [] if isinstance(item, dict)]
+    mapped = path_map.translate(text, rows)
+    return os.path.normpath((mapped if mapped is not None else text).replace("/", os.sep))
 
 
 def _library_root(album, roots, inside):
@@ -147,7 +206,11 @@ def test(url=None, key=None):
     if not url or not key:
         raise AppError("Lidarr is not set up. Add its address and API key under Settings, Integrations.", 400)
     status = _api("GET", "/api/v1/system/status", url, key, timeout=(5, 20))
-    return f"Connected to Lidarr {(status or {}).get('version') or ''}".strip()
+    version = (status or {}).get("version") or ""
+    from curator import arr_versions
+
+    arr_versions.record("lidarr", version, url, "v1")
+    return f"Connected to Lidarr {version}".strip()
 
 
 def _require_search():
@@ -377,52 +440,10 @@ def _api_credentials():
 
 
 def _api(method, path, url, key, payload=None, params=None, timeout=None):
-    import requests
-
-    from resonance.errors import AppError
+    from curator import arr_client
 
     # Local Lidarr calls should answer quickly. Lookup calls wait on MusicBrainz.
-    if timeout is None:
-        timeout = (5, 30)
-    try:
-        response = requests.request(
-            method,
-            url + path,
-            headers={"X-Api-Key": key},
-            json=payload,
-            params=params,
-            timeout=timeout,
-        )
-    except requests.Timeout as exc:
-        from resonance.connections import note
-
-        message = f"Lidarr accepted the connection but did not answer in time: {exc}"
-        note("lidarr", message)
-        raise AppError(message, 502) from exc
-    except requests.RequestException as exc:
-        from resonance.connections import note
-
-        message = f"Lidarr could not be reached: {exc}"
-        note("lidarr", message)
-        raise AppError(message, 502) from exc
-    if response.status_code >= 400:
-        detail = ""
-        try:
-            body = response.json()
-            detail = body.get("message") or body.get("title") or ""
-        except ValueError:
-            detail = (response.text or "")[:180]
-        from resonance.connections import note
-
-        message = f"Lidarr returned HTTP {response.status_code}. {detail}".strip()
-        note("lidarr", message)
-        raise AppError(message, 502)
-    from resonance.connections import clear
-
-    clear("lidarr")
-    if not response.content:
-        return None
-    return response.json()
+    return arr_client.request("lidarr", method, url, key, path, payload, params, (5, 30) if timeout is None else timeout)
 
 
 def _lookup(path, url, key, params):

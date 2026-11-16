@@ -27,7 +27,9 @@ _stop = threading.Event()
 _wake = {player: threading.Event() for player in PLAYERS}
 _abort = {player: threading.Event() for player in PLAYERS}
 _clean_due = {player: False for player in PLAYERS}
+_clean_tries = {player: 0 for player in PLAYERS}
 _bound = threading.local()
+_queued_for = threading.local()
 _threads = {}
 
 
@@ -127,8 +129,8 @@ def same_library_job(player, media, full, other_media, other_full):
     return media == other_media
 
 
-def folded(player, media, full, paths, other=None, clean=False, items=(), reason=""):
-    """The payload after one more request joins a queued job. A full scan drops folder paths."""
+def folded(player, media, full, paths, other=None, clean=False, items=(), reason="", quality=None):
+    """The payload after one more request joins a queued job. A full scan drops folder paths and item names."""
     other = other or {}
     become_full = bool(full or other.get("full"))
     if player == "kodi" and become_full and media in {"movies", "tv", "video"}:
@@ -151,11 +153,13 @@ def folded(player, media, full, paths, other=None, clean=False, items=(), reason
             text = str(label or "").strip()
             if text and text not in labels:
                 labels.append(text)
+    known = {**(other.get("quality") or {}), **(quality or {})}
     return {
         "media": stored,
         "full": become_full,
         "paths": found,
         "items": labels,
+        "quality": {label: known[label] for label in labels if known.get(label)},
         "clean": bool(clean or other.get("clean")),
         "message": other.get("message") or "",
         "reason": _kept_reason(become_full, full, reason, other),
@@ -232,7 +236,7 @@ def _hosted_medias(player, medias, cfg):
     return [item for item in medias if item in kinds]
 
 
-def queue_for(players, media, folders=(), clean=False, message="", cfg=None, items=()):
+def queue_for(players, media, folders=(), clean=False, message="", cfg=None, items=(), quality=None):
     """Queue one library update per player. Returns how many jobs were queued."""
     if cfg is None:
         from curator import automation
@@ -250,33 +254,50 @@ def queue_for(players, media, folders=(), clean=False, message="", cfg=None, ite
         full, paths = scope_for(player, folders, cfg)
         reason = full_scan_reason(player, folders, cfg) if full else ""
         if player == "kodi" and full and (media in {"video", ""} or set(medias_for_player) >= {"movies", "tv"}):
-            enqueue(player, "video", True, [], clean, message, items=items, reason=reason)
+            enqueue(player, "video", True, [], clean, message, items=items, reason=reason, quality=quality)
             queued += 1
             continue
         if player in {"emby", "jellyfin"} and full and medias_for_player == ["music"]:
-            enqueue(player, "music", True, [], clean, message, items=items, reason=reason)
+            enqueue(player, "music", True, [], clean, message, items=items, reason=reason, quality=quality)
             queued += 1
             continue
         if player in {"emby", "jellyfin"} and full:
-            enqueue(player, "library", True, [], clean, message, items=items, reason=reason)
+            enqueue(player, "library", True, [], clean, message, items=items, reason=reason, quality=quality)
             queued += 1
             continue
         if media in {"video", ""} and not full:
-            enqueue(player, "video", False, paths, clean, message, items=items)
+            enqueue(player, "video", False, paths, clean, message, items=items, quality=quality)
             queued += 1
             continue
         for item in medias_for_player:
-            enqueue(player, item, full, paths, clean, message, items=items, reason=reason)
+            enqueue(player, item, full, paths, clean, message, items=items, reason=reason, quality=quality)
             queued += 1
     return queued
 
 
-def handoff(media, folders=(), clean=False, message="", items=()):
+def request_clean(message=""):
+    """Ask Kodi for one video library clean, with no scan, after Curator removed or replaced files.
+
+    Kodi keeps the entry of a file that is gone until it is cleaned. Several requests fold into one waiting job. Nothing is
+    queued when the clean is switched off or Kodi is not set up. Never raises: a missing clean must not fail the delete."""
+    try:
+        from curator import automation, notify
+
+        _, cfg = automation.current()
+        if not cfg.get("kodi_clean") or not notify._library_target(cfg) or not _side_on(cfg, "kodi", "movies"):
+            return None
+        return enqueue("kodi", "video", False, [], False, message or "Clean after removed files", clean_only=True)
+    except Exception:
+        logger.exception("could not queue the Kodi library clean")
+        return None
+
+
+def handoff(media, folders=(), clean=False, message="", items=(), quality=None):
     """Queue one library update per enabled player. Returns how many jobs were queued."""
     from curator import automation
 
     _, cfg = automation.current()
-    return queue_for(enabled_players(cfg), media, folders, clean, message, cfg, items)
+    return queue_for(enabled_players(cfg), media, folders, clean, message, cfg, items, quality)
 
 
 def retry_target(source, message, path=""):
@@ -335,10 +356,11 @@ def retry_logged(source, message, path=""):
     return paths[0] if paths else _LABELS.get(player, player)
 
 
-def enqueue(player, media, full, paths=(), clean=False, message="", clean_only=False, items=(), reason=""):
+def enqueue(player, media, full, paths=(), clean=False, message="", clean_only=False, items=(), reason="", quality=None):
     """Add or fold one library job. paths are already in that player's path layout."""
     if player not in PLAYERS or media not in {"movies", "tv", "music", "video", "library"}:
         return None
+    _queued_for.player = player
     from resonance import db
 
     rows = db.fetchall(
@@ -349,6 +371,7 @@ def enqueue(player, media, full, paths=(), clean=False, message="", clean_only=F
         """,
         (player,),
     )
+    rows = [row for row in rows if not (row.get("payload") or {}).get("refresh")]
     matches = [
         row for row in rows
         if bool((row.get("payload") or {}).get("clean_only")) == bool(clean_only)
@@ -359,9 +382,10 @@ def enqueue(player, media, full, paths=(), clean=False, message="", clean_only=F
     if matches:
         payload = {}
         for row in matches:
-            payload = folded(player, (row.get("payload") or {}).get("media") or media, bool((row.get("payload") or {}).get("full")), (row.get("payload") or {}).get("paths") or [], payload, bool((row.get("payload") or {}).get("clean")), (row.get("payload") or {}).get("items") or [], (row.get("payload") or {}).get("reason") or "")
-        payload = folded(player, media, full, paths, payload, clean, items, reason)
+            payload = folded(player, (row.get("payload") or {}).get("media") or media, bool((row.get("payload") or {}).get("full")), (row.get("payload") or {}).get("paths") or [], payload, bool((row.get("payload") or {}).get("clean")), (row.get("payload") or {}).get("items") or [], (row.get("payload") or {}).get("reason") or "", (row.get("payload") or {}).get("quality"))
+        payload = folded(player, media, full, paths, payload, clean, items, reason, quality)
         payload["clean_only"] = bool(clean_only)
+        payload["journeys"] = _journeys(*[(row.get("payload") or {}).get("journeys") for row in matches])
         if message and not payload.get("message"):
             payload["message"] = message
         keep = matches[0]["id"]
@@ -374,9 +398,10 @@ def enqueue(player, media, full, paths=(), clean=False, message="", clean_only=F
         )
         _wake[player].set()
         return keep
-    payload = folded(player, media, full, paths, clean=clean, items=items, reason=reason)
+    payload = folded(player, media, full, paths, clean=clean, items=items, reason=reason, quality=quality)
     payload["message"] = message or ""
     payload["clean_only"] = bool(clean_only)
+    payload["journeys"] = _journeys()
     row_id = str(uuid.uuid4())
     db.execute(
         """
@@ -387,6 +412,128 @@ def enqueue(player, media, full, paths=(), clean=False, message="", clean_only=F
     )
     _wake[player].set()
     return row_id
+
+
+def _journeys(*earlier):
+    """The webhook journeys a library job carries: the ones it already had and the ones bound to this thread.
+
+    Each journey bound now gets this player's library stage, waiting."""
+    from curator import journey
+
+    now = journey.current()
+    if now:
+        player = getattr(_queued_for, "player", "")
+        journey.stage(now, f"library:{player}" if player else "library", "waiting", "Queued for the player")
+    found = []
+    for item in [*[value for group in earlier for value in (group or [])], *now]:
+        if item and item not in found:
+            found.append(item)
+    return found
+
+
+def refresh_plan(player, media, items, cfg):
+    """Whether this player takes a refresh of these items, and why not. Returns (ok, reason)."""
+    if player == "navidrome":
+        return False, ""                      # every music scan already sends Navidrome a scan
+    if player == "kodi" and media == "music":
+        return False, ""                      # every music scan already sends Kodi a music library scan
+    if not _side_on(cfg, player, media):
+        return False, ""
+    if not _hosted_medias(player, [media], cfg):
+        return False, ""
+    if player in {"emby", "jellyfin", "plex"}:
+        full, _paths = scope_for(player, [item.get("folder") for item in items], cfg)
+        if full:
+            label = _LABELS.get(player, player)
+            return False, f"{label} was left out: {full_scan_reason(player, [item.get('folder') for item in items], cfg) or 'a folder has no path row'}"
+    return True, ""
+
+
+def _merge_refresh(kept, item):
+    full = (not kept.get("art") or kept.get("full")) or (not item.get("art") or item.get("full"))
+    if item.get("art"):
+        kept["art"] = {**(kept.get("art") or {}), **item["art"]}
+    if kept.get("art") and full:
+        kept["full"] = True
+
+
+def art_players(media, cfg=None):
+    """The players an artwork refresh of this media can go to: switched on, with an address, and on for this media.
+    [{"id", "label"}] in the order of Settings, for the per-player boxes."""
+    if cfg is None:
+        from curator import automation
+
+        _, cfg = automation.current()
+    return [{"id": player, "label": _LABELS.get(player, player)} for player in enabled_players(cfg)
+            if player != "navidrome" and _side_on(cfg, player, media)]
+
+
+def queue_refresh(media, items, cfg=None, players=None):
+    """Queue a refresh of changed items on each player. Returns (players queued, reasons for players left out).
+
+    One waiting refresh job per player and media type; a second one adds its items to it."""
+    from resonance import db
+
+    if cfg is None:
+        from curator import automation
+
+        _, cfg = automation.current()
+    queued, skipped = [], []
+    chosen = None if players is None else {str(name).lower() for name in players}
+    for player in enabled_players(cfg):
+        if chosen is not None and player not in chosen:
+            continue                      # its box was left unticked
+        ok, reason = refresh_plan(player, media, items, cfg)
+        if not ok:
+            if reason:
+                skipped.append(reason)
+            continue
+        rows = db.fetchall(
+            """
+            SELECT id::text AS id, payload FROM work_queue
+            WHERE lane = 'library' AND status = 'queued' AND kind = %s
+            ORDER BY created_at ASC
+            """,
+            (player,),
+        )
+        mine = next((row for row in rows if (row.get("payload") or {}).get("refresh") and (row.get("payload") or {}).get("media") == media), None)
+        merged = [dict(item) for item in ((mine or {}).get("payload") or {}).get("refresh") or []]
+        seen = {(item.get("kind"), item.get("path") or item.get("folder")): item for item in merged}
+        for item in items:
+            key = (item.get("kind"), item.get("path") or item.get("folder"))
+            if key not in seen:
+                seen[key] = dict(item)
+                merged.append(seen[key])
+                continue
+            # The same item twice: an artwork-only refresh (art) and a full one combine into a full refresh that also
+            # shows the new pictures.
+            _merge_refresh(seen[key], item)
+        labels = [item.get("label") or "" for item in merged if item.get("label")]
+        payload = {"media": media, "full": False, "paths": [], "items": labels, "refresh": merged, "clean": False,
+                   "clean_only": False, "message": "Updated during a scan", "reason": "", "merge": f"{player}\n{media}\nrefresh"}
+        title = _refresh_title(player, media, labels)
+        if mine:
+            db.execute("UPDATE work_queue SET payload = %s, title = %s WHERE id = %s", (Jsonb(payload), title, mine["id"]))
+        else:
+            db.execute(
+                """
+                INSERT INTO work_queue (id, lane, kind, title, source, priority, status, payload)
+                VALUES (%s, 'library', %s, %s, %s, 10, 'queued', %s)
+                """,
+                (str(uuid.uuid4()), player, title, media, Jsonb(payload)),
+            )
+        _wake[player].set()
+        queued.append(_LABELS.get(player, player))
+    return queued, skipped
+
+
+def _refresh_title(player, media, labels):
+    head = f"{_LABELS.get(player, player)} · {_MEDIA.get(media, media)} · Refresh"
+    if not labels:
+        return head
+    shown = ", ".join(labels[:4])
+    extra = len(labels) - 4
+    return f"{head} · {shown}" + (f" and {extra} more" if extra > 0 else "")
 
 
 def history_title(row):
@@ -401,6 +548,14 @@ def history_title(row):
     if len(paths) == 1:
         return str(paths[0]).rstrip("/\\").split("/")[-1].split("\\")[-1]
     return (row or {}).get("title") or ""
+
+
+def history_quality(row):
+    """Badge facts for the named items, in the order the history title lists them."""
+    from curator.queue_quality import pick
+
+    payload = (row or {}).get("payload") or {}
+    return pick(payload.get("quality"), payload.get("items"))
 
 
 def history_path(row):
@@ -436,7 +591,8 @@ def snapshot():
         return []
     rows = db.fetchall(
         """
-        SELECT id::text AS id, kind, title, source, status, payload, started_at
+        SELECT id::text AS id, kind, title, source, status, payload, started_at,
+               GREATEST(0, EXTRACT(EPOCH FROM (LOCALTIMESTAMP - started_at)))::int AS running_for
         FROM work_queue
         WHERE lane = 'library' AND status IN ('queued', 'running')
         ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, created_at ASC
@@ -454,29 +610,46 @@ def _public(row):
     items = [str(item).strip() for item in (payload.get("items") or []) if str(item or "").strip()]
     return {
         "id": str(row["id"]),
-        "title": _title(player, media, full, paths, payload.get("clean_only"), items),
+        "title": _refresh_title(player, media, items) if payload.get("refresh") else _title(player, media, full, paths, payload.get("clean_only"), items),
         "player": player,
         "where": _LABELS.get(player, player),
         "source": player,
         "media": "All" if media == "library" else _MEDIA.get(media, media),
         "items": items,
+        "quality": history_quality(row),
         "scope": _scope_label(payload, full, paths),
         "status": row.get("status") or "queued",
         "running_seconds": _running_seconds(row),
+        "progress": _progress(player, media, row.get("status")),
     }
+
+
+def _progress(player, media, status):
+    """Which folder Kodi is on, for the running Kodi row; None for the other players and for waiting rows."""
+    if player != "kodi" or status != "running":
+        return None
+    try:
+        from curator import notify
+
+        return notify.kodi_progress("music" if str(media or "").lower() == "music" else "video")
+    except Exception:
+        return None
 
 
 def _running_seconds(row):
     if (row.get("status") or "") != "running":
         return None
-    from curator.queue_time import seconds_since
+    from curator.queue_time import elapsed
 
-    return seconds_since(row.get("started_at"))
+    return elapsed(row)
 
 
 def _scope_label(payload, full, paths):
     if payload.get("clean_only"):
         return "Clean"
+    if payload.get("refresh"):
+        count = len(payload.get("refresh") or [])
+        return f"Refresh {count} item{'s' if count != 1 else ''}"
     if full:
         reason = str(payload.get("reason") or "").strip()
         if reason:
@@ -567,21 +740,32 @@ def _announce_failure(player):
 
 
 def _worker(player):
+    """One player's queue. A database error (a dropped connection, Postgres restarting) is logged and the loop goes on
+    after a pause: before, it ended the thread, and that player got no more library updates until Curator restarted."""
     while not _stop.is_set():
-        _abort[player].clear()
-        row = _claim(player)
-        if not row and _clean_due[player]:
-            if updates_finished(player):
-                _run_deferred_clean(player)
-            else:
-                _wake[player].wait(5)
-                _wake[player].clear()
-            continue
-        if not row:
+        try:
+            _worker_step(player)
+        except Exception:
+            logger.exception("library queue for %s hit an error; trying again in 10 seconds", player)
+            _stop.wait(10)
+
+
+def _worker_step(player):
+    """Claim and run one job, or wait a moment for one."""
+    _abort[player].clear()
+    row = _claim(player)
+    if not row and _clean_due[player]:
+        if updates_finished(player):
+            _run_deferred_clean(player)
+        else:
             _wake[player].wait(5)
             _wake[player].clear()
-            continue
-        _finish_row(player, row)
+        return
+    if not row:
+        _wake[player].wait(5)
+        _wake[player].clear()
+        return
+    _finish_row(player, row)
 
 
 def _finish_row(player, row):
@@ -591,6 +775,10 @@ def _finish_row(player, row):
     failed = None
     stopped = False
     detail = ""
+    from curator import journey
+
+    trips = (row.get("payload") or {}).get("journeys") or []
+    journey.stage(trips, f"library:{player}", "running", "The player is updating its library")
     try:
         detail = _execute(player, row) or ""
     except Cancelled:
@@ -635,7 +823,9 @@ def _finish_row(player, row):
                 history_path(row),
                 "error" if failed else "cleared" if stopped else "done",
                 text,
+                quality=history_quality(row),
             )
+            journey.stage(trips, f"library:{player}", "failed" if failed else "skipped" if stopped else "done", text)
         except Exception:
             logger.exception("could not record the library update")
         try:
@@ -675,14 +865,24 @@ def _run_deferred_clean(player):
 
     failed = None
     try:
-        if notify.clean_after_queue() is False:
+        outcome = notify.clean_after_queue()
+        if outcome is False:
             return
+        if outcome is None:
+            # Kodi refused the clean, or it could not be reached (the activity log has why). Try once more before giving up.
+            if _clean_tries.get(player, 0) < 1:
+                _clean_tries[player] = _clean_tries.get(player, 0) + 1
+                _wake[player].wait(30)
+                _wake[player].clear()
+                return
+            failed = RuntimeError("Kodi did not accept the library clean, even after a second try. See the activity log.")
     except Cancelled:
         logger.info("%s library clean was cancelled", player)
         return
     except Exception as exc:
         failed = exc
         logger.exception("%s library clean failed", player)
+    _clean_tries[player] = 0
     _clean_due[player] = False
     try:
         from curator import work_log
@@ -731,6 +931,8 @@ def _execute(player, row):
         notify.clean_kodi(kind)
         return f"Kodi finished cleaning the {kind} library."
     names = payload.get("items") or []
+    if payload.get("refresh"):
+        return notify.refresh_items(player, payload.get("media") or row.get("source") or "", payload["refresh"])
     if payload.get("legacy"):
         return notify.run_kodi(payload.get("media") or "video", payload.get("folders") or [], False, payload.get("message"), names)
     return notify.run_library(

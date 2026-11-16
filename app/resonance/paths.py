@@ -112,6 +112,21 @@ def legacy_artwork_cache_dir():
     return os.path.join(config_dir(), "artwork", "cache")
 
 
+def own_folders():
+    """Curator's own folders (settings, cache, artwork it cannot fetch again). Never a library folder."""
+    return [config_dir(), cache_dir(), data_dir()]
+
+
+def own_folder_clash(path):
+    """The own folder a library path is, sits inside, or contains; "" when it is clear of all of them."""
+    if not path:
+        return ""
+    for own in own_folders():
+        if inside(own, path) or inside(path, own):
+            return own
+    return ""
+
+
 def inside(root, path):
     if not path:
         return False

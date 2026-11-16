@@ -23,13 +23,19 @@ EVENTS = [
     ("scan_finished", "A scan finished"),
     ("scan_failed", "A scan failed"),
     ("import_processed", "A Radarr, Sonarr, Lidarr or Bazarr import was processed"),
+    ("import_failed", "An import ended with a failed step (Follow imports)"),
     ("job_failed", "A background job failed"),
+    ("scrape_failed", "A scrape failed, or could not scrape some items"),
     ("backup_completed", "A database backup finished"),
     ("backup_failed", "A database backup failed"),
     ("quota_low", "The OpenSubtitles download quota is nearly used"),
+    ("file_corrupt", "An integrity check or Audit audio found a corrupt file"),
+    ("disk_low", "A library drive is low on space"),
+    ("library_digest", "Added to the library: a daily or weekly list (when, below)"),
 ]
 EVENT_IDS = {key for key, _ in EVENTS}
-DEFAULT_EVENTS = ["scan_failed", "job_failed", "backup_failed", "quota_low"]
+DEFAULT_EVENTS = ["scan_failed", "import_failed", "job_failed", "scrape_failed", "backup_failed", "quota_low", "file_corrupt",
+                  "disk_low"]
 
 # type id -> (label, fields it needs: (key, label, secret?, placeholder))
 TYPES = {
@@ -213,7 +219,7 @@ def _run(target, event, title, message, level):
 def scan_done(media, status, message, origin="manual"):
     """A scan reached its end. A scan started by an ARR import is reported as an import; a cancelled one is not."""
     try:
-        name = {"movies": "Movie", "tv": "TV", "music": "Music", "sets": "Movie set"}.get(media, "Library")
+        name = {"movies": "Movie", "tv": "TV", "music": "Music", "sets": "Movie set", "musicvideos": "Music video"}.get(media, "Library")
         if status == "failed":
             send("scan_failed", f"{name} scan failed", str(message or "")[:500], "error")
         elif status == "completed":
@@ -223,6 +229,30 @@ def scan_done(media, status, message, origin="manual"):
                 send("scan_finished", f"{name} scan finished", str(message or "")[:500], "success")
     except Exception:
         logger.exception("could not report the finished scan")
+
+
+def scrape_done(media, status, result, message="", label=""):
+    """A scrape job reached its end: one message when it failed, or when it finished with items it could not scrape
+    (the first few named). A scrape a webhook import started is left out: Follow imports reports it as the import."""
+    try:
+        if str(label or "").lower() == "webhook" or status not in ("failed", "completed"):
+            return
+        name = {"movies": "Movie", "tv": "TV", "sets": "Movie set", "episodes": "Episode", "seasons": "Season"}.get(media, "Video")
+        if status == "failed":
+            send("scrape_failed", f"{name} scrape failed", _text(message), "error")
+            return
+        failed = int((result or {}).get("failed") or 0)
+        if failed <= 0:
+            return
+        failures = (result or {}).get("failures") or []
+        lines = [f"{item.get('title') or '?'}: {item.get('error') or 'failed'}" for item in failures[:5]]
+        more = failed - len(lines)
+        if more > 0:
+            lines.append(f"and {more} more")
+        noun = "item" if failed == 1 else "items"
+        send("scrape_failed", f"{name} scrape: {failed} {noun} could not be scraped", "\n".join(lines)[:1500], "warning")
+    except Exception:
+        logger.exception("could not report the finished scrape")
 
 
 def quota_low(remaining, limit_hint=None):

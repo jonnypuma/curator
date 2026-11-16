@@ -249,12 +249,14 @@ function completeBootBar(force = false) {
     const boot = document.getElementById("boot-screen");
     if (!boot) {
         preloadOtherLibraries();
+        if (typeof maybeOpenSetupWizard === "function") maybeOpenSetupWizard();
         return;
     }
     setTimeout(() => {
         boot.classList.add("hidden");
         console.log(`[boot] Boot screen hidden. Application interactive.`);
         preloadOtherLibraries();
+        if (typeof maybeOpenSetupWizard === "function") maybeOpenSetupWizard();
     }, 160);
 }
 

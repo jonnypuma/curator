@@ -9,7 +9,7 @@ from datetime import datetime
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Json
 
-from resonance import completeness, db, tags
+from resonance import completeness, db, history, tags
 from resonance.errors import AppError
 from resonance.fields import clean_text, contains_pattern, genre_name, mbid_list, normalize_track_update, opt_uuid, opt_uuid_loose, release_type
 from resonance.paths import assert_readable
@@ -36,6 +36,7 @@ def filter_progress():
 
 LIBRARY_FILTERS = {
     "all",
+    "corrupt",
     "new",
     "missing-art",
     "missing-nfo",
@@ -53,6 +54,7 @@ LIBRARY_FILTERS = {
     "locked",
     "case-folders",
     "missing-releases",
+    "latest",
     "type-album",
     "type-ep",
     "type-single",
@@ -108,36 +110,47 @@ def filter_counts():
     cached = _count_cache["value"]
     if cached is not None and now - _count_cache["at"] < 30:
         return cached
+    # One pass over albums for every album count, one over artists, and the track-based count on its own.
     row = db.fetchone(
         """
-        SELECT
-            (SELECT COUNT(*)::int FROM albums) AS all_count,
-            (SELECT COUNT(*)::int FROM albums WHERE type = 'album') AS type_album,
-            (SELECT COUNT(*)::int FROM albums WHERE type = 'ep') AS type_ep,
-            (SELECT COUNT(*)::int FROM albums WHERE type = 'single') AS type_single,
-            (SELECT COUNT(*)::int FROM albums WHERE type = 'live') AS type_live,
-            (SELECT COUNT(*)::int FROM albums WHERE type = 'compilation') AS type_compilation,
-            (SELECT COUNT(*)::int FROM albums WHERE status = 'NEW') AS new,
-            (SELECT COUNT(*)::int FROM albums WHERE match_tier = 'gold') AS gold,
-            (SELECT COUNT(*)::int FROM albums WHERE match_tier = 'silver') AS silver,
-            (SELECT COUNT(*)::int FROM albums WHERE COALESCE(match_tier, 'unmatched') = 'unmatched') AS unmatched,
-            (SELECT COUNT(*)::int FROM albums WHERE has_artwork = FALSE) AS missing_art,
-            (SELECT COUNT(*)::int FROM albums WHERE has_nfo = FALSE) AS missing_nfo,
-            (SELECT COUNT(*)::int FROM albums WHERE has_nfo AND COALESCE(nfo_digest, '') <> '') AS nfo_changes,
+        SELECT al.*, ar.*,
             (SELECT COUNT(DISTINCT album_id)::int FROM tracks WHERE COALESCE(tag_completeness_percent, 0) < 100) AS incomplete,
-            (SELECT COUNT(*)::int FROM albums WHERE COALESCE(gap_expected, 0) > 0 AND COALESCE(gap_present, 0) < gap_expected) AS missing_tracks,
-            (SELECT COUNT(*)::int FROM artists WHERE biography IS NULL OR btrim(biography) = '' OR sortname IS NULL OR btrim(sortname) = '' OR years_active IS NULL OR btrim(years_active) = '') AS missing_info,
-            (SELECT COUNT(*)::int FROM albums WHERE review IS NULL OR btrim(review) = '') AS missing_review,
-            (SELECT COUNT(*)::int FROM albums WHERE duplicate_release IS TRUE) AS duplicates,
-            (SELECT COUNT(*)::int FROM albums WHERE upgrade_source_id IS NOT NULL) AS upgrade,
-            (SELECT COUNT(*)::int FROM albums WHERE prune_held IS TRUE) AS prune_held,
-            (SELECT COUNT(*)::int FROM albums al JOIN artists a ON a.id = al.artist_id WHERE al.locked IS TRUE OR a.locked IS TRUE) AS locked,
-            (SELECT COUNT(*)::int FROM artists a WHERE a.path IS NOT NULL AND EXISTS (
-                SELECT 1 FROM artists other
-                WHERE other.id <> a.id AND other.path IS NOT NULL
-                  AND lower(other.path) = lower(a.path) AND other.path IS DISTINCT FROM a.path
-            )) AS case_folders,
-            (SELECT COUNT(*)::int FROM artists WHERE discography IS NOT NULL AND discography <> '[]'::jsonb) AS missing_releases
+            (SELECT COUNT(DISTINCT album_id)::int FROM tracks WHERE audio_flag = 'corrupt') AS corrupt,
+            (SELECT COUNT(*)::int FROM albums x JOIN artists a ON a.id = x.artist_id WHERE x.locked IS TRUE OR a.locked IS TRUE) AS locked
+        FROM (
+            SELECT
+                COUNT(*)::int AS all_count,
+                (COUNT(*) FILTER (WHERE type = 'album'))::int AS type_album,
+                (COUNT(*) FILTER (WHERE type = 'ep'))::int AS type_ep,
+                (COUNT(*) FILTER (WHERE type = 'single'))::int AS type_single,
+                (COUNT(*) FILTER (WHERE type = 'live'))::int AS type_live,
+                (COUNT(*) FILTER (WHERE type = 'compilation'))::int AS type_compilation,
+                (COUNT(*) FILTER (WHERE status = 'NEW'))::int AS new,
+                (COUNT(*) FILTER (WHERE created_at >= LOCALTIMESTAMP - interval '30 days'))::int AS latest,
+                (COUNT(*) FILTER (WHERE match_tier = 'gold'))::int AS gold,
+                (COUNT(*) FILTER (WHERE match_tier = 'silver'))::int AS silver,
+                (COUNT(*) FILTER (WHERE COALESCE(match_tier, 'unmatched') = 'unmatched'))::int AS unmatched,
+                (COUNT(*) FILTER (WHERE has_artwork = FALSE))::int AS missing_art,
+                (COUNT(*) FILTER (WHERE has_nfo = FALSE))::int AS missing_nfo,
+                (COUNT(*) FILTER (WHERE has_nfo AND COALESCE(nfo_digest, '') <> ''))::int AS nfo_changes,
+                (COUNT(*) FILTER (WHERE COALESCE(gap_expected, 0) > 0 AND COALESCE(gap_present, 0) < gap_expected))::int AS missing_tracks,
+                (COUNT(*) FILTER (WHERE review IS NULL OR btrim(review) = ''))::int AS missing_review,
+                (COUNT(*) FILTER (WHERE duplicate_release IS TRUE))::int AS duplicates,
+                (COUNT(*) FILTER (WHERE upgrade_source_id IS NOT NULL))::int AS upgrade,
+                (COUNT(*) FILTER (WHERE prune_held IS TRUE))::int AS prune_held
+            FROM albums
+        ) al, (
+            SELECT
+                (COUNT(*) FILTER (WHERE biography IS NULL OR btrim(biography) = '' OR sortname IS NULL OR btrim(sortname) = ''
+                                  OR years_active IS NULL OR btrim(years_active) = ''))::int AS missing_info,
+                (COUNT(*) FILTER (WHERE discography IS NOT NULL AND discography <> '[]'::jsonb))::int AS missing_releases,
+                -- Folders that differ only in capitals: every artist whose lowered path is shared by another spelling.
+                (COUNT(*) FILTER (WHERE lower(path) IN (
+                    SELECT lower(path) FROM artists WHERE path IS NOT NULL
+                    GROUP BY lower(path) HAVING COUNT(DISTINCT path) > 1
+                )))::int AS case_folders
+            FROM artists
+        ) ar
         """
     ) or {}
     value = {
@@ -148,6 +161,7 @@ def filter_counts():
         "type-live": int(row.get("type_live") or 0),
         "type-compilation": int(row.get("type_compilation") or 0),
         "new": int(row.get("new") or 0),
+        "latest": int(row.get("latest") or 0),
         "gold": int(row.get("gold") or 0),
         "silver": int(row.get("silver") or 0),
         "unmatched": int(row.get("unmatched") or 0),
@@ -161,6 +175,7 @@ def filter_counts():
         "duplicates": int(row.get("duplicates") or 0),
         "upgrade": int(row.get("upgrade") or 0),
         "prune-held": int(row.get("prune_held") or 0),
+        "corrupt": int(row.get("corrupt") or 0),
         "locked": int(row.get("locked") or 0),
         "case-folders": int(row.get("case_folders") or 0),
         "missing-releases": int(row.get("missing_releases") or 0),
@@ -190,10 +205,16 @@ def artist_sort_key(name, ignore_the=True):
     return text.lower()
 
 
-def library(filter_name="all", query=""):
+def library(filter_name="all", query="", artist_ids=None):
+    """The music tree. artist_ids limits it to those artists (a refresh after an edit); the filter still applies."""
     filter_name = filter_name if filter_name in LIBRARY_FILTERS else "all"
     clauses = []
     params = []
+    if artist_ids is not None:
+        if not artist_ids:
+            return []
+        clauses.append("a.id = ANY(%s::uuid[])")
+        params.append(db.uuid_array(list(artist_ids)))
     # A library path that holds many artists is not an artist itself, so a row sitting on it
     # (left over from an earlier layout) is never listed.
     from resonance.paths import music_roots, path_kind
@@ -284,6 +305,15 @@ def library(filter_name="all", query=""):
             )
             """
         )
+    elif filter_name == "corrupt":
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1 FROM albums al JOIN tracks ct ON ct.album_id = al.id
+                WHERE al.artist_id = a.id AND ct.audio_flag = 'corrupt'
+            )
+            """
+        )
     elif filter_name == "prune-held":
         clauses.append(
             """
@@ -323,6 +353,10 @@ def library(filter_name="all", query=""):
         )
     elif filter_name == "missing-releases":
         clauses.append("a.discography IS NOT NULL AND a.discography <> '[]'::jsonb")
+    elif filter_name == "latest":
+        clauses.append(
+            "EXISTS (SELECT 1 FROM albums al WHERE al.artist_id = a.id AND al.created_at >= LOCALTIMESTAMP - interval '30 days')"
+        )
     elif filter_name in TYPE_FILTERS:
         clauses.append(
             """
@@ -362,9 +396,14 @@ def library(filter_name="all", query=""):
                albums.has_nfo, albums.has_artwork, albums.artwork_width, albums.artwork_height,
                albums.musicbrainz_release_group_id, albums.musicbrainz_release_id,
                albums.match_tier, albums.match_ratio, albums.path_role, albums.quality_rank,
+               albums.audio_format, albums.audio_lossless, albums.audio_bit_depth,
+               albums.audio_sample_rate, albums.audio_bitrate,
                albums.cue_image, albums.gap_present, albums.gap_expected, albums.country,
-               albums.label, albums.catalog, albums.barcode, albums.release_status, albums.review,
+               albums.label, albums.catalog, albums.barcode, albums.release_status,
+               (albums.review IS NULL OR btrim(albums.review) = '') AS review_missing,
+               EXISTS (SELECT 1 FROM tracks ct WHERE ct.album_id = albums.id AND ct.audio_flag = 'corrupt') AS corrupt,
                albums.upgrade_source_id, albums.duplicate_release, albums.prune_held, albums.original_year, albums.created_at, albums.updated_at,
+               (albums.created_at >= LOCALTIMESTAMP - interval '30 days') AS recent,
                src.id AS upgrade_album_id,
                src.title AS upgrade_title,
                src.path AS upgrade_path,
@@ -380,6 +419,16 @@ def library(filter_name="all", query=""):
         (db.uuid_array([row["id"] for row in artists]),),
     )
     t_albums = time.monotonic()
+    if filter_name == "incomplete" and albums:
+        # One query for the whole list instead of one per album.
+        flagged = {str(row["album_id"]) for row in db.fetchall(
+            "SELECT DISTINCT album_id FROM tracks WHERE album_id = ANY(%s::uuid[]) "
+            "AND COALESCE(tag_completeness_percent, 0) < 100",
+            (db.uuid_array([row["id"] for row in albums]),),
+        )}
+        for album in albums:
+            album["tags_incomplete"] = str(album["id"]) in flagged
+    fill_missing_audio(albums)
     for album in albums:
         album["upgrade"] = _joined_upgrade(album)
     if filter_name == "nfo-changes":
@@ -391,12 +440,7 @@ def library(filter_name="all", query=""):
         by_artist.setdefault(str(album["artist_id"]), []).append(album)
     result = []
     # The same band listed once per library path: those entries carry the Duplicate pill.
-    duplicate_names = {
-        str(row["name"] or "").casefold()
-        for row in db.fetchall(
-            "SELECT lower(name) AS name FROM artists GROUP BY lower(name) HAVING count(*) > 1"
-        )
-    }
+    twins = artist_twin_ids()
     seen_albums = 0
     album_total = len(albums)
     note_filter("matching", 0, album_total, "Filtering albums")
@@ -428,7 +472,8 @@ def library(filter_name="all", query=""):
         if query and not artist_hit and not albums_out and not missing:
             continue
         payload = _artist_brief(artist)
-        payload["duplicate"] = str(artist.get("name") or "").casefold() in duplicate_names
+        payload["duplicate"] = str(artist["id"]) in twins
+        payload["twin_count"] = len(twins.get(str(artist["id"]), ()))
         payload["albums"] = albums_out
         if missing:
             payload["missing_releases"] = missing
@@ -443,6 +488,30 @@ def library(filter_name="all", query=""):
             "library list: artists query %.1fs (%d), albums query %.1fs (%d), building the list %.1fs",
             t_artists - t_start, len(artists), t_albums - t_artists, len(albums), t_end - t_albums)
     return result
+
+
+def refresh_scope(album_ids=(), artist_ids=()):
+    """The artists a refresh after an edit must read again: the ones named, the owners of the albums named, and the
+    folders of an artist with the same name, whose Duplicate and Upgrade marks the edit can change."""
+    albums = [require_uuid(item) for item in album_ids or [] if item]
+    artists = [require_uuid(item) for item in artist_ids or [] if item]
+    if not albums and not artists:
+        return []
+    rows = db.fetchall(
+        """
+        WITH touched AS (
+            SELECT a.id, a.name FROM artists a WHERE a.id = ANY(%s::uuid[])
+            UNION
+            SELECT a.id, a.name FROM albums al JOIN artists a ON a.id = al.artist_id WHERE al.id = ANY(%s::uuid[])
+        )
+        SELECT DISTINCT a.id::text AS id
+        FROM artists a
+        WHERE a.id IN (SELECT id FROM touched)
+           OR lower(a.name) IN (SELECT lower(name) FROM touched)
+        """,
+        (db.uuid_array(artists), db.uuid_array(albums)),
+    )
+    return [row["id"] for row in rows]
 
 
 def clock():
@@ -462,9 +531,14 @@ def changes(since):
                albums.has_nfo, albums.has_artwork, albums.artwork_width, albums.artwork_height,
                albums.musicbrainz_release_group_id, albums.musicbrainz_release_id,
                albums.match_tier, albums.match_ratio, albums.path_role, albums.quality_rank,
+               albums.audio_format, albums.audio_lossless, albums.audio_bit_depth,
+               albums.audio_sample_rate, albums.audio_bitrate,
                albums.cue_image, albums.gap_present, albums.gap_expected, albums.country,
-               albums.label, albums.catalog, albums.barcode, albums.release_status, albums.review,
+               albums.label, albums.catalog, albums.barcode, albums.release_status,
+               (albums.review IS NULL OR btrim(albums.review) = '') AS review_missing,
+               EXISTS (SELECT 1 FROM tracks ct WHERE ct.album_id = albums.id AND ct.audio_flag = 'corrupt') AS corrupt,
                albums.upgrade_source_id, albums.duplicate_release, albums.prune_held, albums.original_year, albums.created_at, albums.updated_at,
+               (albums.created_at >= LOCALTIMESTAMP - interval '30 days') AS recent,
                src.id AS upgrade_album_id,
                src.title AS upgrade_title,
                src.path AS upgrade_path,
@@ -480,6 +554,7 @@ def changes(since):
     )
     for album in albums:
         album["upgrade"] = _joined_upgrade(album)
+    fill_missing_audio(albums)
     _attach_album_nfo_stale(albums)
     artist_ids = {str(album["artist_id"]) for album in albums if album.get("artist_id")}
     artists = db.fetchall(
@@ -513,21 +588,150 @@ def _since(value):
     return moment
 
 
-def store_missing_release_fields():
-    """Copy blank album release fields from tags already stored on tracks."""
-    store_missing_countries()
-    _fill_majority_text("label", "label")
-    _fill_majority_text("catalog", "catalognumber")
-    _fill_majority_text("barcode", "barcode")
-    _fill_majority_text("release_status", "releasestatus")
-    _fill_majority_text("release_status", "musicbrainz_albumstatus")
-    _fill_majority_uuid("musicbrainz_release_group_id", "musicbrainz_releasegroupid")
-    _fill_majority_uuid("musicbrainz_release_id", "musicbrainz_albumid")
+def _store_audio_for(ids, lock_timeout=None):
+    """Work out and save the audio columns of these albums. Returns {album id: values}.
+
+    The albums are written in id order, so two callers filling overlapping sets cannot wait on each other's
+    rows. `lock_timeout` (seconds) makes the write give up instead of waiting behind a long job.
+    """
+    from resonance.quality import album_audio
+
+    ids = sorted(ids, key=str)
+    tracks = db.fetchall(
+        """
+        SELECT album_id, file_format, bit_depth, sample_rate, bitrate
+        FROM tracks WHERE album_id = ANY(%s::uuid[])
+        """,
+        (db.uuid_array(ids),),
+    )
+    of_album = {}
+    for track in tracks:
+        of_album.setdefault(str(track["album_id"]), []).append(track)
+    stored = {}
+    with db.transaction() as conn:
+        if lock_timeout:
+            conn.execute(f"SET LOCAL lock_timeout = '{int(lock_timeout)}s'")
+        for album_id in ids:
+            audio = album_audio(of_album.get(str(album_id), []))
+            conn.execute(
+                """
+                UPDATE albums
+                SET audio_format = %s, audio_lossless = %s, audio_bit_depth = %s,
+                    audio_sample_rate = %s, audio_bitrate = %s
+                WHERE id = %s
+                """,
+                (audio["format"], audio["lossless"], audio["bit_depth"],
+                 audio["sample_rate"], audio["bitrate"], album_id),
+            )
+            stored[str(album_id)] = audio
+    return stored
 
 
-def _fill_majority_text(column, tag_key):
+def store_album_audio(chunk=400):
+    """Fill the audio columns of albums scanned before they existed.
+
+    Works in small batches so the library stays usable, and only touches albums that were never worked
+    out. An album whose tracks are gone gets an empty format so it is not picked again. Returns how many
+    albums were filled.
+    """
+    done = 0
+    while True:
+        albums = db.fetchall(
+            "SELECT id FROM albums WHERE audio_format IS NULL AND COALESCE(total_tracks, 0) > 0 ORDER BY id LIMIT %s",
+            (chunk,),
+        )
+        if not albums:
+            return done
+        _store_audio_for([row["id"] for row in albums])
+        done += len(albums)
+
+
+AUDIO_INLINE_LIMIT = 100000
+
+
+def fill_missing_audio(albums, limit=AUDIO_INLINE_LIMIT):
+    """Give the albums of a list that have no audio values yet theirs now, so the columns are never blank.
+
+    The start-up job fills the whole library; this covers the albums it has not reached yet and any album
+    added since. It saves what it works out, handles at most `limit` albums per call, gives up on rows a long
+    job has locked, and never fails the list. Returns how many albums it filled.
+    """
+    pending = [
+        row for row in albums
+        if row.get("audio_format") is None and (row.get("total_tracks") or 0) > 0
+    ][: max(0, int(limit))]
+    filled = 0
+    try:
+        for start in range(0, len(pending), 400):
+            part = pending[start:start + 400]
+            stored = _store_audio_for([row["id"] for row in part], lock_timeout=2)
+            for row in part:
+                audio = stored.get(str(row["id"]))
+                if audio is None:
+                    continue
+                row["audio_format"] = audio["format"]
+                row["audio_lossless"] = audio["lossless"]
+                row["audio_bit_depth"] = audio["bit_depth"]
+                row["audio_sample_rate"] = audio["sample_rate"]
+                row["audio_bitrate"] = audio["bitrate"]
+            filled += len(part)
+    except Exception:
+        logger.exception("the audio columns could not be filled while reading the library")
+    return filled
+
+
+def store_missing_release_fields(roots=None):
+    """Copy blank album release fields from tags already stored on tracks.
+
+    roots limits it to the albums under those library paths that still have a blank field, so a full scan of one
+    folder reads the tags of that folder's tracks only. None looks at every album."""
+    album_ids = None
+    if roots:
+        album_ids = _albums_with_blank_release_fields(roots)
+        if not album_ids:
+            return
+    store_missing_countries(album_ids)
+    _fill_majority_text("label", "label", album_ids)
+    _fill_majority_text("catalog", "catalognumber", album_ids)
+    _fill_majority_text("barcode", "barcode", album_ids)
+    _fill_majority_text("release_status", "releasestatus", album_ids)
+    _fill_majority_text("release_status", "musicbrainz_albumstatus", album_ids)
+    _fill_majority_uuid("musicbrainz_release_group_id", "musicbrainz_releasegroupid", album_ids)
+    _fill_majority_uuid("musicbrainz_release_id", "musicbrainz_albumid", album_ids)
+
+
+def _albums_with_blank_release_fields(roots):
+    from resonance.paths import like_prefix
+
+    paths = [str(root) for root in roots if root]
+    if not paths:
+        return []
+    under = " OR ".join(["path = %s OR path LIKE %s ESCAPE '\\'"] * len(paths))
+    params = [value for root in paths for value in (root.rstrip("/"), like_prefix(root))]
+    rows = db.fetchall(
+        f"""
+        SELECT id::text AS id FROM albums
+        WHERE ({under})
+          AND (COALESCE(btrim(country), '') = '' OR COALESCE(btrim(label), '') = '' OR COALESCE(btrim(catalog), '') = ''
+               OR COALESCE(btrim(barcode), '') = '' OR COALESCE(btrim(release_status), '') = ''
+               OR musicbrainz_release_group_id IS NULL OR musicbrainz_release_id IS NULL)
+        """,
+        tuple(params),
+    )
+    return [row["id"] for row in rows]
+
+
+def _only_albums(album_ids, column="album_id"):
+    """SQL and parameters that limit a tracks query to some albums; nothing when album_ids is None."""
+    if album_ids is None:
+        return "", ()
+    return f" AND {column} = ANY(%s::uuid[])", (db.uuid_array(list(album_ids)),)
+
+
+def _fill_majority_text(column, tag_key, album_ids=None):
     # One tag expression for SELECT, WHERE, and GROUP BY. Repeated placeholders
     # are different SQL expressions, so PostgreSQL rejects the selected tags value.
+    only, extra = _only_albums(album_ids)
     db.execute(
         f"""
         UPDATE albums AS album
@@ -547,7 +751,7 @@ def _fill_majority_text(column, tag_key):
                            COUNT(*) AS votes
                     FROM tracks
                     CROSS JOIN (SELECT %s::text AS tag) AS key
-                    WHERE COALESCE(btrim(tags->>key.tag), '') <> ''
+                    WHERE COALESCE(btrim(tags->>key.tag), '') <> ''{only}
                     GROUP BY album_id, value
                 ) AS counted
             ) AS ranked
@@ -556,13 +760,15 @@ def _fill_majority_text(column, tag_key):
         WHERE album.id = picked.album_id
           AND COALESCE(btrim(album.{column}), '') = ''
         """,
-        (tag_key,),
+        (tag_key, *extra),
     )
 
 
-def _fill_majority_uuid(column, tag_key):
+def _fill_majority_uuid(column, tag_key, album_ids=None):
     # One tag expression for SELECT, WHERE, and GROUP BY. The same release id
     # may be stored on more than one album: those copies are duplicates.
+    only, extra = _only_albums(album_ids)
+    tracks_only, _ = _only_albums(album_ids, "tracks.album_id")
     sql = f"""
         UPDATE albums AS album
         SET {column} = picked.value::uuid
@@ -581,7 +787,7 @@ def _fill_majority_uuid(column, tag_key):
                            COUNT(*) AS votes
                     FROM tracks
                     CROSS JOIN (SELECT %s::text AS tag) AS key
-                    WHERE btrim(tags->>key.tag) ~* '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'
+                    WHERE btrim(tags->>key.tag) ~* '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'{only}
                     GROUP BY album_id, value
                 ) AS counted
             ) AS ranked
@@ -591,13 +797,13 @@ def _fill_majority_uuid(column, tag_key):
           AND album.{column} IS NULL
         """
     try:
-        db.execute(sql, (tag_key,))
+        db.execute(sql, (tag_key, *extra))
     except UniqueViolation:
         if column == "musicbrainz_release_id":
             from resonance.db import allow_shared_release_ids
 
             allow_shared_release_ids()
-            db.execute(sql, (tag_key,))
+            db.execute(sql, (tag_key, *extra))
             return
         logger.info("%s is still unique; copying each tag id on its own", column)
         rows = db.fetchall(
@@ -618,13 +824,13 @@ def _fill_majority_uuid(column, tag_key):
                     JOIN albums ON albums.id = tracks.album_id
                     CROSS JOIN (SELECT %s::text AS tag) AS key
                     WHERE albums.{column} IS NULL
-                      AND btrim(tracks.tags->>key.tag) ~* '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'
+                      AND btrim(tracks.tags->>key.tag) ~* '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'{tracks_only}
                     GROUP BY tracks.album_id, value
                 ) AS counted
             ) AS ranked
             WHERE rank = 1
             """,
-            (tag_key,),
+            (tag_key, *extra),
         )
         for row in rows:
             try:
@@ -636,8 +842,15 @@ def _fill_majority_uuid(column, tag_key):
                 logger.info("left %s blank; %s is already stored on another album", column, row["value"])
 
 
-def store_missing_countries():
-    """Fill a blank album country from tags already stored on its tracks. Used by a scan."""
+def store_missing_countries(album_ids=None):
+    """Fill a blank album country from tags already stored on its tracks. Used by a scan.
+
+    album_ids limits it to those albums (an incremental scan's new and changed albums). None looks at every album.
+    """
+    if album_ids is not None and not album_ids:
+        return
+    only = "" if album_ids is None else "AND album_id = ANY(%s::uuid[])"
+    params = () if album_ids is None else (db.uuid_array(list(album_ids)),)
     db.execute(
         """
         UPDATE albums AS album
@@ -652,14 +865,15 @@ def store_missing_countries():
                            ORDER BY COUNT(*) DESC, upper(btrim(tags->>'releasecountry'))
                        ) AS rank
                 FROM tracks
-                WHERE COALESCE(btrim(tags->>'releasecountry'), '') <> ''
+                WHERE COALESCE(btrim(tags->>'releasecountry'), '') <> '' """ + only + """
                 GROUP BY album_id, upper(btrim(tags->>'releasecountry'))
             ) AS ranked
             WHERE rank = 1 AND length(country) <= 8
         ) AS picked
         WHERE album.id = picked.album_id
           AND COALESCE(btrim(album.country), '') = ''
-        """
+        """,
+        params,
     )
 
 
@@ -669,7 +883,8 @@ def _joined_upgrade(album):
         return None
     from resonance.quality import same_release_kind
 
-    if not same_release_kind(album, {"type": album.get("upgrade_type"), "edition": album.get("upgrade_edition")}):
+    source = {"type": album.get("upgrade_type"), "edition": album.get("upgrade_edition"), "title": album.get("upgrade_title")}
+    if not same_release_kind(album, source, "upgrade"):
         return None
     return {
         "album_id": str(source_id),
@@ -704,7 +919,7 @@ def _stored_upgrade(album):
         return None
     from resonance.quality import same_release_kind
 
-    if not same_release_kind(album, source):
+    if not same_release_kind(album, source, "upgrade"):
         return None
     return {
         "album_id": str(source["id"]),
@@ -756,7 +971,7 @@ def contains_hit(name, query):
 def _artist_visible(artist, filter_name):
     if filter_name in {"case-folders", "missing-releases"}:
         return True
-    if filter_name in {"all", "gold", "silver", "unmatched", "incomplete", "missing-tracks", "duplicates", "upgrade", "prune-held"}:
+    if filter_name in {"all", "gold", "silver", "unmatched", "incomplete", "missing-tracks", "duplicates", "upgrade", "prune-held", "latest", "corrupt"}:
         return filter_name == "all"
     if filter_name == "new":
         return artist["status"] == "NEW"
@@ -784,6 +999,8 @@ def _album_visible(album, filter_name):
     if filter_name == "unmatched":
         return tier == "unmatched"
     if filter_name == "incomplete":
+        if "tags_incomplete" in album:
+            return bool(album["tags_incomplete"])
         return _album_incomplete(album["id"])
     if filter_name == "missing-tracks":
         expected = int(album.get("gap_expected") or 0)
@@ -792,6 +1009,8 @@ def _album_visible(album, filter_name):
     if filter_name == "missing-info":
         return True
     if filter_name == "missing-review":
+        if "review_missing" in album:
+            return bool(album.get("review_missing"))
         return not str(album.get("review") or "").strip()
     if filter_name == "duplicates":
         return bool(album.get("duplicate_release"))
@@ -799,6 +1018,10 @@ def _album_visible(album, filter_name):
         return bool(album.get("upgrade"))
     if filter_name == "prune-held":
         return bool(album.get("prune_held"))
+    if filter_name == "corrupt":
+        return bool(album.get("corrupt"))
+    if filter_name == "latest":
+        return bool(album.get("recent"))
     if filter_name == "locked":
         return bool(album.get("locked"))
     if filter_name == "case-folders":
@@ -894,7 +1117,13 @@ def album_detail(album_id):
         """,
         (album_id,),
     )
-    detail["assets"] = [row["asset_type"] for row in asset_rows]
+    present = {row["asset_type"] for row in asset_rows}
+    try:
+        # A file already in the album folder (a local discart.png, back.jpg) counts even when no image is marked selected.
+        present |= {kind for kind, found in artwork.album_assets(album_id).items() if found}
+    except Exception:
+        logger.info("album artwork presence check failed", exc_info=True)
+    detail["assets"] = sorted(present)
     return detail
 
 
@@ -1371,12 +1600,17 @@ def write_artist_nfo(artist_id):
         raise AppError("Artist not found", 404)
     cfg = load_settings()
     payload = dict(artist)
-    path = nfo.write_artist(artist["path"], cfg["nfo_profile"], payload, cfg["nfo_dialect"], cfg["nfo_backup"])
+    report = {}
+    path = nfo.write_artist(artist["path"], cfg["nfo_profile"], payload, cfg["nfo_dialect"], cfg["nfo_backup"], report=report)
+    changed = report.get("changed", True)
+    # The Modified date moves only when the file did.
+    stamp = ", updated_at = NOW()" if changed else ""
     db.execute(
-        "UPDATE artists SET has_nfo = TRUE, nfo_digest = %s, updated_at = NOW() WHERE id = %s",
+        f"UPDATE artists SET has_nfo = TRUE, nfo_digest = %s{stamp} WHERE id = %s",
         (nfo.artist_digest(payload), artist_id),
     )
-    return {"path": path, "artist": _artist_brief(db.fetchone("SELECT * FROM artists WHERE id = %s", (artist_id,)))}
+    return {"path": path, "changed": changed,
+            "artist": _artist_brief(db.fetchone("SELECT * FROM artists WHERE id = %s", (artist_id,)))}
 
 
 _ARTIST_PROFILE = {
@@ -1472,6 +1706,81 @@ def store_artist_fields(artist_id, body):
             "other": _artist_merge_card(other),
         }
         raise error
+
+
+def artist_twin_ids():
+    """{artist id: [ids of the other artist folders that are the same artist]}.
+
+    Two folders are the same artist when they share a MusicBrainz artist id, or have the same name once capitals and
+    punctuation are ignored. A pair marked Not duplicates does not count for each other."""
+    from resonance.fields import norm_name
+
+    rows = db.fetchall("SELECT id::text AS id, name, musicbrainz_artist_id::text AS mbid FROM artists")
+    parent = {row["id"]: row["id"] for row in rows}
+
+    def find(item):
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    owner = {}
+    for row in rows:
+        for key in (("mbid", row["mbid"]) if row["mbid"] else None, ("name", norm_name(row["name"])) if norm_name(row["name"]) else None):
+            if key is None:
+                continue
+            if key in owner:
+                parent[find(row["id"])] = find(owner[key])
+            else:
+                owner[key] = row["id"]
+    groups = {}
+    for artist_id in parent:
+        groups.setdefault(find(artist_id), []).append(artist_id)
+    dismissed = {frozenset((str(pair["artist_a"]), str(pair["artist_b"])))
+                 for pair in db.fetchall("SELECT artist_a::text AS artist_a, artist_b::text AS artist_b FROM dismissed_artist_twins")}
+    twins = {}
+    for ids in groups.values():
+        for artist_id in ids:
+            others = [other for other in ids if other != artist_id and frozenset((artist_id, other)) not in dismissed]
+            if others:
+                twins[artist_id] = others
+    return twins
+
+
+def artist_twin_cards(artist_id):
+    """The artist and its twin folders, for the compare window."""
+    artist_id = require_uuid(artist_id)
+    ids = [artist_id, *artist_twin_ids().get(artist_id, [])]
+    rows = db.fetchall(
+        """
+        SELECT a.id::text AS id, a.name, a.path, a.musicbrainz_artist_id::text AS mbid,
+               (SELECT count(*)::int FROM albums al WHERE al.artist_id = a.id) AS albums,
+               (SELECT count(*)::int FROM tracks t JOIN albums al ON al.id = t.album_id WHERE al.artist_id = a.id) AS tracks,
+               (SELECT COALESCE(SUM(t.file_size), 0)::bigint FROM tracks t JOIN albums al ON al.id = t.album_id
+                WHERE al.artist_id = a.id) AS size_bytes
+        FROM artists a WHERE a.id = ANY(%s::uuid[])
+        """,
+        (ids,),
+    )
+    order = {item: index for index, item in enumerate(ids)}
+    return sorted((dict(row) for row in rows), key=lambda row: order.get(row["id"], 99))
+
+
+def dismiss_artist_twins(left_id, right_id):
+    pair = sorted([require_uuid(left_id), require_uuid(right_id)])
+    db.execute("INSERT INTO dismissed_artist_twins (artist_a, artist_b) VALUES (%s, %s) ON CONFLICT DO NOTHING", (pair[0], pair[1]))
+    return _twin_marks(pair)
+
+
+def restore_artist_twins(left_id, right_id):
+    pair = sorted([require_uuid(left_id), require_uuid(right_id)])
+    db.execute("DELETE FROM dismissed_artist_twins WHERE artist_a = %s AND artist_b = %s", (pair[0], pair[1]))
+    return _twin_marks(pair)
+
+
+def _twin_marks(ids):
+    twins = artist_twin_ids()
+    return [{"id": item, "duplicate": item in twins, "twin_count": len(twins.get(item, ()))} for item in ids]
 
 
 def _artist_merge_card(row):
@@ -1844,7 +2153,9 @@ def _remove_merged_folder(drop_path, keep_path):
             "The other artist folder was left in place because it still has audio files. "
             "Those may be albums the scan has not indexed."
         )
-    shutil.rmtree(folder)
+    from resonance import trash
+
+    trash.discard(folder, kind="artist")
     return ""
 
 
@@ -2011,12 +2322,15 @@ def write_album_nfo(album_id):
     )
     cfg = load_settings()
     payload = nfo.album_context(album, artist)
-    path = nfo.write_album(album["path"], cfg["nfo_profile"], payload, tracks, cfg["nfo_dialect"], cfg["nfo_backup"])
+    report = {}
+    path = nfo.write_album(album["path"], cfg["nfo_profile"], payload, tracks, cfg["nfo_dialect"], cfg["nfo_backup"], report=report)
+    changed = report.get("changed", True)
+    stamp = ", updated_at = NOW()" if changed else ""
     db.execute(
-        "UPDATE albums SET has_nfo = TRUE, nfo_digest = %s, updated_at = NOW() WHERE id = %s",
+        f"UPDATE albums SET has_nfo = TRUE, nfo_digest = %s{stamp} WHERE id = %s",
         (nfo.album_digest(payload, tracks), album_id),
     )
-    return {"path": path}
+    return {"path": path, "changed": changed}
 
 
 _ALBUM_BATCH = ("type", "edition", "label", "country", "genres", "mood", "style", "theme", "release_status", "boxset")
@@ -2053,7 +2367,7 @@ def batch_edit_albums(ids, fields):
         raise AppError("Nothing to save", 400)
     updated = skipped = nfo_errors = 0
     previous = {}
-    for album_id in [str(require_uuid(item)) for item in ids or []][:5000]:
+    for album_id in [str(require_uuid(item)) for item in ids or []]:
         row = db.fetchone("SELECT * FROM albums WHERE id = %s", (album_id,))
         if not row or row["locked"]:
             skipped += 1
@@ -2255,8 +2569,8 @@ def held_album_ids():
     return [str(row["id"]) for row in db.fetchall("SELECT id FROM albums WHERE prune_held IS TRUE")]
 
 
-def forget_albums(ids):
-    """Drop albums from the index. Files on disk stay."""
+def forget_albums(ids, note=None):
+    """Drop albums from the index. Files on disk stay. note replaces the history line's reason."""
     from resonance.upgrade import refresh_album_peers
 
     removed, peers, track_ids = [], [], []
@@ -2267,20 +2581,22 @@ def forget_albums(ids):
             continue
         track_ids.extend(_album_track_ids(album_id))
         db.execute("DELETE FROM albums WHERE id = %s", (album_id,))
+        history.record("removed", f"{album.get('artist_name') or ''} — {album.get('title') or ''}", "album", album.get("path") or "",
+                       note or "Removed from the library. The files stay on disk.")
         peers = _merge_peer_flags(peers, refresh_album_peers(album))
         removed.append(str(album_id))
     _count_cache["at"] = 0.0
     return {"removed": removed, "peers": peers, "track_ids": track_ids}
 
 
-def forget_artists(ids):
-    """Drop artists and their albums from the index. Files on disk stay."""
+def forget_artists(ids, note=None):
+    """Drop artists and their albums from the index. Files on disk stay. note replaces the history line's reason."""
     from resonance.upgrade import refresh_album_peers
 
     removed, peers, track_ids = [], [], []
     for item in ids or []:
         artist_id = require_uuid(item)
-        row = db.fetchone("SELECT id FROM artists WHERE id = %s", (artist_id,))
+        row = db.fetchone("SELECT id, name, path FROM artists WHERE id = %s", (artist_id,))
         if not row:
             continue
         albums = db.fetchall(
@@ -2294,6 +2610,8 @@ def forget_artists(ids):
         for album in albums:
             track_ids.extend(_album_track_ids(album["id"]))
         db.execute("DELETE FROM artists WHERE id = %s", (artist_id,))
+        history.record("removed", row.get("name") or "", "artist", row.get("path") or "",
+                       note or f"Removed from the library with {len(albums)} album{'s' if len(albums) != 1 else ''}. The files stay on disk.")
         for album in albums:
             peers = _merge_peer_flags(peers, refresh_album_peers(album))
         removed.append(str(artist_id))
@@ -2376,7 +2694,9 @@ def delete_artists_from_disk(ids):
                     errors.append(f"Refusing to delete a music library root: {path}")
                     continue
                 if any(inside(root, path) for root in roots):
-                    shutil.rmtree(real)
+                    from resonance import trash
+
+                    trash.discard(real, label=artist.get("name") or "", kind="artist")
             except AppError as exc:
                 errors.append(str(exc))
                 continue
@@ -2810,6 +3130,7 @@ def _album_brief(row, full=False):
         "version": version_label(row.get("edition"), "", row.get("type")),
         "duplicate_release": bool(row.get("duplicate_release")),
         "prune_held": bool(row.get("prune_held")),
+        "corrupt": bool(row.get("corrupt")),
         "status": row["status"],
         "locked": bool(row.get("locked")),
         "locked_fields": list(row.get("locked_fields") or []),
@@ -2824,6 +3145,11 @@ def _album_brief(row, full=False):
         "match_ratio": row.get("match_ratio") or 0,
         "path_role": row.get("path_role") or "library",
         "quality_rank": row.get("quality_rank") or 0,
+        "audio_format": row.get("audio_format") or "",
+        "audio_lossless": row.get("audio_lossless"),
+        "audio_bit_depth": row.get("audio_bit_depth"),
+        "audio_sample_rate": row.get("audio_sample_rate"),
+        "audio_bitrate": row.get("audio_bitrate"),
         "cue_image": bool(row.get("cue_image")),
         "gap_present": row.get("gap_present"),
         "gap_expected": row.get("gap_expected"),

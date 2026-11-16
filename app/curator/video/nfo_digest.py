@@ -130,8 +130,47 @@ def collapse_studios(table, row):
     return True
 
 
+# (table, row id) -> (md5 of the fingerprinted columns as the database last returned them, fingerprint). A list load asks
+# the database for that md5 instead of the long text fields; only a row whose md5 is new is read in full and
+# fingerprinted again. Any write to those columns, by any part of Curator, changes the md5, so nothing has to keep it
+# up to date. Lost on restart: the first load after a start fingerprints every row once, as before.
+_known = {}
+
+
+def _columns(table):
+    return list(dict.fromkeys([*FIELDS.get(table, ()), *(_EXTRA.get(table) or ())]))
+
+
+def sig_sql(table, alias):
+    """A column for a list query: md5 of every column the fingerprint reads, computed in the database."""
+    columns = ", ".join(f"{alias}.{column}" for column in _columns(table))
+    return f"md5(ROW({columns})::text) AS nfo_sig"
+
+
+def _full_rows(table, ids):
+    """Whole rows, shaped like the list rows the fingerprint was taken from before (a movie's edition as shown)."""
+    if not ids:
+        return {}
+    rows = db.fetchall(f"SELECT * FROM {table} WHERE id = ANY(%s::uuid[])", ([str(item) for item in ids],))
+    found = {}
+    for row in rows:
+        item = db.clean(dict(row))
+        if table == "movies" and "edition" in item:
+            from curator.video.sources import canonical_edition
+
+            item["edition"] = canonical_edition(item.get("edition"))
+        found[str(row["id"])] = item
+    return found
+
+
 def apply(table, rows):
-    """Set nfo_stale on each row. A file with no fingerprint yet is recorded and left clear."""
+    """Set nfo_stale on each row. A file with no fingerprint yet is recorded and left clear.
+
+    Rows that carry nfo_sig (sig_sql) need only id, nfo_path, nfo_digest and nfo_sig: the fields are read here, and
+    only for rows whose md5 changed since the last load. Rows without it are fingerprinted from their own fields."""
+    rows = list(rows or [])
+    if any("nfo_sig" in row for row in rows):
+        return _apply_signed(table, rows)
     pending = []
     repairs = []
     for row in rows or []:
@@ -149,6 +188,65 @@ def apply(table, rows):
             continue
         row["nfo_stale"] = stored != current
     cleared = _clear_hidden_changes(table, rows)
+    if db.pool is None or not (pending or repairs or cleared):
+        return
+    with db.transaction() as conn:
+        for studios, row_id in repairs:
+            conn.execute(f"UPDATE {table} SET studios = %s WHERE id = %s", (studios, row_id))
+        for digest, row_id in pending:
+            conn.execute(f"UPDATE {table} SET nfo_digest = %s WHERE id = %s AND nfo_digest IS NULL", (digest, row_id))
+        for digest, row_id in cleared:
+            conn.execute(f"UPDATE {table} SET nfo_digest = %s WHERE id = %s", (digest, row_id))
+
+
+def _apply_signed(table, rows):
+    filed = [row for row in rows if row.get("nfo_path") and row.get("id")]
+    for row in rows:
+        row["nfo_stale"] = False
+        collapse_studios(table, row)            # the list shows the cleaned names; the repair is written below
+    unknown = [row["id"] for row in filed
+               if (_known.get((table, str(row["id"]))) or (None,))[0] != row.get("nfo_sig")]
+    full = _full_rows(table, unknown) if unknown and db.pool is not None else {}
+    pending, repairs, stale = [], [], []
+    for row in filed:
+        key = (table, str(row["id"]))
+        held = _known.get(key)
+        if held and held[0] == row.get("nfo_sig"):
+            current = held[1]
+        else:
+            source = full.get(str(row["id"]))
+            if source is None:
+                continue
+            if collapse_studios(table, source):
+                repairs.append((source["studios"], row["id"]))
+            current = fingerprint(table, source)
+            _known[key] = (row.get("nfo_sig"), current)
+        stored = row.get("nfo_digest") or ""
+        if not stored:
+            pending.append((current, row["id"]))
+            row["nfo_digest"] = current
+            continue
+        if stored != current:
+            row["nfo_stale"] = True
+            stale.append(row)
+    cleared = []
+    if stale and db.pool is not None:
+        # Only a row that looks changed is read in full, and its .nfo opened, to rule out a change no field shows.
+        sources = _full_rows(table, [row["id"] for row in stale])
+        checked = []
+        for row in stale:
+            source = sources.get(str(row["id"]))
+            if source is None:
+                continue
+            collapse_studios(table, source)
+            source["nfo_stale"] = True
+            source["nfo_digest"] = row.get("nfo_digest")
+            checked.append(source)
+        cleared = _clear_hidden_changes(table, checked)
+        gone = {str(row_id) for _digest, row_id in cleared}
+        for row in stale:
+            if str(row["id"]) in gone:
+                row["nfo_stale"] = False
     if db.pool is None or not (pending or repairs or cleared):
         return
     with db.transaction() as conn:
@@ -206,23 +304,6 @@ def _clear_hidden_changes(table, rows):
     if reads and elapsed > 1.0:
         logger.info("nfo check (%s): read %d .nfo files in %.1fs (%d skipped as already checked)",
                     table, reads, elapsed, skipped)
-    return cleared
-    from curator.video import nfo as video_nfo
-
-    for row in rows or []:
-        if not row.get("nfo_stale") or not row.get("id"):
-            continue
-        text = video_nfo._read_text(row.get("nfo_path") or "")
-        if not text:
-            continue
-        seasons = _show_seasons(table, row)
-        diff = video_nfo.changes(kind, row, text, seasons)
-        if diff.get("notes") or diff.get("changes"):
-            continue
-        current = fingerprint(table, row)
-        row["nfo_stale"] = False
-        row["nfo_digest"] = current
-        cleared.append((current, row["id"]))
     return cleared
 
 

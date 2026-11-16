@@ -9,8 +9,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from curator import env
-from curator.video import store, ytdlp_update
+from curator.video import imdb_data, store, ytdlp_update
 from resonance import db, library
+from resonance.errors import AppError
 
 router = APIRouter()
 
@@ -79,6 +80,11 @@ def _about():
         version = (Path(__file__).resolve().parents[2] / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
         pass
+    released = ""
+    try:
+        released = (Path(__file__).resolve().parents[2] / "RELEASE_DATE").read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
     database = ""
     try:
         database = str((db.fetchone("SHOW server_version") or {}).get("server_version") or "")
@@ -86,6 +92,7 @@ def _about():
         pass
     return {
         "version": version or "dev",
+        "release_date": released,
         "python": platform.python_version(),
         "database": database,
         "uptime_seconds": int(time.time() - _STARTED),
@@ -116,6 +123,58 @@ async def ytdlp_status(check: bool = False):
 async def ytdlp_install_update():
     """Download the newest yt-dlp into the cache folder, after checking it against the published checksum."""
     return await run_in_threadpool(ytdlp_update.update)
+
+
+def _imdb_view():
+    from curator.video import config
+
+    cfg = config.current()
+    days = cfg.get("imdb_refresh_days")
+    return {
+        **imdb_data.status(days),
+        "enabled": bool(cfg.get("imdb_data")),
+        "refresh_days": days,
+        "terms_url": imdb_data.TERMS_URL,
+        "license_url": imdb_data.LICENSE_URL,
+        "user_agent": imdb_data.user_agent(),
+        "default_user_agent": imdb_data.default_user_agent(),
+    }
+
+
+@router.get("/imdb-data")
+async def imdb_data_status():
+    """Whether the local copy of IMDb's datasets is on, how old it is and what it holds."""
+    return await run_in_threadpool(_imdb_view)
+
+
+@router.post("/imdb-data/refresh")
+async def imdb_data_refresh():
+    """Download and index the datasets now. It runs in the background; poll the status for progress."""
+    def start():
+        from curator.video import config
+
+        if not config.current().get("imdb_data"):
+            raise AppError("Turn on IMDb data and save the settings first", 409)
+        if imdb_data.status()["running"]:
+            raise AppError("The IMDb data is already being updated", 409)
+        imdb_data.request(force=True)
+        return _imdb_view()
+
+    return await run_in_threadpool(start)
+
+
+@router.delete("/imdb-data")
+async def imdb_data_remove():
+    """Delete the local copy. Files you placed in the data folder yourself are not touched."""
+    def work():
+        from curator.video import config
+
+        if config.current().get("imdb_data"):
+            raise AppError("Turn IMDb data off and save the settings first, or it would be downloaded again", 409)
+        imdb_data.remove()
+        return _imdb_view()
+
+    return await run_in_threadpool(work)
 
 
 def _health():
@@ -185,6 +244,14 @@ def _health():
     except Exception:
         pass
     return {"checks": checks}
+
+
+@router.get("/about/slow")
+def about_slow_requests():
+    """The last requests that took two seconds or more since the start, newest first."""
+    from curator import slow_requests
+
+    return {"requests": slow_requests.recent(), "threshold_seconds": slow_requests.SLOW_SECONDS}
 
 
 @router.get("/about/health")
@@ -269,3 +336,25 @@ def ui_state_put(body: dict | None = None):
 
     values = (body or {}).get("values") if isinstance(body, dict) else None
     return {"state": ui_state.update(values)}
+
+
+@router.get("/jobs/recent")
+def recent_jobs(limit: int = 30):
+    """Finished jobs of every kind for the Jobs panel's Recent list, newest first."""
+    from curator import job_history
+
+    return {"jobs": job_history.recent(limit)}
+
+
+@router.get("/jobs/recent/{source}/{job_id}/log")
+def recent_job_log(source: str, job_id: str):
+    """The log of one finished job (file jobs, work jobs, music scans)."""
+    import uuid as _uuid
+
+    from curator import job_history
+
+    try:
+        key = str(_uuid.UUID(job_id))
+    except ValueError as exc:
+        raise AppError("Unknown job", 404) from exc
+    return {"log": job_history.log_of(source, key)}

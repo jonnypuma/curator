@@ -121,18 +121,26 @@ def _wanted_langs(langs, lang):
     return wanted or [str(lang or "en").split("-")[0]]
 
 
-def rank_art(candidates, kind, *, lang, sources, min_width=0, langs=None):
+def rank_art(candidates, kind, *, lang, sources, min_width=0, langs=None, textless_fanart=False):
     """Candidates for one Kodi art type, best first.
 
     Images known to be under the minimum width are skipped while anything else remains.
-    When every image is smaller, the largest of those is used.
+    When every image is smaller, the largest of those is used. textless_fanart puts fanart without text (no language)
+    first whatever the language order; the other kinds keep that order.
     """
     order = {name: index for index, name in enumerate(sources)}
     wanted = _wanted_langs(langs, lang)
     eligible, smaller = [], []
+    from curator.video import art_bans
+
+    from curator.video import art_shape
+
+    banned = art_bans.urls()        # pictures the user banned in the artwork window are never chosen
     for item in candidates:
-        if item.get("kind") != kind:
+        if item.get("kind") != kind or (banned and str(item.get("url") or "") in banned):
             continue
+        if art_shape.wrong_item(kind, item):
+            continue                # listed at another type's shape (a fanart among the posters): never chosen
         width = item.get("width") or 0
         if min_width and width and width < min_width:
             smaller.append(item)
@@ -151,6 +159,8 @@ def rank_art(candidates, kind, *, lang, sources, min_width=0, langs=None):
                 lang_rank = wanted.index(item_lang)
             except ValueError:
                 lang_rank = len(wanted) if not item_lang else len(wanted) + 1
+        if textless_fanart and kind in ("fanart", "characterart"):
+            lang_rank = 0 if not item_lang else lang_rank + 1
         return (lang_rank, order.get(item.get("source"), 99), -(item.get("score") or 0), -(item.get("width") or 0))
 
     pool = eligible or smaller

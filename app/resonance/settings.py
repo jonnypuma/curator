@@ -219,16 +219,28 @@ DEFAULTS = {
     "artwork_lookup_modes": {"incremental": False, "full": False, "deep": False, "forced": False},
     "refresh_discography_during_scan": True,
     "fill_missing_during_scan": True,
+    "scan_refresh_metadata": False,
+    "scan_refresh_artwork": False,
+    "scan_refresh_dry_run": False,
     "fill_mb_metadata_during_incremental": True,
     "limited_artwork_during_scan": False,
     "metadata_miss_days": 30,
     "nfo_on_bio_save": True,
     "scan_rewrite_nfo": False,
     "biography_longest": True,
+    "dup_count_special_releases": False,
+    "upgrade_count_special_releases": False,
     "allmusic_enabled": True,
     "metadata_priority": {key: list(value) for key, value in METADATA_FIELDS.items()},
     "metadata_enabled": {key: {item: True for item in value} for key, value in METADATA_FIELDS.items()},
     "verbose_logging": False,
+    "trash_enabled": True,
+    "trash_days": 30,
+    "disk_alert_gb": 0,
+    "disk_alert_empty_bin": False,
+    "timezone": "",
+    # The "Added to the library" notification (curator.digest): off, every day or every week, at an hour.
+    "outbound_digest": {"every": "off", "hour": 9, "weekday": 0},
 }
 
 RENAME_SCOPES = {"none", "both", "folder", "file"}
@@ -268,6 +280,43 @@ def _read_raw():
 
 def load():
     return _apply_env(_normalize(_read_raw()))
+
+
+def _timezone_setting(value, strict=False):
+    """A zone name such as Europe/Oslo, or "" to follow the server (CMM_TIMEZONE, then TZ).
+
+    A name that is not a zone is refused when saving and read as empty when loading, so a bad file cannot stop the
+    schedules.
+    """
+    name = value.strip() if isinstance(value, str) else ""
+    if not name:
+        return ""
+    try:
+        import zoneinfo
+
+        zoneinfo.ZoneInfo(name)
+    except Exception:
+        if strict:
+            raise AppError(f"{name} is not a time zone name. Use a name such as Europe/Oslo, or leave it empty.", 400) from None
+        return ""
+    return name
+
+
+_UNREAD = object()
+_zone_cache = {"stamp": _UNREAD, "name": ""}
+
+
+def timezone_name():
+    """The zone saved in Settings, or "". Cached until settings.json changes, because schedules ask every minute."""
+    path = settings_path()
+    try:
+        stamp = os.path.getmtime(path)
+    except OSError:
+        stamp = None
+    if _zone_cache["stamp"] is _UNREAD or _zone_cache["stamp"] != stamp:
+        _zone_cache["stamp"] = stamp
+        _zone_cache["name"] = _timezone_setting(_read_raw().get("timezone"))
+    return _zone_cache["name"]
 
 
 load_settings = load
@@ -316,12 +365,16 @@ def public():
         view[secret] = ""
         view[f"webhook_{name}_param"] = ""
     view["key_status"] = status
-    from curator import outbound
+    from curator import arr_versions, outbound
+
+    view["arr_versions"] = arr_versions.all_versions()
 
     view["outbound"] = outbound.masked(data.get("outbound"))
     view["outbound_catalog"] = outbound.catalog()
     from resonance import cron
 
+    view["timezone_server"] = cron.server_timezone_name()
+    view["timezone_zones"] = cron.zone_names()
     view["schedule_summary"] = cron.schedule_summary(data)
     view["schedule_presets"] = cron.PRESETS
     view["backup_summary"] = cron.schedule_summary(cron.as_schedule(data, "backup"))
@@ -360,6 +413,7 @@ def save(patch):
     if _flag(incoming.get("lidarr_enabled")) and not str(incoming.get("lidarr_token") or "").strip():
         incoming["lidarr_token"] = secrets.token_urlsafe(24)
     normalized = _normalize(incoming, strict_paths=True)
+    _refuse_own_folders(previous, normalized)
     normalized["pending_path_removals"] = record_path_removals(previous, normalized)
     set_folder = normalized["video"].get("set_folder")
     if set_folder and not os.path.isdir(set_folder):
@@ -376,6 +430,7 @@ def save(patch):
 
         backup.check_folder(normalized["backup_folder"])
     _verbose_cache["stamp"] = None
+    _zone_cache["stamp"] = _UNREAD
     path = settings_path()
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -388,7 +443,30 @@ def save(patch):
 
     writes.forget_roots()
     _drop_removed_libraries(previous, normalized)
+    _remark_copies_when_rules_change(previous, normalized)
     return normalized
+
+
+def _refuse_own_folders(previous, normalized):
+    """A newly added library folder may not be, hold, or sit inside Curator's config, cache or data folder.
+
+    Only new folders are checked, so a library saved before this rule keeps saving (the scan would otherwise walk
+    Curator's own artwork store, or Curator would write its files into the library).
+    """
+    from resonance.paths import own_folder_clash
+
+    nouns = {"music_paths": "music", "movie_paths": "movie", "tv_paths": "TV", "musicvideo_paths": "music video"}
+    for key, _label in FOLDER_TYPES:
+        known = _path_set(previous.get(key))
+        for path in normalized.get(key) or []:
+            if _path_set([path]) <= known:
+                continue
+            own = own_folder_clash(path)
+            if own:
+                raise AppError(
+                    f"{path} overlaps {own}, Curator's own folder for settings, cache or artwork (CONFIG_DIR, "
+                    f"CACHE_DIR, DATA_DIR). Pick a {nouns.get(key, 'library')} folder outside it."
+                )
 
 
 def _path_set(paths):
@@ -450,7 +528,7 @@ def _pending_path_removals(data):
             continue
         path = str(entry.get("path") or "").strip()
         kind = str(entry.get("kind") or "").strip().lower()
-        if not path or kind not in {"music", "movies", "tv"}:
+        if not path or kind not in {"music", "movies", "tv", "musicvideos"}:
             continue
         row = {"path": path, "kind": kind}
         if row not in items:
@@ -462,7 +540,7 @@ def _pending_path_removals(data):
 
 def record_path_removals(previous, normalized):
     """Add to the pending list every library path that this save took away."""
-    keys = (("music_paths", "music"), ("movie_paths", "movies"), ("tv_paths", "tv"))
+    keys = (("music_paths", "music"), ("movie_paths", "movies"), ("tv_paths", "tv"), ("musicvideo_paths", "musicvideos"))
     pending = list(normalized.get("pending_path_removals") or [])
     for key, kind in keys:
         before = [p for p in (previous.get(key) or []) if isinstance(p, str) and p.strip()]
@@ -485,7 +563,7 @@ def take_path_removals(kind):
     wanted = str(kind or "").strip().lower()
     if wanted == "sets":
         wanted = "movies"
-    if wanted not in {"music", "movies", "tv"}:
+    if wanted not in {"music", "movies", "tv", "musicvideos"}:
         return []
     raw = _read_raw()
     pending = _pending_path_removals(raw)
@@ -651,6 +729,7 @@ def _normalize(data, strict_paths=False):
     merged["music_path_kinds"] = _path_kinds(data, merged["music_paths"])
     merged["movie_paths"] = _video_paths(data, "movie_paths", "MOVIES_DIR", "/movies", strict_paths)
     merged["tv_paths"] = _video_paths(data, "tv_paths", "TV_DIR", "/tv", strict_paths)
+    merged["musicvideo_paths"] = _video_paths(data, "musicvideo_paths", "MUSICVIDEOS_DIR", "/musicvideos", strict_paths)
     merged["pending_path_removals"] = _pending_path_removals(data)
     merged["scan_excluded"] = _scan_excluded(data, merged)
     if strict_paths:
@@ -665,6 +744,18 @@ def _normalize(data, strict_paths=False):
     merged["allmusic_enabled"] = _flag(data.get("allmusic_enabled", True))
     merged["metadata_priority"], merged["metadata_enabled"] = _metadata_priority(data)
     merged["verbose_logging"] = _flag(data.get("verbose_logging", False))
+    merged["trash_enabled"] = _flag(data.get("trash_enabled", True))
+    try:
+        trash_days = int(data.get("trash_days", 30))
+    except (TypeError, ValueError):
+        trash_days = 30
+    merged["trash_days"] = max(1, min(trash_days, 365))
+    try:
+        merged["disk_alert_gb"] = max(0, min(int(data.get("disk_alert_gb", 0) or 0), 1000000))
+    except (TypeError, ValueError):
+        merged["disk_alert_gb"] = 0
+    merged["disk_alert_empty_bin"] = _flag(data.get("disk_alert_empty_bin", False))
+    merged["timezone"] = _timezone_setting(data.get("timezone"), strict_paths)
     try:
         resolution = int(data.get("min_resolution", merged["min_resolution"]))
     except (TypeError, ValueError):
@@ -732,9 +823,14 @@ def _normalize(data, strict_paths=False):
     )
     merged["refresh_discography_during_scan"] = _flag(data.get("refresh_discography_during_scan", True))
     merged["fill_missing_during_scan"] = _flag(data.get("fill_missing_during_scan", True))
+    merged["scan_refresh_metadata"] = _flag(data.get("scan_refresh_metadata", False))
+    merged["scan_refresh_artwork"] = _flag(data.get("scan_refresh_artwork", False))
+    merged["scan_refresh_dry_run"] = _flag(data.get("scan_refresh_dry_run", False))
     merged["fill_mb_metadata_during_incremental"] = _flag(data.get("fill_mb_metadata_during_incremental", True))
     merged["limited_artwork_during_scan"] = _flag(data.get("limited_artwork_during_scan", False))
     merged["biography_longest"] = _flag(data.get("biography_longest", True))
+    merged["dup_count_special_releases"] = _flag(data.get("dup_count_special_releases", False))
+    merged["upgrade_count_special_releases"] = _flag(data.get("upgrade_count_special_releases", False))
     merged["metadata_miss_days"] = _metadata_miss_days(data.get("metadata_miss_days", merged["metadata_miss_days"]))
     merged["embed_artwork"] = _flag(data.get("embed_artwork", False))
     try:
@@ -825,6 +921,9 @@ def _normalize(data, strict_paths=False):
     from curator import outbound
 
     merged["outbound"] = outbound.normalize(data.get("outbound"))
+    from curator import digest
+
+    merged["outbound_digest"] = digest.normalize(data.get("outbound_digest"))
     return merged
 
 
@@ -1077,7 +1176,7 @@ def _path_roles(data, paths):
 def _scan_excluded(data, merged):
     """Folders kept in the library but left out of scans. Only configured paths are kept."""
     known = []
-    for key in ("music_paths", "movie_paths", "tv_paths"):
+    for key in ("music_paths", "movie_paths", "tv_paths", "musicvideo_paths"):
         known.extend(merged.get(key) or [])
     known_set = set(known)
     raw = data.get("scan_excluded") if isinstance(data, dict) else None
@@ -1121,14 +1220,15 @@ def _music_paths(data, strict):
     return [default_music_dir()]
 
 
-FOLDER_TYPES = (("music_paths", "Music"), ("movie_paths", "Movies"), ("tv_paths", "TV Shows"))
+FOLDER_TYPES = (("music_paths", "Music"), ("movie_paths", "Movies"), ("tv_paths", "TV Shows"),
+                ("musicvideo_paths", "Music videos"))
 
 
 def _video_paths(data, key, env_name, fallback, strict):
     """Movie or TV folders. Until the list is saved once, the compose mount is used when it exists."""
     from resonance.paths import assert_library_path
 
-    label = "movie" if key == "movie_paths" else "TV"
+    label = {"movie_paths": "movie", "musicvideo_paths": "music video"}.get(key, "TV")
     incoming = data.get(key) if isinstance(data, dict) else None
     if not isinstance(incoming, list):
         default = os.path.realpath(os.environ.get(env_name, fallback))
@@ -1165,3 +1265,23 @@ def _check_folder_types(merged):
                         f"{path} overlaps the {other_label} folder {other}. Each folder can have only one media type."
                     )
             seen.append((path, label, key))
+
+
+def _remark_copies_when_rules_change(previous, normalized):
+    """New duplicate and upgrade rules (Settings, Music) take effect at once: the marks are recorded again, in the
+    background, for the whole library (under a second on a large one)."""
+    keys = ("dup_count_special_releases", "upgrade_count_special_releases")
+    if all(bool(previous.get(key)) == bool(normalized.get(key)) for key in keys):
+        return
+
+    def work():
+        try:
+            from resonance import quality
+            from resonance.upgrade import refresh_stored
+
+            quality._rules_cache["at"] = -10.0
+            refresh_stored()
+        except Exception:
+            logging.getLogger(__name__).exception("could not record duplicates and upgrades with the new rules")
+
+    threading.Thread(target=work, name="remark-copies", daemon=True).start()

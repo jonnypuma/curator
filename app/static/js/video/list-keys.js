@@ -38,6 +38,7 @@ function videoRowMatchesTier(row, tier) {
 }
 
 function selectVideoRows(rows) {
+    state.video.checkAllToken = (state.video.checkAllToken || 0) + 1;
     if (state.media === "tv") selectionReplace("tv", rows.map((row) => `${row._kind}:${row.id}`));
     else if (state.media === "sets") selectionReplace("set", rows.map((row) => row.id));
     else selectionReplace("movie", rows.map((row) => row.id));
@@ -71,7 +72,9 @@ function toggleCurrentVideoCheck() {
         id = state.video.tvSel.id;
     }
     if (!kind || !id) return;
-    return selectionToggle(kind, id, false).then(() => paintCheckedRows());
+    const done = selectionToggle(kind, id, false);
+    paintCheckedRows();
+    return done.then(() => paintCheckedRows());
 }
 
 function onVideoKey(event) {

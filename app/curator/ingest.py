@@ -21,7 +21,7 @@ import time
 
 from psycopg.types.json import Jsonb
 
-from curator import arr_hooks, automation, folders, notify
+from curator import arr_hooks, automation, folders, journey, notify, queue_quality
 from resonance import db
 from resonance.paths import inside
 
@@ -35,7 +35,7 @@ _abort = set()
 _current = {"media": "", "paths": set(), "ids": set()}
 _thread = None
 _emit = None
-_state = {"running": False, "message": "", "waiting": ""}
+_state = {"running": False, "message": "", "waiting": "", "done": 0, "total": 0}
 _cache = {"count": 0, "titles": [], "deadline": 0.0, "refreshed": 0.0, "debounce": 0, "postpone": 0, "forced": False}
 _cache_lock = threading.Lock()
 
@@ -55,7 +55,38 @@ def _send(kind, data):
 
 # Accepting webhooks.
 
+_call = threading.local()
+PAYLOAD_LIMIT = 64 * 1024
+
+
 def accept(payload):
+    """Take one webhook call. Every row it records in Recent webhooks keeps the call itself (Show call)."""
+    _call.payload = payload
+    try:
+        return _accept(payload)
+    finally:
+        _call.payload = None
+
+
+def _stored_payload(payload):
+    """The call as JSON for the database, or a note when it is too large to keep whole."""
+    import json
+
+    from psycopg.types.json import Json
+
+    if payload is None:
+        return None
+    try:
+        text = json.dumps(payload, default=str)
+    except (TypeError, ValueError):
+        text = json.dumps(str(payload))
+    if len(text) > PAYLOAD_LIMIT:
+        return Json({"_truncated": f"The call was {len(text):,} characters; the first {PAYLOAD_LIMIT:,} are kept.",
+                     "text": text[:PAYLOAD_LIMIT]})
+    return Json(payload if isinstance(payload, (dict, list)) else str(payload))
+
+
+def _accept(payload):
     auto, _ = automation.current()
     from curator.video import store
 
@@ -94,9 +125,13 @@ def accept(payload):
         if error:
             errors.append(error)
             _event(source, event, item["title"], item["path"], "unmapped", error)
+            journey.received(item, "unmapped", error)
             continue
         _upsert(resolved)
         _event(source, event, resolved["title"], resolved["path"], "queued", "")
+        # The queue row holds every episode the webhooks for this folder named; the journey shows them all.
+        merged = db.fetchone("SELECT title FROM ingest_queue WHERE key = %s", (resolved["key"],))
+        journey.received(dict(resolved, title=compact_episodes((merged or {}).get("title") or resolved["title"])))
         queued.append(resolved["title"])
     refresh()
     for title in queued:
@@ -108,7 +143,12 @@ def accept(payload):
 def _lidarr_label(payload):
     artist = ((payload or {}).get("artist") or {}).get("name") or ""
     album = ((payload or {}).get("album") or {}).get("title") or ""
-    return " — ".join(part for part in (artist, album) if part)
+    label = " — ".join(part for part in (artist, album) if part)
+    if label:
+        return label
+    # A DownloadFailure or ImportFailure has no artist block: the release title names it.
+    release = (payload or {}).get("release") or {}
+    return str((payload or {}).get("releaseTitle") or release.get("releaseTitle") or release.get("title") or "")
 
 
 def _root_for(path, kind):
@@ -128,6 +168,14 @@ def resolve(item, auto):
             return None, "Music webhooks are turned off under Settings > Automation"
         from resonance import lidarr
 
+        extra = item.get("extra") or {}
+        if item.get("removed") and extra.get("scope") in ("album", "artist"):
+            folder, artist, label, error = lidarr.locate_removed(
+                extra.get("artist") or path, extra["scope"], extra.get("album_title") or "", extra.get("release_group") or "")
+            if error:
+                return None, error
+            return {**item, "path": folder, "title": label or item["title"], "key": f"music:{folder}",
+                    "extra": {**extra, "artist": artist, "label": label}}, None
         body = {"trackFiles": [{"path": path} for path in item["files"]],
                 "artist": {"name": item["title"].split(" — ")[0]},
                 "album": {"title": item["title"].split(" — ")[-1]}}
@@ -176,6 +224,26 @@ def _merge_titles(previous, incoming):
     return incoming
 
 
+def compact_episodes(title):
+    """A show title with its episodes as ranges: "Cheers (1982) S01E01–E23 (23 episodes)". A gap stays visible."""
+    base, codes = _episode_title(str(title or ""))
+    pairs = sorted({(int(season), int(episode)) for season, episode in
+                    (re.match(r"S(\d+)E(\d+)", code, re.I).groups() for code in codes)})
+    if len(pairs) < 2:
+        return str(title or "")
+    parts = []
+    for season in sorted({season for season, _ in pairs}):
+        numbers = [episode for each, episode in pairs if each == season]
+        runs, start = [], numbers[0]
+        for previous, current in zip(numbers, numbers[1:] + [None]):
+            if current != previous + 1:
+                runs.append((start, previous))
+                start = current
+        texts = [f"E{a:02d}" + (f"–E{b:02d}" if b != a else "") for a, b in runs]
+        parts.append(f"S{season:02d}" + ", ".join(texts))
+    return f"{base} {', '.join(parts)} ({len(pairs)} episodes)"
+
+
 def _episode_title(title):
     codes = [code.upper() for code in _EPISODE_CODE.findall(title)]
     base = _EPISODE_CODE.sub("", title) if codes else title
@@ -209,12 +277,53 @@ def _upsert(item):
     )
 
 
+def queue_restored(paths):
+    """Bring items restored from the recycle bin back into the library through this queue, without waiting for the timer.
+
+    Returns the number queued. A music video folder has its own scan."""
+    from resonance import scan_queue
+
+    queued = 0
+    music_videos = False
+    for path in paths or []:
+        kind = folders.library_kind(path)
+        base = {"source": "curator", "event": "Restore", "title": os.path.basename(path), "files": [], "removed": False}
+        if kind == "music":
+            album = path if os.path.isdir(path) else os.path.dirname(path)
+            item = {**base, "media": "music", "path": album, "key": f"music:{album}",
+                    "extra": {"artist": os.path.dirname(album), "label": os.path.basename(album)}}
+        elif kind in ("movies", "tv"):
+            resolved, error = resolve({**base, "media": kind, "path": path, "extra": {}, "key": ""}, automation.current()[0])
+            if error:
+                logger.info("restored item was not queued: %s", error)
+                continue
+            item = resolved
+        elif kind == "musicvideos":
+            music_videos = True
+            continue
+        else:
+            continue
+        _upsert(item)
+        journey.received(item)
+        queued += 1
+    if music_videos:
+        from curator.video import musicvideos
+
+        musicvideos.start("incremental")
+    if queued:
+        refresh()
+        if not scan_queue.library_busy():
+            force_flush()
+    return queued
+
+
 def _event(source, event, title, path, outcome, message):
     try:
         db.execute(
-            "INSERT INTO ingest_events (source, event_type, title, path, outcome, message) VALUES (%s, %s, %s, %s, %s, %s)",
+            "INSERT INTO ingest_events (source, event_type, title, path, outcome, message, payload) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
             (str(source or "")[:20], str(event or "")[:100], str(title or "")[:300], str(path or "")[:1000],
-             outcome, str(message or "")[:2000]),
+             outcome, str(message or "")[:2000], _stored_payload(getattr(_call, "payload", None))),
         )
     except Exception:
         logger.exception("could not record the webhook event")
@@ -261,6 +370,19 @@ def due():
         return bool(_cache["count"]) and time.monotonic() >= _cache["deadline"]
 
 
+_advance_lock = threading.Lock()
+# Albums of different artists are imported side by side. Each site keeps its own request limit across threads
+# (resonance.sources.pace), so this overlaps waits on different sites without asking any one of them faster.
+MUSIC_WORKERS = 3
+SCAN_RETRY_SECONDS = 5
+
+
+def _advance(count):
+    """Count finished items of the running batch, for the "3 of 12" in the Queue window."""
+    with _advance_lock:
+        _state["done"] = min(_state["total"], _state["done"] + max(0, int(count)))
+
+
 def wake():
     """Ask the queue thread to look again. A finished library scan uses this once."""
     _wake.set()
@@ -276,6 +398,7 @@ def snapshot():
         running_items = _running_row["n"] if _running_row else 0
     except Exception:
         running_items = 0
+    stage = _stage() if _state["running"] else ""     # reads the scan's own state, so never under _cache_lock
     with _cache_lock:
         count = _cache["count"]
         remaining = max(0, int(round(_cache["deadline"] - time.monotonic()))) if count else 0
@@ -290,9 +413,25 @@ def snapshot():
             "max_postpone_seconds": _cache["postpone"] * 60,
             "queued_titles": list(_cache["titles"]),
             "running": _state["running"],
+            "batch_done": _state["done"] if _state["running"] else 0,
+            "batch_total": _state["total"] if _state["running"] else 0,
+            "stage": stage if _state["running"] else "",
             "library_busy": scan_queue.library_busy(),
             "message": message,
         }
+
+
+def _stage():
+    """How far the scan or scrape inside the running batch is, for the words beside "3 of 12"."""
+    try:
+        from curator.video import scanner, scrape
+
+        for job, noun in ((scanner.status(include_log=False), "read"), (scrape.status(include_log=False), "scraped")):
+            if job.get("status") == "running" and job.get("total"):
+                return f"{int(job.get('processed') or 0)} of {int(job['total'])} {noun}"
+    except Exception:
+        logger.debug("could not read the running stage", exc_info=True)
+    return ""
 
 
 def force_flush():
@@ -391,7 +530,8 @@ def _stop_current(media, path):
 def items():
     rows = db.fetchall(
         """
-        SELECT id, media, source, event_type, title, path, removed, events, status, first_at, last_at, started_at
+        SELECT id, media, source, event_type, title, path, removed, events, status, first_at, last_at, started_at,
+               GREATEST(0, EXTRACT(EPOCH FROM (LOCALTIMESTAMP - started_at)))::int AS running_for
         FROM ingest_queue ORDER BY status = 'running' DESC, last_at DESC
         """
     )
@@ -399,16 +539,33 @@ def items():
     for row in rows:
         item = db.clean(dict(row))
         if item.get("status") == "running":
-            from curator.queue_time import seconds_since
+            from curator.queue_time import elapsed
 
-            item["running_seconds"] = seconds_since(row.get("started_at"))
+            item["running_seconds"] = elapsed(row)
         cleaned.append(item)
     return cleaned
 
 
 def recent(limit=100):
-    rows = db.fetchall("SELECT * FROM ingest_events ORDER BY received_at DESC LIMIT %s", (int(limit),))
+    """Recent webhooks for the Queue window. The call itself stays in the database (call_payload reads it)."""
+    rows = db.fetchall(
+        "SELECT id, received_at, source, event_type, title, path, outcome, message, (payload IS NOT NULL) AS has_payload "
+        "FROM ingest_events ORDER BY received_at DESC LIMIT %s",
+        (int(limit),),
+    )
     return [db.clean(dict(row)) for row in rows]
+
+
+def call_payload(event_id):
+    """The call one Recent webhooks row came from, for Show call."""
+    row = db.fetchone("SELECT received_at, source, event_type, payload FROM ingest_events WHERE id = %s", (str(event_id),))
+    from resonance.errors import AppError
+
+    if not row:
+        raise AppError("That webhook is no longer in the list", 404)
+    if row.get("payload") is None:
+        raise AppError("This webhook was received before Curator kept the calls", 404)
+    return db.clean(dict(row))
 
 
 # Worker.
@@ -537,19 +694,30 @@ def run(interrupt=False):
         if not interrupt:
             scan_queue.finished()
         return
-    _state.update({"running": True, "message": f"Processing {len(rows)} queued items"})
+    _state.update({"running": True, "message": f"Processing {len(rows)} queued items", "done": 0, "total": len(rows)})
     refresh()
     _send("QUEUE_FLUSH", {"state": "started", "count": len(rows)})
     auto, _ = automation.current()
     summary = []
     done = False
     ids = [str(row["id"]) for row in rows]
+    trips = journey.for_keys([row.get("key") for row in rows])
+    journey.stage(trips, "waiting", "done", f"Picked up with {len(rows) - 1} other item{'s' if len(rows) != 2 else ''}"
+                  if len(rows) > 1 else "Picked up")
+    journey.stage(trips, "scan", "waiting", "Waiting for its turn in this run")
+    # Held open until the players' jobs are queued, after every item of this run: an item whose own scan is done is
+    # not finished while its library update has not been queued yet.
+    journey.stage(trips, "library", "waiting", "Queued for the players once every item of this run is scanned")
     try:
         for media in ("movies", "tv"):
-            group = _live([row for row in rows if row["media"] == media])
+            everyone = [row for row in rows if row["media"] == media]
+            group = _live(everyone)
+            _advance(len(everyone) - len(group))     # cancelled before their turn
             if group:
                 summary.append(_video(media, group, auto, interrupt))
-        music = _live([row for row in rows if row["media"] == "music"])
+        everyone = [row for row in rows if row["media"] == "music"]
+        music = _live(everyone)
+        _advance(len(everyone) - len(music))
         if music:
             summary.append(_music(music, interrupt))
         message = "; ".join(part for part in summary if part) or "Nothing to do"
@@ -558,6 +726,7 @@ def run(interrupt=False):
     except Exception as exc:
         logger.exception("webhook queue run failed")
         _event("curator", "Run", f"{len(rows)} queued items", "", "error", str(exc))
+        journey.fail_open(trips, str(exc))
         message = str(exc)
     finally:
         if done:
@@ -568,7 +737,7 @@ def run(interrupt=False):
             "DELETE FROM ingest_events WHERE id IN (SELECT id FROM ingest_events ORDER BY received_at DESC OFFSET %s)",
             (EVENT_LIMIT,),
         )
-        _state.update({"running": False, "message": ""})
+        _state.update({"running": False, "message": "", "done": 0, "total": 0})
         _current.update({"media": "", "paths": set(), "ids": set()})
         with _abort_guard:
             _abort.clear()
@@ -589,11 +758,15 @@ def _video(media, group, auto, interrupt=False):
     for root, started in by_root.items():
         rows = _live(started)
         if not root or not rows:
+            _advance(len(started))
             continue
         targets = sorted({row["path"] for row in rows})
         _current.update({"media": media, "paths": set(targets), "ids": {str(row["id"]) for row in started}})
         _state["message"] = f"Scanning {len(targets)} {noun} folder{'s' if len(targets) != 1 else ''}"
+        trips = journey.for_keys([row.get("key") for row in rows])
+        journey.stage(trips, "scan", "running", f"Scanning {len(targets)} {noun} folder{'s' if len(targets) != 1 else ''}")
         result = None
+        waited = False
         while not _stop.is_set():
             result = scanner.run_targeted(media, root, targets, held=True, interrupt=interrupt)
             if result is not None:
@@ -601,17 +774,29 @@ def _video(media, group, auto, interrupt=False):
             if interrupt:
                 raise RuntimeError("The queued folders could not be scanned while the library scan is paused")
             _state["message"] = "Waiting for the running scan to finish"
-            _stop.wait(60)
+            if not waited:
+                waited = time.monotonic()
+                journey.stage(trips, "scan", "waiting", "Waiting for another scan to finish first")
+            # Look again every few seconds: a minute between looks could hold an import up to 59 seconds for nothing.
+            _stop.wait(SCAN_RETRY_SECONDS)
+        waited_note = f" It waited {round(time.monotonic() - waited)}s for another scan first." if waited else ""
+        if waited and result is not None:
+            journey.stage(trips, "scan", "running", f"Scanning {len(targets)} {noun} folder{'s' if len(targets) != 1 else ''}.{waited_note}")
         if result is None:
             raise RuntimeError("The queue is waiting for the scan to finish")
         scanned += len(targets)
         if _current_stopped() or (result or {}).get("status") == "cancelled":
+            journey.fail_open(trips, "Cancelled")
             db.execute(
                 "DELETE FROM ingest_queue WHERE id = ANY(%s::uuid[]) AND status = 'running'",
                 ([str(row["id"]) for row in started],),
             )
+            _advance(len(started))
             continue
         present = [target for target in targets if os.path.isdir(target)]
+        timings = (result or {}).get("timings") or ""
+        journey.stage(trips, "scan", "failed" if (result or {}).get("status") == "failed" else "done",
+                      ((result or {}).get("message") or "") + waited_note + (f" Time per step: {timings}." if timings else ""))
         wanted = auto["scrape_movies"] if media == "movies" else auto["scrape_tv"]
         found = store.ids_under(media, present) if present else []
         ep_ids = []
@@ -625,23 +810,34 @@ def _video(media, group, auto, interrupt=False):
                 ep_ids = [str(r["id"]) for r in ep_rows if r.get("id")]
         if ep_ids and wanted:
             _state["message"] = f"Scraping {len(ep_ids)} episode{'s' if len(ep_ids) != 1 else ''}"
+            journey.stage(trips, "scrape", "running", _state["message"])
             _scrape("episodes", ep_ids)
+            journey.stage(trips, "scrape", "done", f"{len(ep_ids)} episode{'s' if len(ep_ids) != 1 else ''}")
             scraped += len(ep_ids)
         elif found and wanted:
             _state["message"] = f"Scraping {len(found)} {noun}{'s' if len(found) != 1 else ''}"
+            journey.stage(trips, "scrape", "running", _state["message"])
             _scrape(media, found)
+            journey.stage(trips, "scrape", "done", f"{len(found)} {noun}{'s' if len(found) != 1 else ''}")
             scraped += len(found)
-        if ep_ids:
-            _file_jobs(media, found, ep_ids=ep_ids)
-        elif found:
-            _file_jobs(media, found)
+        else:
+            journey.stage(trips, "scrape", "skipped", "Scrape after import is off" if not wanted else "Nothing new to scrape")
+        if ep_ids or found:
+            journey.stage(trips, "files", "running", "Subtitles, trailers, language and damage checks")
+            ran = _file_jobs(media, found, ep_ids=ep_ids) if ep_ids else _file_jobs(media, found)
+            journey.stage(trips, "files", "done" if ran else "skipped", ", ".join(ran) if ran else "None turned on")
         titles = [row["title"] for row in rows if row.get("title")]
-        notify.request("video", folders=targets, clean=any(owes_clean(row) for row in rows),
-                       message=_message(rows, titles), front=True, media=media, items=titles)
+        with journey.bound(trips):
+            queued = notify.request("video", folders=targets, clean=any(owes_clean(row) for row in rows),
+                                    message=_message(rows, titles), front=True, media=media, items=titles,
+                                    quality=queue_quality.for_ingest(media, rows))
+        if not queued:
+            journey.stage(trips, "library", "skipped", "No player library update is turned on for this media")
         db.execute(
             "DELETE FROM ingest_queue WHERE id = ANY(%s::uuid[]) AND status = 'running'",
             ([str(row["id"]) for row in rows],),
         )
+        _advance(len(started))
     text = f"{scanned} {noun} folder{'s' if scanned != 1 else ''} scanned"
     return text + (f", {scraped} scraped" if scraped else "")
 
@@ -655,26 +851,49 @@ def _file_jobs(media, ids, ep_ids=None):
     target_kind = "episode" if (media == "tv" and ep_ids) else kind
     target_ids = ep_ids if (media == "tv" and ep_ids) else ids
     jobs = []
+    ran = []
     if cfg["sub_on_webhook"]:
         jobs.append("subtitles")
     if cfg["trailer_on_webhook"] and media == "movies":
         jobs.append("trailers")
     for op in jobs:
         _state["message"] = f"{files.OPS[op]} for {len(target_ids)} {target_kind}{'s' if len(target_ids) != 1 else ''}"
-        for item_id in target_ids:
-            try:
-                files.run_now(op, target_kind, [item_id], log=lambda line: logger.info("webhook %s: %s", op, line))
-            except Exception as exc:
-                logger.warning("webhook %s failed for %s: %s", op, item_id, exc)
+        ran.append(files.OPS[op])
+        # One call for every imported item: episodes of one show become one unit, and a failing item does not stop the rest.
+        try:
+            files.run_now(op, target_kind, list(target_ids), log=lambda line, op=op: logger.info("webhook %s: %s", op, line),
+                          keep_going=True)
+        except Exception as exc:
+            logger.warning("webhook %s failed: %s", op, exc)
     if cfg.get("trailer_on_sonarr_season") and media == "tv" and (ep_ids or ids):
+        ran.append("Season trailers")
         _season_trailers(files, ids, ep_ids)
+    if cfg.get("orig_lang_movies" if media == "movies" else "orig_lang_tv") and target_ids:
+        from curator.video import original_language
+
+        _state["message"] = f"Checking the default language of {len(target_ids)} {target_kind}{'s' if len(target_ids) != 1 else ''}"
+        ran.append("Original language")
+        try:
+            original_language.after_import(target_kind, target_ids, lambda line: logger.info("webhook original language: %s", line))
+        except Exception as exc:
+            logger.warning("webhook original language failed: %s", exc)
+    if cfg.get("integrity_on_import") and target_ids:
+        from curator.video import integrity
+
+        _state["message"] = f"Checking {len(target_ids)} imported {target_kind}{'s' if len(target_ids) != 1 else ''} for damage"
+        ran.append("Damage check")
+        try:
+            integrity.after_import(target_kind, target_ids, cfg, lambda line: logger.info("webhook integrity: %s", line))
+        except Exception as exc:
+            logger.warning("webhook integrity check failed: %s", exc)
     if cfg.get("theme_on_webhook") and ids:
         _state["message"] = f"{files.OPS['themes']} for {len(ids)} {kind}{'s' if len(ids) != 1 else ''}"
-        for item_id in ids:
-            try:
-                files.run_now("themes", kind, [item_id], log=lambda line: logger.info("webhook themes: %s", line))
-            except Exception as exc:
-                logger.warning("webhook themes failed for %s: %s", item_id, exc)
+        ran.append(files.OPS["themes"])
+        try:
+            files.run_now("themes", kind, list(ids), log=lambda line: logger.info("webhook themes: %s", line), keep_going=True)
+        except Exception as exc:
+            logger.warning("webhook themes failed: %s", exc)
+    return ran
 
 
 def _season_trailers(files, show_ids, ep_ids):
@@ -693,11 +912,11 @@ def _season_trailers(files, show_ids, ep_ids):
     if not season_ids:
         return
     _state["message"] = f"Downloading trailers for {len(season_ids)} season{'s' if len(season_ids) != 1 else ''}"
-    for season_id in season_ids:
-        try:
-            files.run_now("trailers", "season", [season_id], log=lambda line: logger.info("webhook season trailer: %s", line))
-        except Exception as exc:
-            logger.warning("webhook season trailer failed for %s: %s", season_id, exc)
+    try:
+        files.run_now("trailers", "season", season_ids, log=lambda line: logger.info("webhook season trailer: %s", line),
+                      keep_going=True)
+    except Exception as exc:
+        logger.warning("webhook season trailers failed: %s", exc)
 
 
 def owes_clean(row):
@@ -718,10 +937,10 @@ def _message(rows, titles):
 def _scrape(media, ids):
     from curator.video import scrape
 
-    for _ in range(720):
+    for _ in range(3600):
         if scrape.start(media, "selected", ids, None, label="webhook"):
             break
-        time.sleep(5)
+        time.sleep(1)            # another scrape is running: start as soon as it ends
     else:
         logger.warning("webhook scrape skipped: another scrape kept running")
         return
@@ -729,7 +948,62 @@ def _scrape(media, ids):
         if _current_stopped():
             scrape.cancel()
             break
-        time.sleep(2)
+        time.sleep(0.5)          # a scrape of one or two items often ends within a second
+
+
+def _music_scan_steps(job_id):
+    """The stage times a music scan logged ("MusicBrainz took 14.3s"), as one line for the Follow imports step: the
+    match, artwork and the rest happen inside that scan, so this is where they show."""
+    if not job_id:
+        return ""
+    try:
+        from resonance import db as music_db
+
+        row = music_db.fetchone("SELECT log FROM scan_jobs WHERE id = %s", (job_id,))
+    except Exception:
+        return ""
+    lines = [line.strip() for line in str((row or {}).get("log") or "").splitlines()]
+    steps = [line.replace(" took ", " ", 1) for line in lines if " took " in line and not line.startswith("Time per step")]
+    return ", ".join(steps[:8])
+
+
+def _music_removed(row, trips):
+    """A Lidarr delete. The library rows go only when the folder is really gone and the folders around it can be read,
+    so a mount that is away never empties the library. Files are never touched here. Returns 1 when rows went."""
+    from resonance import db as music_db
+    from resonance import library
+    from resonance.paths import inside, like_prefix, music_roots, readable_dir
+
+    path = str(row.get("path") or "").rstrip("/")
+    extra = row.get("extra") or {}
+    scope = extra.get("scope") or "album"
+    if path and os.path.isdir(path):
+        # Only an artist delete reaches here with its folder still there: Lidarr let the files stay.
+        journey.stage(trips, "scan", "skipped", "Removed in Lidarr, which kept the files, so the artist stays in the library")
+        return 0
+    root = next((item for item in music_roots() if inside(item, path)), None)
+    parent = os.path.dirname(path)
+    if not path or not root or not readable_dir(root) or not readable_dir(parent):
+        journey.stage(trips, "scan", "failed",
+                      f"The music folder around {path or 'this item'} cannot be read, so nothing was removed from the library")
+        return 0
+    note = "Removed in Lidarr. The folder is gone from disk."
+    if scope == "artist":
+        albums = music_db.fetchall(
+            "SELECT id::text AS id FROM albums WHERE rtrim(path, '/') = %s OR path LIKE %s ESCAPE '\\'",
+            (path, like_prefix(path)))
+        gone = library.forget_albums([item["id"] for item in albums], note=note)["removed"]
+        artists = music_db.fetchall(
+            "SELECT a.id::text AS id FROM artists a WHERE rtrim(a.path, '/') = %s "
+            "AND NOT EXISTS (SELECT 1 FROM albums al WHERE al.artist_id = a.id)", (path,))
+        library.forget_artists([item["id"] for item in artists], note=note)
+        message = f"Removed {len(gone)} album{'s' if len(gone) != 1 else ''} from the library: the artist folder is gone"
+    else:
+        albums = music_db.fetchall("SELECT id::text AS id FROM albums WHERE rtrim(path, '/') = %s", (path,))
+        gone = library.forget_albums([item["id"] for item in albums], note=note)["removed"]
+        message = "Removed from the library: the album folder is gone" if gone else "Already gone from the library"
+    journey.stage(trips, "scan", "done", message)
+    return 1 if gone else 0
 
 
 def _music(rows, interrupt=False):
@@ -738,23 +1012,59 @@ def _music(rows, interrupt=False):
     scanned = 0
     targets = {row["path"] for row in rows if row.get("path")}
     _current.update({"media": "music", "paths": set(targets), "ids": {str(row["id"]) for row in rows}})
-    for row in rows:
+    trips = journey.for_keys([row.get("key") for row in rows])
+
+    def one(row):
+        mine = journey.for_keys([row.get("key")])
         if _aborted(row["id"]) or _current_stopped():
-            continue
-        if row.get("removed"):
-            continue
+            journey.stage(mine, "scan", "skipped", "Cancelled")
+            _advance(1)
+            return 0
         path = row.get("path")
+        if row.get("removed") and (not path or not os.path.isdir(path) or (row.get("extra") or {}).get("scope") == "artist"):
+            try:
+                return _music_removed(row, mine)
+            finally:
+                _advance(1)
         if not path or not os.path.isdir(path):
-            continue
+            journey.stage(mine, "scan", "failed", f"The folder is not there: {path}")
+            _advance(1)
+            return 0
         extra = row.get("extra") or {}
         artist = extra.get("artist") or (posixpath.dirname(path) if path else "") or path
         label = extra.get("label") or row.get("title") or os.path.basename(path.rstrip("/\\"))
         _state["message"] = f"Scanning {label}"
+        journey.stage(mine, "scan", "running", "Reading tags and matching")
         try:
-            jobs.scan_lidarr_now(path, artist, label)
-            scanned += 1
+            result = jobs.scan_lidarr_now(path, artist, label) or {}
+            if result.get("status") in ("failed", "cancelled"):
+                journey.stage(mine, "scan", "failed", result.get("message") or "The scan did not finish")
+                return 0
+            steps = _music_scan_steps(result.get("id"))
+            journey.stage(mine, "scan", "done", "Read and matched" + (f". {steps}." if steps else ""))
+            return 1
         except Exception as exc:
             logger.warning("lidarr scan failed for %s: %s", path, exc)
+            journey.stage(mine, "scan", "failed", str(exc))
+            return 0
+        finally:
+            _advance(1)
+
+    def artist_rows(group):
+        return sum(one(row) for row in group)
+
+    # One artist's albums stay in order (they share the artist entry); different artists run side by side.
+    by_artist = {}
+    for row in rows:
+        extra = row.get("extra") or {}
+        by_artist.setdefault(extra.get("artist") or posixpath.dirname(row.get("path") or ""), []).append(row)
+    if len(by_artist) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(MUSIC_WORKERS, len(by_artist)), thread_name_prefix="import-music") as pool:
+            scanned = sum(pool.map(artist_rows, by_artist.values()))
+    else:
+        scanned = sum(artist_rows(group) for group in by_artist.values())
     if not _current_stopped():
         titles = [row["title"] for row in rows if row.get("title")]
         folders = []
@@ -764,8 +1074,12 @@ def _music(rows, interrupt=False):
             folder = artist_folder or row.get("path")
             if folder and folder not in folders:
                 folders.append(folder)
-        notify.request("music", folders=folders, clean=any(row.get("removed") for row in rows),
-                       message=_message(rows, titles), front=True, items=titles)
+        with journey.bound(trips):
+            queued = notify.request("music", folders=folders, clean=any(row.get("removed") for row in rows),
+                                    message=_message(rows, titles), front=True, items=titles,
+                                    quality=queue_quality.for_ingest("music", rows))
+        if not queued:
+            journey.stage(trips, "library", "skipped", "No player library update is turned on for music")
     db.execute(
         "DELETE FROM ingest_queue WHERE id = ANY(%s::uuid[]) AND status = 'running'",
         ([str(row["id"]) for row in rows],),

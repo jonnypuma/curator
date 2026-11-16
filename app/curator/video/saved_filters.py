@@ -38,25 +38,45 @@ OWN_RIBBONS = {
 def list_filters(media):
     media = _media(media)
     rows = db.fetchall(
-        "SELECT id, media, name, payload, tag FROM saved_filters WHERE media = %s ORDER BY lower(name), name",
+        "SELECT id, media, name, payload, tag, playlist, action, action_every, action_hour, action_weekday, "
+        "action_last_result FROM saved_filters WHERE media = %s ORDER BY lower(name), name",
         (media,),
     )
-    return [db.clean(dict(row)) for row in rows]
+    found = []
+    for row in rows:
+        item = db.clean(dict(row))
+        if media in ("movies", "tv"):
+            from curator.video import filter_actions
+
+            item["unmatched_ribbons"] = filter_actions.unmatched_ribbons(item.get("payload"), media)
+        found.append(item)
+    return found
 
 
-def save_filter(media, name, payload, tag=None):
+def save_filter(media, name, payload, tag=None, playlist=False, action=None, every="off", hour=3, weekday=0):
+    """Save or replace a filter. action, every, hour and weekday schedule a job for it (movies and TV only)."""
+    from curator.video import filter_actions
+
     media = _media(media)
     name = _name(name)
     stored_tag, stored = _stored(media, payload, tag)
+    playlist = bool(playlist) and media in {"movies", "tv", "music"}
+    action, every, hour, weekday = filter_actions.normalize(action if media in ("movies", "tv") else None, every, hour, weekday)
+    if action and filter_actions.matching_ids(media, stored) is None:
+        raise AppError("Nothing in this filter can be matched outside the page (the search box and some ribbons only "
+                       "work on screen), so it cannot run an action. Add a ribbon such as Not scraped or 4K.", 400)
     row = db.fetchone(
         """
-        INSERT INTO saved_filters (media, name, payload, tag)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (media, name) DO UPDATE SET payload = EXCLUDED.payload, tag = EXCLUDED.tag
-        RETURNING id, media, name, payload, tag
+        INSERT INTO saved_filters (media, name, payload, tag, playlist, action, action_every, action_hour, action_weekday)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (media, name) DO UPDATE SET payload = EXCLUDED.payload, tag = EXCLUDED.tag, playlist = EXCLUDED.playlist,
+            action = EXCLUDED.action, action_every = EXCLUDED.action_every, action_hour = EXCLUDED.action_hour,
+            action_weekday = EXCLUDED.action_weekday
+        RETURNING id, media, name, payload, tag, playlist, action, action_every, action_hour, action_weekday
         """,
-        (media, name, Jsonb(stored), stored_tag),
+        (media, name, Jsonb(stored), stored_tag, playlist, action, every, hour, weekday),
     )
+    _refresh_playlists()
     return db.clean(dict(row))
 
 
@@ -64,6 +84,13 @@ def delete_filter(filter_id):
     row = db.fetchone("DELETE FROM saved_filters WHERE id = %s RETURNING id", (filter_id,))
     if not row:
         raise AppError("That saved filter is gone", 404)
+    _refresh_playlists()
+
+
+def _refresh_playlists():
+    from curator.video import playlists
+
+    playlists.refresh()
 
 
 def tag_clauses(payload, media):
@@ -109,6 +136,12 @@ def apply_scan_tags(job, roots, targets=None):
     roots = [root for root in roots or [] if root]
     if not roots:
         return
+    # An incremental scan tags only the movies and shows it added or read again; full and deep check them all.
+    only = None
+    if getattr(job, "mode", "") == "incremental":
+        only = job.changed_ids()
+        if not only:
+            return
     rows = db.fetchall(
         "SELECT id, name, tag, payload FROM saved_filters WHERE media = %s AND COALESCE(tag, '') <> '' ORDER BY name",
         (job.media,),
@@ -127,7 +160,7 @@ def apply_scan_tags(job, roots, targets=None):
         if not clauses:
             job.log(f"{row['name']}: nothing in this filter can be matched during a scan.")
             continue
-        ids = _matching(job.media, roots, targets, clauses, params, row["tag"])
+        ids = _matching(job.media, roots, targets, clauses, params, row["tag"], only)
         if not ids:
             continue
         updated = tags.apply("movies" if job.media == "movies" else "tv", ids, add=[row["tag"]])
@@ -141,7 +174,8 @@ def apply_scan_tags(job, roots, targets=None):
     _write(job, changed)
 
 
-def _matching(media, roots, targets, clauses, params, tag):
+def _matching(media, roots, targets, clauses, params, tag, only=None):
+    """Movie or show ids that match the filter and lack the tag. only, when given, limits it to those ids."""
     from curator.video import store
 
     where = list(clauses)
@@ -149,6 +183,9 @@ def _matching(media, roots, targets, clauses, params, tag):
     if media == "movies":
         where.append("m.root = ANY(%s)")
         query.append(list(roots))
+        if only is not None:
+            where.append("m.id = ANY(%s::uuid[])")
+            query.append([str(item) for item in only])
         where.append("NOT m.locked")
         where.append("NOT (lower(%s) = ANY (SELECT lower(t) FROM unnest(COALESCE(m.tags, ARRAY[]::text[])) AS t))")
         query.append(tag)
@@ -160,6 +197,9 @@ def _matching(media, roots, targets, clauses, params, tag):
     else:
         where.append("s.root = ANY(%s)")
         query.append(list(roots))
+        if only is not None:
+            where.append("s.id = ANY(%s::uuid[])")
+            query.append([str(item) for item in only])
         where.append("NOT s.locked")
         where.append("NOT (lower(%s) = ANY (SELECT lower(t) FROM unnest(COALESCE(s.tags, ARRAY[]::text[])) AS t))")
         query.append(tag)

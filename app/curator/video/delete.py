@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 
 from curator import folders
 from curator.video import naming, store, writes
@@ -46,10 +45,11 @@ def _guard(path, root, kind):
 
 
 def _remove_tree(path):
-    if os.path.isdir(path):
-        shutil.rmtree(path)
-    elif os.path.isfile(path):
-        os.remove(path)
+    """Delete a folder or file: into the recycle bin when it is on (resonance.trash)."""
+    from resonance import trash
+
+    if os.path.isdir(path) or os.path.isfile(path):
+        trash.discard(path, kind="video")
 
 
 def stems_for(files):
@@ -98,10 +98,12 @@ def sidecars(folder, stems, protected):
 
 
 def _remove_files(files):
+    from resonance import trash
+
     removed = 0
     for path in files:
         if os.path.isfile(path):
-            os.remove(path)
+            trash.discard(path, kind="video")
             removed += 1
     return removed
 
@@ -249,9 +251,14 @@ def delete_season(season_id):
     return title
 
 
+def _real_file_path(path):
+    """False for the placeholder paths of episodes that have no file (missing://, wanted://)."""
+    return bool(path) and "://" not in str(path)
+
+
 def _delete_episode_files(paths, own_ids, root):
     by_folder = {}
-    for path in dict.fromkeys(path for path in paths if path):
+    for path in dict.fromkeys(path for path in paths if _real_file_path(path)):
         _guard(path, root, "tv")
         by_folder.setdefault(os.path.dirname(path), []).append(path)
     for folder, files in by_folder.items():
@@ -271,7 +278,7 @@ def delete_episode(episode_id, allowed_ids=None):
     )
     if not row:
         raise AppError("Episode not found", 404)
-    if row.get("path"):
+    if _real_file_path(row.get("path")):
         sharing = db.fetchall(
             "SELECT id FROM tv_episodes WHERE path = %s AND id <> %s",
             (row["path"], episode_id),
@@ -329,7 +336,9 @@ def _remove_set_folder(row):
     blocked = shared_folder_block(real, others)
     if blocked:
         raise AppError(f"Cannot remove set folder: {blocked.replace('album', 'media item')}")
-    shutil.rmtree(real)
+    from resonance import trash
+
+    trash.discard(real, kind="set")
 
 
 HANDLERS = {"movie": delete_movie, "show": delete_show, "season": delete_season, "episode": delete_episode, "set": delete_set}
@@ -425,6 +434,7 @@ def _release_files(file_ids):
           AND NOT EXISTS (SELECT 1 FROM movies m WHERE m.file_id = f.id OR f.path = ANY(m.parts))
           AND NOT EXISTS (SELECT 1 FROM tv_episodes e WHERE e.file_id = f.id)
           AND NOT EXISTS (SELECT 1 FROM episode_copies c WHERE c.file_id = f.id)
+          AND NOT EXISTS (SELECT 1 FROM music_videos v WHERE v.file_id = f.id)
         """,
         (list(file_ids),),
     )

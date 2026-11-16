@@ -20,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 
 from curator import arr_queue, boot_status, env, events, ingest, library_queue, queue_state, trakt_sync
 from curator.auth import BasicAuthMiddleware
+from curator.slow_requests import SlowRequestMiddleware
 from curator.routes import router as v1_router
 from curator.routes import music_artwork, music_jobs, music_library, music_match, music_scan, music_system
 from curator.video import files, scanner, scrape, store
@@ -59,6 +60,7 @@ def _boot_music():
     logging.getLogger("musicbrainzngs").setLevel(logging.WARNING)
     from resonance import backup, db, schedule, settings
     from curator import curator_schedule
+    from curator.video import imdb_data
 
     db.init_db()
     settings.ensure()
@@ -66,6 +68,7 @@ def _boot_music():
     schedule.start()
     curator_schedule.start()
     backup.start()
+    imdb_data.start()
     threading.Thread(target=db.maintain_catalog, name="catalogue-maintenance", daemon=True).start()
     threading.Thread(target=_check_local_extras, name="local-extras", daemon=True).start()
 
@@ -115,6 +118,30 @@ async def _startup(loop):
         except Exception:
             logger.exception("the scan queue could not resume")
         trakt_sync.start_timer()
+        try:
+            from resonance import trash
+
+            trash.start_timer()
+        except Exception:
+            logger.exception("the recycle bin timer could not start")
+        try:
+            from curator import player_sync
+
+            player_sync.start_timer()
+        except Exception:
+            logger.exception("the player watched sync timer could not start")
+        try:
+            from curator.video import integrity
+
+            integrity.start_timer()
+        except Exception:
+            logger.exception("the scheduled integrity pass could not start")
+        try:
+            from curator import disk
+
+            disk.start_timer()
+        except Exception:
+            logger.exception("the disk usage timer could not start")
         boot_status.mark_ready()
         logger.info("Curator ready")
     except asyncio.CancelledError:
@@ -176,7 +203,10 @@ class _StartingGate:
 app = FastAPI(title="Curator", docs_url="/api/v1/docs", openapi_url="/api/v1/openapi.json", lifespan=lifespan)
 app.add_middleware(_StartingGate)
 app.add_middleware(BasicAuthMiddleware)
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+# Level 6 instead of the default 9: on a 34 MB music list it halved the time (0.60 s to 0.32 s) for 3% more bytes.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+# Outermost, so the time includes compression: what the page waits for. Listed in About (curator.slow_requests).
+app.add_middleware(SlowRequestMiddleware)
 app.include_router(v1_router)
 app.include_router(music_library.router)
 app.include_router(music_scan.router)
@@ -218,6 +248,9 @@ def _build_static_hashes() -> None:
     _static_hashes = hashes
     _static_mtimes = mtimes
     _build["label"] = _build_label(hashes)
+    from curator import build_info
+
+    build_info.set_page(_build["label"], hashes)
 
 
 def _build_label(hashes) -> str:
@@ -236,6 +269,8 @@ def _build_label(hashes) -> str:
 # Build hashes in a background thread so the event loop isn't blocked at startup.
 # The Jinja helper returns no query-string for any file not yet hashed; once
 # the thread finishes (usually < 1 s) the dict is populated atomically.
+# The version label needs no hashes: set it now, so a page served before the thread finishes does not show APP_VERSION.
+_build["label"] = _build_label(None)
 threading.Thread(target=_build_static_hashes, name="static-hashes", daemon=True).start()
 
 
@@ -280,7 +315,9 @@ def boot():
 
 @app.get("/")
 def index(request: Request):
-    context = {"version": _build["label"] or os.environ.get("APP_VERSION", "1")}
+    from curator import build_info
+
+    context = {"version": _build["label"] or os.environ.get("APP_VERSION", "1"), "page_build": build_info.page()}
     try:
         return templates.TemplateResponse(request, "index.html", context)
     except TypeError:
@@ -348,20 +385,20 @@ app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 
 
 @app.get("/media/{folder}/{filename}")
-async def media_logo(folder: str, filename: str):
-    """A logo you added in Settings → Files wins over a shipped logo with the same name."""
+async def media_logo(folder: str, filename: str, request: Request):
+    """A logo you added in Settings → Files wins over a shipped logo with the same name. The shipped ones come from
+    media.zip (scripts/pack-media.py), or from the media/ folder in a checkout that was not packed."""
     from fastapi.responses import FileResponse
 
+    from curator import media_pack
     from curator.video import brands
 
     path = brands.custom_file(folder, filename)
     if path:
         return FileResponse(path, headers={"Cache-Control": "no-cache"})
-    shipped = (ROOT / "media" / folder / filename).resolve()
-    base = (ROOT / "media").resolve()
-    if base in shipped.parents and shipped.is_file():
-        return FileResponse(shipped)
-    raise HTTPException(status_code=404)
+    return media_pack.response(folder, filename, request.headers.get("if-none-match"))
 
 
-app.mount("/media", StaticFiles(directory=str(ROOT / "media")), name="media-badges")
+if (ROOT / "media").is_dir():
+    # Anything else under /media (a checkout that was not packed). The image has only media.zip, so no mount there.
+    app.mount("/media", StaticFiles(directory=str(ROOT / "media")), name="media-badges")

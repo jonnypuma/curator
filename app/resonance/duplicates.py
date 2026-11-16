@@ -4,34 +4,133 @@ from resonance import db
 from resonance.errors import AppError
 
 
-def groups(focus=None):
+def groups(focus=None, lidarr=True):
     """Album pairs that share an AcoustID recording or an identical fingerprint, plus pairs that
     carry the Duplicate pill for another reason: the same artist and title, or the same MusicBrainz
     release. Without those, an album could show the pill and an empty window.
 
     Duplicate marks left behind by a copy that is gone are cleared first. The ids that lost their
-    mark come back as "cleared".
+    mark come back as "cleared". lidarr=False leaves out which copy Lidarr uses: the window asks for that
+    afterwards (lidarr_labels), so it opens without waiting for Lidarr.
     """
     from resonance import upgrade
 
+    if focus:
+        return _focused(str(focus), lidarr)
     cleared = list(upgrade.clear_orphan_flags())
-    result = _groups()
-    result["pairs"] = result["pairs"] + _release_pairs(result["pairs"])
+    result = {"pairs": _all_pairs()}
+    if lidarr:
+        _label_lidarr(result["pairs"], focus)
     result["cleared"] = cleared
     return result
 
 
-def _release_pairs(listed):
-    """Pairs of flagged albums that are copies by name or by MusicBrainz release, not yet listed."""
+def lidarr_labels(focus=None):
+    """Which copy Lidarr uses, for the pairs the Duplicate window shows: {album id: label}. Read after the window
+    opened, so a slow Lidarr does not hold it up. The marks are not recorded again here."""
+    if focus:
+        from resonance.library import require_uuid
+
+        focus = require_uuid(focus)
+        pairs = _focused_pairs(focus, set(_copy_candidates(focus)), _sharing_albums(focus))
+    else:
+        pairs = _all_pairs()
+    _label_lidarr(pairs, focus)
+    labels = {}
+    for pair in pairs:
+        for side in (pair.get("left") or {}, pair.get("right") or {}):
+            if side.get("id") and side.get("arr"):
+                labels[str(side["id"])] = side["arr"]
+    return {"labels": labels}
+
+
+def _all_pairs():
+    pairs = _groups()["pairs"]
+    return pairs + _release_pairs(pairs)
+
+
+def _copy_candidates(album_id):
+    from resonance import upgrade
+
+    return upgrade._copy_candidates([album_id])
+
+
+def _focused(album_id, lidarr=True):
+    """The pairs of one album, for its Duplicate pill: read only that album and its possible copies.
+
+    Its copies are the albums of an artist with the same name or with the same MusicBrainz release, and the albums
+    that share a recording or a fingerprint with it. The marks of those are recorded again first, so a mark that no
+    longer holds is cleared ("cleared") instead of opening an empty window. The whole library is not read."""
+    from resonance import upgrade
+    from resonance.library import require_uuid
+
+    album_id = require_uuid(album_id)
+    candidates = set(_copy_candidates(album_id))
+    sharing = _sharing_albums(album_id)
+    watched = sorted(candidates | sharing | {album_id})
+    marked = lambda: {str(row["id"]) for row in db.fetchall(  # noqa: E731
+        "SELECT id::text AS id FROM albums WHERE id = ANY(%s::uuid[]) AND duplicate_release", (db.uuid_array(watched),))}
+    before = marked()
+    upgrade.refresh_stored([album_id])
+    cleared = sorted(before - marked())
+    result = {"pairs": _focused_pairs(album_id, candidates, sharing)}
+    if lidarr:
+        _label_lidarr(result["pairs"], album_id)
+    result["cleared"] = cleared
+    return result
+
+
+def _focused_pairs(album_id, candidates, sharing):
+    pairs = _groups(sorted(sharing | {album_id}))["pairs"] if sharing else []
+    return [pair for pair in pairs + _release_pairs(pairs, only=sorted(candidates | {album_id}))
+            if album_id in (str((pair.get("left") or {}).get("id")), str((pair.get("right") or {}).get("id")))]
+
+
+def _sharing_albums(album_id):
+    """Albums with a track whose AcoustID recording or fingerprint one of this album's tracks has too."""
+    # Two equality joins, each on its own index: one join with OR between them reads every track in the library.
+    rows = db.fetchall(
+        """
+        SELECT other.album_id::text AS id
+        FROM tracks mine
+        JOIN tracks other ON other.acoustid_recording_id = mine.acoustid_recording_id AND other.album_id <> mine.album_id
+        WHERE mine.album_id = %s AND mine.acoustid_recording_id IS NOT NULL
+        UNION
+        SELECT other.album_id::text AS id
+        FROM tracks mine
+        JOIN tracks other ON other.fingerprint_hash = mine.fingerprint_hash AND other.album_id <> mine.album_id
+        WHERE mine.album_id = %s AND COALESCE(mine.fingerprint_hash, '') <> ''
+          AND other.fingerprint_hash IS NOT NULL AND other.fingerprint_hash <> ''
+        """,
+        (album_id, album_id),
+    )
+    return {row["id"] for row in rows}
+
+
+def _label_lidarr(pairs, focus=None):
+    """Say which copy Lidarr uses, on every pair the window shows. A window for one album asks only about its pairs."""
+    from curator import arr_ids
+
+    if focus:
+        pairs = [pair for pair in pairs if str(focus) in (str((pair.get("left") or {}).get("id")), str((pair.get("right") or {}).get("id")))]
+    arr_ids.album_groups([[pair.get("left") or {}, pair.get("right") or {}] for pair in pairs])
+
+
+def _release_pairs(listed, only=None):
+    """Pairs of flagged albums that are copies by name or by MusicBrainz release, not yet listed. only limits the
+    albums read to those ids (one album's possible copies)."""
     from resonance.fields import norm_name
+    from resonance.quality import same_release_kind
 
     rows = db.fetchall(
         """
         SELECT albums.id, albums.title, albums.path, albums.release_year, albums.edition, albums.type,
                albums.musicbrainz_release_group_id, albums.musicbrainz_release_id::text AS mbid,
-               albums.duplicate_release, artists.name AS artist_name
+               albums.duplicate_release, artists.name AS artist_name,
+               (SELECT count(*)::int FROM tracks t WHERE t.album_id = albums.id) AS track_count
         FROM albums JOIN artists ON artists.id = albums.artist_id
-        """
+        """ + ("" if only is None else "WHERE albums.id = ANY(%s::uuid[])"),
+        () if only is None else (db.uuid_array(list(only)),),
     )
     seen = set()
     for pair in listed:
@@ -50,7 +149,7 @@ def _release_pairs(listed):
             for index, left in enumerate(group):
                 for right in group[index + 1:]:
                     key = frozenset((str(left["id"]), str(right["id"])))
-                    if key in seen:
+                    if key in seen or not same_release_kind(left, right, "duplicate"):        # a remix album is not a copy
                         continue
                     seen.add(key)
                     wanted.append((reason, left, right))
@@ -88,13 +187,14 @@ def _release_pairs(listed):
     return pairs
 
 
-def _groups():
-    """Album pairs that share an AcoustID recording or an identical fingerprint."""
+def _groups(album_ids=None):
+    """Album pairs that share an AcoustID recording or an identical fingerprint. album_ids skips the library-wide
+    search for such albums and pairs only those."""
     dismissed = {
         (str(row["track_a"]), str(row["track_b"]))
         for row in db.fetchall("SELECT track_a, track_b FROM dismissed_duplicates")
     }
-    album_ids = _shared_album_ids()
+    album_ids = list(album_ids) if album_ids is not None else _shared_album_ids()
     if not album_ids:
         return {"pairs": []}
     albums = db.fetchall(
@@ -120,11 +220,7 @@ def _groups():
         """,
         (db.uuid_array(album_ids),),
     )
-    pairs = album_pairs(albums, tracks, dismissed)
-    from curator import arr_ids
-
-    arr_ids.album_groups([[pair.get("left") or {}, pair.get("right") or {}] for pair in pairs])
-    return {"pairs": pairs}
+    return {"pairs": album_pairs(albums, tracks, dismissed)}
 
 
 def _track_pairs(pairs, left_id=None, right_id=None):
@@ -356,7 +452,7 @@ def album_pairs(albums, tracks, dismissed):
         right_album = album_by_id.get(right_id)
         from resonance.quality import same_release_kind
 
-        if not same_release_kind(left_album, right_album):
+        if not same_release_kind(left_album, right_album, "duplicate"):
             continue
         left_tracks = by_album.get(left_id, [])
         right_tracks = by_album.get(right_id, [])
@@ -444,13 +540,46 @@ def _aligned_rows(left_tracks, right_tracks, acoustid, fingerprint):
         if str(left["id"]) in used_left or str(right["id"]) in used_right:
             continue
         emit("fingerprint", left, right)
-    for track in left_tracks:
-        if str(track["id"]) not in used_left:
-            emit(None, track, None)
-    for track in right_tracks:
-        if str(track["id"]) not in used_right:
-            emit(None, None, track)
+    # Tracks without a sound match still sit side by side: same disc and track number first, then the same title.
+    spare_left = [track for track in left_tracks if str(track["id"]) not in used_left]
+    spare_right = [track for track in right_tracks if str(track["id"]) not in used_right]
+    for key in (_position_key, _title_key):
+        waiting = {}
+        for track in spare_right:
+            if key(track) is not None:
+                waiting.setdefault(key(track), []).append(track)
+        for track in spare_left:
+            peers = waiting.get(key(track)) if key(track) is not None else None
+            if peers:
+                emit(None, track, peers.pop(0))
+        spare_left = [track for track in spare_left if str(track["id"]) not in used_left]
+        spare_right = [track for track in spare_right if str(track["id"]) not in used_right]
+    for track in spare_left:
+        emit(None, track, None)
+    for track in spare_right:
+        emit(None, None, track)
+    rows.sort(key=_row_order)
     return rows
+
+
+def _position_key(track):
+    number = track.get("track_number")
+    if not number:
+        return None
+    return (track.get("disc_number") or 1, int(number))
+
+
+def _title_key(track):
+    import re
+
+    title = re.sub(r"[^a-z0-9]+", "", str(track.get("title") or "").lower())
+    return title or None
+
+
+def _row_order(row):
+    """Rows in the left album's order; a row with only a right track goes where its number would be."""
+    track = row.get("left") or row.get("right") or {}
+    return (track.get("disc") or 1, track.get("number") or 0, 0 if row.get("left") else 1)
 
 
 def _original_years(album_ids):

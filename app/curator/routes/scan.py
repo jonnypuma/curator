@@ -31,6 +31,8 @@ def start_scan(body: ScanBody):
     kind = folders.kind_for_media(body.media)
     if kind == "music":
         raise AppError("Music scans use /api/scan", 400)
+    if kind not in ("movies", "tv"):
+        raise AppError("Music videos have their own scan: /api/v1/musicvideos/scan", 400)
     if backup.restoring():
         raise AppError("Wait for the database restore to finish", 409)
     from resonance import scan_queue
@@ -94,7 +96,7 @@ def rescan_season(season_id: str, body: RescanBody | None = None):
         "started": outcome == "started",
         "queued": outcome in {"queued", "duplicate"},
         "duplicate": outcome == "duplicate",
-        "scan": scanner.status(include_log=False),
+        "scan": scanner.status(media="tv", include_log=False),
         "scan_queue": scan_queue.snapshot(),
     }
 
@@ -127,7 +129,7 @@ def rescan_episode(episode_id: str, body: RescanBody | None = None):
         "started": outcome == "started",
         "queued": outcome in {"queued", "duplicate"},
         "duplicate": outcome == "duplicate",
-        "scan": scanner.status(include_log=False),
+        "scan": scanner.status(media="tv", include_log=False),
         "scan_queue": scan_queue.snapshot(),
     }
 
@@ -152,8 +154,8 @@ def cancel_import_scan():
 
 
 @router.get("/scan/logs")
-def scan_log_list(media: str | None = None):
-    return {"logs": scan_logs.list_logs(media=media)}
+def scan_log_list(media: str | None = None, kind: str = "scan"):
+    return {"logs": scan_logs.list_logs(media=media, kind="scrape" if kind == "scrape" else "scan")}
 
 
 @router.get("/scan/logs/{name}")

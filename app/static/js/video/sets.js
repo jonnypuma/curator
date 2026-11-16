@@ -256,11 +256,14 @@ async function createSetFromModal() {
         return;
     }
     const body = { name: name.trim(), overview: overview.trim() };
-    if (tmdb.trim()) body.tmdb_collection_id = Number(tmdb.trim()) || null;
+    // The route reads tmdb_id; the collection id typed here was sent under another name and dropped.
+    if (tmdb.trim()) body.tmdb_id = String(Number(tmdb.trim()) || "") || null;
     const data = await api("/api/v1/sets", { method: "POST", body });
     const modal = document.getElementById("create-set-modal");
     if (modal) modal.classList.add("hidden");
-    notify(`Created movie set “${name.trim()}”.`, "success");
+    const errors = (data && data.errors) || [];
+    if (errors.length) notify(`Created movie set “${name.trim()}”. ${errors.length} movie${errors.length === 1 ? " was" : "s were"} not added: ${errors[0]}`, "warning");
+    else notify(`Created movie set “${name.trim()}”.`, "success");
     state.video.stale.sets = true;
     await loadVideo("sets", { keepScroll: true, quiet: true });
     if (data && data.id) openSet(data.id);

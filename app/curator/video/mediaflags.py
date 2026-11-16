@@ -315,9 +315,14 @@ def cards(file):
     add(_icon("audiochannels", str(count) if count is not None else "", _channel_text(file)))
     source = str(file.get("source_format") or "")
     group = str(file.get("video_source") or "")
-    add(_format_icon(source or group))
+    first = _format_icon(source or group)
+    add(first)
+    # DVDRip already says DVD: the group icon is only added when the format does not name it, or has no icon itself.
     if source and group:
-        add(_format_icon(group))
+        from curator.video.sources import source_covered
+
+        if not (first and source_covered(group, source)):
+            add(_format_icon(group))
     if "remux" in fold(source) or "remux" in fold(group):
         add(_format_icon("Remux"))
     if imax:

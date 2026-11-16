@@ -255,14 +255,16 @@ def _custom_folder(folder):
 
 
 def _listing(folder):
-    """Logo file names from the app's own folder and from the logos you added. Yours win a tie."""
-    names = {}
-    for path in (os.path.join(_ROOT, folder), _custom_folder(folder)):
-        try:
-            for filename in os.listdir(path):
-                names[filename] = path
-        except OSError:
-            continue
+    """Logo file names from the shipped set (media.zip, or the media/ folder) and from the logos you added. Yours win
+    a tie."""
+    from curator import media_pack
+
+    names = {filename: "shipped" for filename in media_pack.listing(folder, _ROOT)}
+    try:
+        for filename in os.listdir(_custom_folder(folder)):
+            names[filename] = "custom"
+    except OSError:
+        pass
     return list(names)
 
 
@@ -349,10 +351,30 @@ def unused(names, kind):
     return sorted((f for f in found if f.lower().endswith(".png") and f not in used), key=str.lower)
 
 
-def icons(names, kind):
+# One channel name used in several countries. When the show's countries include one of these, the country's logo wins.
+_NETWORK_BY_COUNTRY = {
+    "tv3": (
+        {"no", "norway", "norge", "nor", "ee", "estonia", "eesti", "lv", "latvia", "latvija", "lt", "lithuania", "lietuva"},
+        "tv3no",
+    ),
+}
+
+
+def _country_file(name, kind, countries):
+    if kind != "network" or not countries:
+        return None
+    rule = _NETWORK_BY_COUNTRY.get(fold(name))
+    if not rule:
+        return None
+    if not any(fold(country) in rule[0] for country in countries):
+        return None
+    return table(kind).get(rule[1])
+
+
+def icons(names, kind, countries=None):
     """The first name that has a logo. Names before it with no file are skipped."""
     for name in names or []:
-        filename = file_for(name, kind)
+        filename = _country_file(name, kind, countries) or file_for(name, kind)
         if not filename:
             continue
         return [{

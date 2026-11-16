@@ -12,6 +12,7 @@ from resonance.errors import AppError
 from resonance.paths import (
     browse_directory,
     discover_mounts,
+    own_folders,
     empty_library_paths,
     offline_library_paths,
     unreadable_library_paths,
@@ -66,8 +67,11 @@ async def system():
 
     def work():
         cfg = settings.load()
+        from curator import build_info
+
         return cleaned({
             "database": "connected",
+            "page_build": build_info.page(),
             "musicbrainz": musicbrainz.status(),
             "scan": jobs.current_job(),
             "video_scan": _video_scan_status(),
@@ -81,6 +85,7 @@ async def system():
             "movie_paths": cfg.get("movie_paths") or [],
             "tv_paths": cfg.get("tv_paths") or [],
             "mounts": discover_mounts(),
+            "own_folders": own_folders(),
             "offline_paths": offline_library_paths(cfg),
             "unreadable_paths": unreadable_library_paths(cfg),
             "empty_paths": empty_library_paths(cfg),
@@ -131,6 +136,10 @@ async def put_settings(body: dict | None = JsonBody):
 
     def work():
         settings.save(payload)
+        if "video" in payload:
+            from curator.video import imdb_data
+
+            imdb_data.request()      # lets a newly switched-on IMDb data download start without waiting for the next check
         return settings.public()
 
     return await run(work)

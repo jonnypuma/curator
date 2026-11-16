@@ -43,7 +43,7 @@ function infoBanner(urls, actions) {
     } else if (logo) {
         art = `<img class="clearlogo" alt="" src="${escapeHtml(logo)}" onerror="this.remove()">`;
     }
-    return `<div class="info-banner" data-landscape="${escapeHtml(landscape)}" data-logo="${escapeHtml(logo)}">${art}<div class="hero-actions">${actions || ""}</div></div>`;
+    return `<div class="info-banner${banner ? " has-banner" : ""}" data-landscape="${escapeHtml(landscape)}" data-logo="${escapeHtml(logo)}">${art}<div class="hero-actions">${actions || ""}</div></div>`;
 }
 
 function infoBannerFallback(image) {
@@ -54,6 +54,7 @@ function infoBannerFallback(image) {
     }
     const landscape = hero.dataset.landscape || "";
     const logo = hero.dataset.logo || "";
+    hero.classList.remove("has-banner");
     if (image.dataset.step === "banner" && landscape) {
         image.dataset.step = "landscape";
         image.src = landscape;
@@ -125,10 +126,13 @@ function shownPath(item, key) {
 }
 
 function filePathBlock(path) {
-    if (!path) return "";
-    const parts = splitMount(path);
+    // A stacked movie passes every part, one path per line.
+    const paths = (Array.isArray(path) ? path : [path]).filter(Boolean);
+    if (!paths.length) return "";
+    const parts = splitMount(paths[0]);
     const mount = parts.mount ? `<p class="mono vpath"><span class="muted">Mount</span> ${escapeHtml(parts.mount)}</p>` : "";
-    return `<div class="vfilepath"><h3>Filepath</h3>${mount}<p class="mono vpath">${escapeHtml(path)}</p></div>`;
+    const lines = paths.map((item) => `<p class="mono vpath">${escapeHtml(item)}</p>`).join("");
+    return `<div class="vfilepath"><h3>Filepath</h3>${mount}${lines}</div>`;
 }
 
 function fmtRuntime(minutes) {
@@ -182,7 +186,7 @@ function titleFacts(row) {
         }
     }
     const showDate = kind === "movie" ? (cfg.ui_movie_date_added !== false) : (cfg.ui_tv_date_added !== false);
-    const added = fmtDate(row.date_added || row.created_at);
+    const added = fmtDate(row.last_added || row.date_added || row.created_at);
     if (showDate && added && (kind === "show" || kind === "season" || kind === "episode" || kind === "movie")) {
         bits.push(`<span class="added-date" title="Added to the library">${escapeHtml(added)}</span>`);
     }
@@ -258,13 +262,21 @@ function videoCodecText(value) {
     return value ? toneBadge(value, videoCodecClass(value)) : "";
 }
 
+// E-AC-3, eac3, DD+ and Dolby Digital Plus are one format; show it under one name everywhere.
+function normalAudioCodec(value) {
+    const text = String(value || "").trim();
+    if (/^(e-?ac-?3|ddp|dd\+|dolby digital plus)$/i.test(text)) return "Dolby Digital Plus";
+    return text;
+}
+
 function audioCodecBadge(value) {
+    value = normalAudioCodec(value);
     const key = String(value || "").toLowerCase();
     if (!key) return "";
     const pairs = [
         ["truehd atmos", "dolby_atmos.svg"], ["atmos", "dolby_atmos.svg"], ["dts:x", "dts_x.jpg"], ["dts-x", "dts_x.jpg"],
         ["dts-hd ma", "dtshd_ma.png"], ["dts-hd hra", "dtshd_hra.png"], ["dts-hd", "dts-hd.png"],
-        ["truehd", "dolbytruehd.png"], ["e-ac-3", "eac3.png"], ["eac3", "eac3.png"], ["ac-3", "dolbydigital.png"],
+        ["truehd", "dolbytruehd.png"], ["dolby digital plus", "eac3.png"], ["e-ac-3", "eac3.png"], ["eac3", "eac3.png"], ["ac-3", "dolbydigital.png"],
         ["ac3", "dolbydigital.png"], ["aac", "AAC_original.png"], ["flac", "flac_white.png"], ["opus", "opus.png"],
         ["vorbis", "vorbis.png"], ["mp3", "mp3.jpg"], ["pcm", "pcm.png"], ["dts", "dts.png"],
     ];
@@ -273,7 +285,8 @@ function audioCodecBadge(value) {
 }
 
 function audioCodecClass(value) {
-    const key = String(value || "").toLowerCase();
+    const key = normalAudioCodec(value).toLowerCase();
+    if (key.includes("dolby digital")) return "badge-dd";
     if (key.includes("atmos") || key.includes("truehd")) return "badge-atmos";
     if (key.includes("dts")) return "badge-dts";
     if (key.includes("ac-3") || key.includes("ac3") || key.includes("eac3") || key.includes("e-ac")) return "badge-dd";
@@ -282,6 +295,7 @@ function audioCodecClass(value) {
 }
 
 function audioCodecText(value) {
+    value = normalAudioCodec(value);
     return value ? toneBadge(value, audioCodecClass(value)) : "";
 }
 
@@ -310,8 +324,15 @@ function sourceClass(value) {
     return "badge-sdr";
 }
 
+// One spelling for the disc: Bluray, BluRay, blu ray and BLU-RAY all read Blu-ray (UHD Bluray reads UHD Blu-ray).
+// The stored source group keeps its own name; this is only what is shown.
+function sourceName(value) {
+    return String(value || "").replace(/\bblu[\s._-]?ray\b/gi, "Blu-ray");
+}
+
 function sourceText(value) {
-    return value ? toneBadge(value, sourceClass(value)) : "";
+    const text = sourceName(value);
+    return text ? toneBadge(text, sourceClass(text)) : "";
 }
 
 const RATING_SOURCES = [
@@ -440,7 +461,7 @@ function ratingMarks(item) {
 }
 
 function sourceFormatText(value) {
-    const text = String(value || "");
+    const text = sourceName(value);
     if (!text) return "";
     const key = text.toLowerCase();
     const cls = key.includes("remux") ? "badge-remux" : key.includes("complete") || key.includes("disk") ? "badge-brdisk" : sourceClass(text);
@@ -451,12 +472,30 @@ function sourceKey(value) {
     return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+// The source group each release format belongs to, as in curator/video/sources.py SOURCE_PRESETS.
+const SOURCE_GROUP_OF = {
+    uhdremux: "uhdbluray", uhdbluray: "uhdbluray", completeuhdbluray: "uhdbluray", uhdrip: "uhdbluray",
+    blurayremux: "bluray", bluray: "bluray", completebluray: "bluray", blurayrip: "bdrip",
+    hddvdremux: "hddvd", hddvd: "hddvd", webdl: "webdl", webrip: "webrip", webcap: "webrip",
+    hdtv: "hdtv", pdtv: "hdtv", dsr: "hdtv", tvrip: "hdtv", dvd: "dvd", dvdrip: "dvd", hdrip: "dvd",
+    vhs: "vhs", vhsrip: "vhs",
+};
+
+// True when the format already says the source: DVDRip is DVD, Blu-ray Remux is Blu-ray, UHD Remux is UHD Blu-ray,
+// WEB-DL is WEB. Then only the format is shown.
+function sourceCovered(group, format) {
+    const groupKey = sourceKey(group);
+    if (!groupKey) return true;
+    const formatKey = sourceKey(format);
+    return !!formatKey && (formatKey.includes(groupKey) || SOURCE_GROUP_OF[formatKey] === groupKey);
+}
+
 function sourceChips(row) {
     if (!row) return "";
     const format = row.source_format || "";
     const group = row.video_source || "";
     const chips = [];
-    if (group && sourceKey(group) !== sourceKey(format)) chips.push(sourceText(group));
+    if (group && !sourceCovered(group, format)) chips.push(sourceText(group));
     if (format) chips.push(sourceFormatText(format));
     return chips.join("");
 }
@@ -465,8 +504,8 @@ function sourceFact(row) {
     if (!row) return "";
     const format = row.source_format || "";
     const group = row.video_source || "";
-    if (format && sourceKey(format) === sourceKey(group)) return format;
-    return [group, format].filter(Boolean).join(" ");
+    if (format && sourceCovered(group, format)) return sourceName(format);
+    return [group, format].filter(Boolean).map(sourceName).join(" ");
 }
 
 function formatIcons(row) {
@@ -606,7 +645,7 @@ function statusChip(status, skipNew) {
 }
 
 function newEpisodesChip(row) {
-    if (!row || row._kind !== "show") return "";
+    if (!row || (row._kind !== "show" && row._kind !== "season")) return "";
     const count = Number(row.new_count) || 0;
     if (!count) return "";
     const label = count === 1 ? "1 new episode" : `${count.toLocaleString()} new episodes`;
@@ -622,7 +661,14 @@ function catalogueMarks(row) {
         : "";
     if (!kind || !row.id) {
         const upgrade = row.upgrade ? `<span class="tag-pill upgrade-pill">Upgrade available</span>` : "";
-        return `${upgrade}${duplicate}`;
+        const twinTitle = Number(row.duplicate_show) === 1 ? "Another show folder holds this same show" : `${Number(row.duplicate_show)} other show folders hold this same show`;
+        const twins = row._kind === "show" && Number(row.duplicate_show) > 0;
+        const family = twins
+            ? `<button type="button" class="tag-pill duplicate-pill" data-action="video-twin-shows" data-id="${escapeHtml(row.id)}" title="${escapeHtml(twinTitle)}">Duplicate</button>`
+            : !duplicate && row.duplicate_release && (row._kind === "show" || row._kind === "season")
+                ? `<span class="tag-pill duplicate-pill" title="Some episodes in this ${row._kind} have another copy in the library">Duplicate</span>`
+                : "";
+        return `${upgrade}${duplicate}${family}`;
     }
     const where = row.upgrade_path ? `A higher-quality copy is at ${row.upgrade_path}` : "A higher-quality copy is in the library";
     const upgrade = row.upgrade ? `<button type="button" class="tag-pill upgrade-pill" data-action="video-upgrade" data-kind="${escapeHtml(kind)}" data-id="${escapeHtml(row.id)}" title="${escapeHtml(where)}">Upgrade available</button>` : "";
@@ -774,16 +820,36 @@ const HEALTH_LABELS = {
     no_audio: "No audio",
     audio_lang: "Unknown audio language",
     short: "Shorter than expected",
+    corrupt: "Corrupt",
 };
 
 function healthWords(row) {
     return ((row && row.health) || []).map((code) => HEALTH_LABELS[code]).filter(Boolean);
 }
 
+// How many of a show's or season's episodes the integrity check called corrupt. The show list only carries the count.
+function corruptEpisodeCount(row) {
+    if (!row || (row._kind !== "show" && row._kind !== "season")) return 0;
+    const details = state.video.showDetails || new Map();
+    const detail = row._kind === "show" ? details.get(row.id) : (details.get(row._showId) || details.get(row.show_id));
+    if (detail && detail.episodes) {
+        const episodes = row._kind === "season" ? detail.episodes.filter((e) => e.season_id === row.id) : detail.episodes;
+        return episodes.filter((e) => !e.missing && (e.health || []).includes("corrupt")).length;
+    }
+    return row._kind === "show" ? Number(row.corrupt_count) || 0 : 0;
+}
+
 function healthPill(row) {
-    const words = healthWords(row);
-    if (!words.length) return "";
-    return `<span class="tag-pill health-warn-pill" title="${escapeHtml(words.join(", "))}">⚠ ${escapeHtml(words.length === 1 ? words[0] : `${words.length} warnings`)}</span>`;
+    // A decode error from the integrity check gets its own red pill; the other warnings share the amber one.
+    const episodes = corruptEpisodeCount(row);
+    const corrupt = episodes
+        ? `<span class="tag-pill corrupt-pill" title="${episodes} corrupt episode${episodes === 1 ? "" : "s"}. Use the Corrupt filter to list them.">Corrupt</span>`
+        : ((row && row.health) || []).includes("corrupt")
+            ? `<span class="tag-pill corrupt-pill" title="ffmpeg found decode errors in this file. Run a full integrity check, or replace the file.">Corrupt</span>`
+            : "";
+    const words = healthWords(row).filter((word) => word !== HEALTH_LABELS.corrupt);
+    if (!words.length) return corrupt;
+    return `${corrupt}<span class="tag-pill health-warn-pill" title="${escapeHtml(words.join(", "))}">⚠ ${escapeHtml(words.length === 1 ? words[0] : `${words.length} warnings`)}</span>`;
 }
 
 function probeFailPill(row) {
@@ -869,6 +935,51 @@ function idLinks(item) {
     if (ids.tvdb) links.push(`<a href="https://thetvdb.com/dereferrer/series/${encodeURIComponent(ids.tvdb)}" target="_blank" rel="noopener">TVDB ${escapeHtml(ids.tvdb)}</a>`);
     if (ids.tvmaze) links.push(`<a href="https://www.tvmaze.com/shows/${encodeURIComponent(ids.tvmaze)}" target="_blank" rel="noopener">TVMaze ${escapeHtml(ids.tvmaze)}</a>`);
     return links.join(" · ");
+}
+
+// Every provider id the item has, as "icon Provider id", with a bullet between: IMDb, TMDB, TheTVDB, Trakt, TVMaze,
+// AniList, OFDb and Wikidata. A provider without an icon file shows its name only. An id with a page links to it.
+const PROVIDER_IDS = [
+    ["imdb", "imdb.png", "IMDb"],
+    ["tmdb", "tmdb.png", "TMDB"],
+    ["tvdb", "tvdb.png", "TheTVDB"],
+    ["trakt", "trakt.png", "Trakt"],
+    ["tvmaze", "tvmaze.png", "TVMaze"],
+    ["anilist", "", "AniList"],
+    ["ofdb", "", "OFDb"],
+    ["ofdbcc", "", "Open Film Database"],
+    ["wikidata", "", "Wikidata"],
+];
+
+function providerIdValues(item) {
+    const ids = {};
+    Object.entries((item && item.ids) || {}).forEach(([key, value]) => { if (value) ids[String(key).toLowerCase()] = String(value); });
+    ["imdb", "tmdb", "tvdb", "trakt", "anilist", "ofdb"].forEach((key) => {
+        if (item && item[`${key}_id`]) ids[key] = String(item[`${key}_id`]);
+    });
+    return ids;
+}
+
+function providerIdLink(key, id, item) {
+    if (item && item.show_title && key !== "imdb") return "";          // an episode's own page exists on IMDb only
+    if (key === "anilist") return `https://anilist.co/anime/${encodeURIComponent(id)}`;
+    if (key === "wikidata") return `https://www.wikidata.org/wiki/${encodeURIComponent(id)}`;
+    if (key === "trakt" && /^\d+$/.test(id)) return "";
+    return ratingPage(key, { ...(item || {}), ids: { ...((item && item.ids) || {}), [key]: id } });
+}
+
+function providerIdsRow(item) {
+    const ids = providerIdValues(item);
+    const parts = PROVIDER_IDS.filter(([key]) => ids[key]).map(([key, file, label]) => {
+        const id = ids[key];
+        const logo = file ? `<img src="/media/providers/${file}" alt="">` : "";
+        const inner = `${logo}<span class="vid-provider">${escapeHtml(label)}</span> <span class="vid-number">${escapeHtml(id)}</span>`;
+        const href = providerIdLink(key, id, item);
+        return href
+            ? `<a class="vid-item" href="${escapeHtml(href)}" target="_blank" rel="noopener" title="${escapeHtml(label)} ${escapeHtml(id)}">${inner}</a>`
+            : `<span class="vid-item" title="${escapeHtml(label)} ${escapeHtml(id)}">${inner}</span>`;
+    });
+    return parts.length ? `<p class="vids">${parts.join(`<span class="vid-sep" aria-hidden="true"> • </span>`)}</p>` : "";
 }
 
 function actorPhoto(thumb) {
@@ -1166,7 +1277,7 @@ function artGallery(art, owner) {
             ${dimBadge}
             ${zoomButton("video-art-zoom", `data-src="${escapeHtml(fullUrl)}" data-caption="${escapeHtml(kind)}"`)}
         </div>
-        <figcaption>${escapeHtml(kind)}${owner ? ` <button type="button" class="art-delete" data-action="video-art-delete" data-kind="${escapeHtml(owner.kind)}" data-id="${escapeHtml(owner.id)}" data-art-kind="${escapeHtml(kind)}" title="Delete this artwork file" aria-label="Delete ${escapeHtml(kind)} artwork">${trashIcon()}</button>` : ""}</figcaption>
+        <figcaption>${escapeHtml(kind)}${owner ? ` <button type="button" class="art-delete" data-action="video-art-delete" data-kind="${escapeHtml(owner.kind)}" data-id="${escapeHtml(owner.id)}" data-art-kind="${escapeHtml(kind)}" data-path="${escapeHtml(path)}" title="Delete this artwork file" aria-label="Delete ${escapeHtml(kind)} artwork">${trashIcon()}</button>` : ""}</figcaption>
     </figure>`;
     }).join("")}</div></div>`;
 }

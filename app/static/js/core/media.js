@@ -1,5 +1,5 @@
-const MEDIA_TYPES = ["music", "movies", "sets", "tv"];
-const MEDIA_TITLES = { music: "Music", movies: "Movies", sets: "Movie sets", tv: "TV shows" };
+const MEDIA_TYPES = ["music", "movies", "sets", "tv", "musicvideos"];
+const MEDIA_TITLES = { music: "Music", movies: "Movies", sets: "Movie sets", tv: "TV shows", musicvideos: "Music videos" };
 
 state.media = MEDIA_TYPES.includes(localStorage.getItem("curator.media"))
     ? localStorage.getItem("curator.media")
@@ -57,6 +57,8 @@ function applyMedia() {
     if (typeof renderVideoSelectBar === "function") renderVideoSelectBar();
     if (state.media === "music") {
         if (state.scan) pollSystem();
+    } else if (state.media === "musicvideos") {
+        renderMusicVideoStage();
     } else {
         paintVideoScanFooter();
         renderVideo();

@@ -12,9 +12,9 @@ const MOVIE_COLUMNS = [
     { key: "codec", label: "Video codec", width: 84, get: (m) => m.video_codec || "", chip: (m) => videoCodecText(m.video_codec), cls: "center" },
     { key: "video_profile", label: "Video profile", width: 110, get: (m) => m.video_profile || "" },
     { key: "bitdepth", label: "Bits", width: 48, get: (m) => m.bit_depth || "", sort: (m) => m.bit_depth || 0, cls: "num" },
-    { key: "audio_codec", label: "Audio codec", width: 88, get: (m) => m.audio_codec || "", chip: (m) => audioCodecText(m.audio_codec), cls: "center" },
+    { key: "audio_codec", label: "Audio codec", width: 88, get: (m) => normalAudioCodec(m.audio_codec), chip: (m) => audioCodecText(m.audio_codec), cls: "center" },
     { key: "audio_channels", label: "Channels", width: 72, get: (m) => m.audio_channels || "", chip: (m) => channelText(m.audio_channels), cls: "center" },
-    { key: "audio", label: "Audio", width: 150, get: (m) => m.audio_main || "", chip: (m) => `${audioCodecText(m.audio_codec)}${channelText(m.audio_channels)}` || escapeHtml(m.audio_main || "") },
+    { key: "audio", label: "Audio", width: 150, get: (m) => [normalAudioCodec(m.audio_codec), m.audio_channels].filter(Boolean).join(" "), chip: (m) => `${audioCodecText(m.audio_codec)}${channelText(m.audio_channels)}` || escapeHtml(m.audio_main || "") },
     { key: "audio_langs", label: "Audio langs", width: 110, get: (m) => langText(m.audio_langs) },
     { key: "subs", label: "Subtitles", width: 110, get: (m) => langText(m.sub_langs) },
     { key: "runtime", label: "Runtime", width: 72, get: (m) => fmtRuntime(m.runtime_minutes || Math.round((m.duration_seconds || 0) / 60)), sort: (m) => m.runtime_minutes || (m.duration_seconds || 0) / 60, cls: "num" },
@@ -32,8 +32,8 @@ const MOVIE_COLUMNS = [
     { key: "fps", label: "FPS", width: 56, get: (m) => m.fps || "", sort: (m) => m.fps || 0, cls: "num" },
     { key: "max_cll", label: "MaxCLL", width: 68, get: (m) => m.max_cll || "", sort: (m) => Number(m.max_cll) || 0, cls: "num" },
     { key: "max_fall", label: "MaxFALL", width: 72, get: (m) => m.max_fall || "", sort: (m) => Number(m.max_fall) || 0, cls: "num" },
-    { key: "source", label: "Source", width: 90, get: (m) => m.video_source || "", chip: (m) => sourceKey(m.video_source) === sourceKey(m.source_format) ? "" : sourceText(m.video_source) },
-    { key: "source_format", label: "Source format", width: 100, get: (m) => m.source_format || m.video_source || "", chip: (m) => m.source_format ? sourceFormatText(m.source_format) : sourceText(m.video_source) },
+    { key: "source", label: "Source", width: 90, get: (m) => sourceName(m.video_source), chip: (m) => sourceCovered(m.video_source, m.source_format) ? "" : sourceText(m.video_source) },
+    { key: "source_format", label: "Source format", width: 100, get: (m) => sourceName(m.source_format || m.video_source), chip: (m) => m.source_format ? sourceFormatText(m.source_format) : sourceText(m.video_source) },
     { key: "three_d", label: "3D", width: 64, get: (m) => (m.stereo_mode || (m.is_3d ? "3D" : "")), sort: (m) => (m.stereo_mode || (m.is_3d ? "3D" : "")), chip: (m) => (m.stereo_mode || m.is_3d ? toneBadge(m.stereo_mode || "3D", "badge-3d") : ""), cls: "center" },
     { key: "container", label: "Container", width: 80, get: (m) => containerName(m.container) },
     { key: "size", label: "Size", width: 80, get: (m) => fmtSize(m.size_bytes), sort: (m) => m.size_bytes || 0, cls: "num" },
@@ -56,9 +56,9 @@ const MOVIE_COLUMNS = [
     { key: "rating_tvdb", label: "TVDB rating", width: 88, get: (m) => scoreText(m.rating_tvdb), sort: (m) => Number(m.rating_tvdb) || 0, cls: "num" },
     { key: "nfo", label: "NFO", width: 56, get: (m) => (m.has_nfo ? "✓" : "—"), sort: (m) => (m.has_nfo ? 1 : 0), chip: (m) => nfoMatrixChip(m), cls: "center" },
     { key: "art", label: "Art", width: 172, get: (m) => (m.artwork || []).join(", "), sort: (m) => (m.artwork || []).length, chip: (m) => artCell(m) },
-    { key: "status", label: "Status", width: 340, get: (m) => [m.status === "NEW" ? "NEW" : m.status === "IGNORED" ? "Ignored" : m.status === "PROCESSED" ? "Processed" : "", m._kind === "show" && m.new_count ? (Number(m.new_count) === 1 ? "1 new episode" : `${Number(m.new_count)} new episodes`) : "", (m.upgrade || m._groupUpgrade) ? "Upgrade available" : "", (m.duplicate_release || m._groupDuplicate) ? "Duplicate" : "", m.prune_held ? "Not found" : "", ...healthWords(m)].filter(Boolean).join(" "), chip: (m) => videoStatus(m) },
+    { key: "status", label: "Status", width: 340, get: (m) => [m.status === "NEW" ? "NEW" : m.status === "IGNORED" ? "Ignored" : m.status === "PROCESSED" ? "Processed" : "", (m._kind === "show" || m._kind === "season") && m.new_count ? (Number(m.new_count) === 1 ? "1 new episode" : `${Number(m.new_count)} new episodes`) : "", (m.upgrade || m._groupUpgrade) ? "Upgrade available" : "", (m.duplicate_release || m._groupDuplicate) ? "Duplicate" : "", m.prune_held ? "Not found" : "", ...healthWords(m)].filter(Boolean).join(" "), chip: (m) => videoStatus(m) },
     { key: "multi", label: "Multi", width: 120, tv: true, get: (m) => (isMultiRow(m) ? "Multi" : ""), sort: (m) => multiSortValue(m), chip: (m) => multiColumnChip(m), cls: "center" },
-    { key: "added", label: "Added", width: 92, get: (m) => fmtDate(m.date_added || m.created_at), sort: (m) => String(m.date_added || m.created_at || "") },
+    { key: "added", label: "Added", width: 92, get: (m) => fmtDate(addedRaw(m)), sort: (m) => addedTime(m) },
     { key: "modified", label: "Modified", width: 100, get: (m) => fmtDate(m.mtime), sort: (m) => Number(m.mtime) || 0 },
     { key: "probed", label: "Probed", width: 100, get: (m) => fmtDate(m.probed_at), sort: (m) => String(m.probed_at || "") },
     { key: "path", label: "Path", width: 360, get: (m) => shownPath(m), chip: (m) => pathCell(shownPath(m)) },
@@ -111,10 +111,40 @@ function normalizeTvColumns(list) {
 
 const QUICK_RIBBONS = new Set(["new", "latest", "upgrade", "multi"]);
 
+// When an item was added. A show counts from its newest episode on disk (last_added), so new episodes bring it up.
+function addedRaw(row) {
+    return row && (row.last_added || row.date_added || row.created_at);
+}
+
+function addedTime(row) {
+    const raw = addedRaw(row);
+    const then = raw ? Date.parse(String(raw).replace(" ", "T")) : NaN;
+    return Number.isFinite(then) ? then : 0;
+}
+
 function recentAdded(row) {
-    const raw = row && (row.date_added || row.created_at);
-    const then = raw ? new Date(raw).getTime() : NaN;
-    return Number.isFinite(then) && Date.now() - then < 30 * 86400000;
+    const then = addedTime(row);
+    return then > 0 && Date.now() - then < 30 * 86400000;
+}
+
+// Latest added also sorts newest first, on the Added column. Turning it off puts back the sort from before,
+// unless the sort was changed in the meantime.
+function latestRibbonSort(on) {
+    const tv = matrixMode() === "tv";
+    const name = tv ? "tvSort" : "movieSort";
+    const stash = state.video.sortBeforeLatest || (state.video.sortBeforeLatest = {});
+    const current = state.video[name] || { key: "title", dir: "asc" };
+    let next = null;
+    if (on) {
+        if (current.key !== "added" || current.dir !== "desc") stash[name] = current;
+        next = { key: "added", dir: "desc" };
+    } else if (current.key === "added" && current.dir === "desc") {
+        next = stash[name] || { key: "title", dir: "asc" };
+        delete stash[name];
+    }
+    if (!next) return;
+    state.video[name] = next;
+    localStorage.setItem(tv ? "curator.tvSort" : "curator.movieSort", JSON.stringify(next));
 }
 
 const MOVIE_RIBBONS = [
@@ -135,6 +165,7 @@ const MOVIE_RIBBONS = [
     ["noimdb", "No IMDb rating", (m) => !(Number(m.rating_imdb) > 0)],
     ["probefail", "Probe failed", (m) => !!m.probe_error],
     ["health", "Health warnings", (m) => healthWords(m).length > 0],
+    ["corrupt", "Corrupt", (m) => (m.health || []).includes("corrupt")],
     ["unscraped", "Not scraped", (m) => !m.scraped_at],
     ["scrapefail", "Scrape failed", (m) => !!m.scrape_error],
     ["unmatched", "Unmatched", (m) => !m.tmdb_id && !m.imdb_id && !m.tvdb_id],
@@ -212,7 +243,7 @@ function movieColumns() {
     return pinned.concat(rest);
 }
 
-function columnWidth(column) {
+function matrixColumnWidth(column) {
     let saved = Number(matrixWidths()[column.key]);
     if (column.key === "art" && saved > 0 && saved <= 120) saved = column.width;
     if (column.key === "title" && saved > 0 && saved <= 280) saved = column.width;
@@ -226,7 +257,7 @@ function movieHaystack(movie) {
             movie.video_codec, movie.resolution, hdrLabel(movie), movie.hdr_secondary, movie.audio_main,
             (movie.genres || []).join(" "), (movie.directors || []).join(" "), (movie.studios || []).join(" "),
             (movie.countries || []).join(" "), movie.search_extra,
-            langText(movie.audio_langs), movie.video_source, movie.source_format, shownPath(movie), movie.path,
+            langText(movie.audio_langs), movie.video_source, movie.source_format, sourceName(movie.video_source), shownPath(movie), movie.path,
         ].filter(Boolean).join(" ").toLowerCase();
     }
     return movie._hay;
@@ -321,6 +352,7 @@ function collapseMovieRows(rows) {
             ...best,
             _versions: group.length,
             _versionKey: key,
+            _versionIds: ranked.map((item) => item.id),
             _markId: (upgraded || best).id,
             _groupDuplicate: group.some((item) => item.duplicate_release),
             _groupDuplicateId: (group.find((item) => item.duplicate_release) || {}).id || "",
@@ -360,27 +392,47 @@ function movieTitleHtml(movie) {
         : "";
     const note = movie._versions ? ` <span class="muted">${movie._versions} versions available</span>` : "";
     const pad = movie._version ? " vm-indent-1" : "";
-    return `<span class="vl-title${pad}">${caret}${escapeHtml(rawTitle)}${extra}${note}</span>${titleFacts(movie)}`;
+    const arrow = movie._version ? "↳ " : "";
+    return `<span class="vl-title${pad}">${caret}${arrow}${escapeHtml(rawTitle)}${extra}${note}</span>${titleFacts(movie)}`;
 }
 
-function ribbonButton(key, label, count, on) {
-    return `<button type="button" class="vribbon${on ? " is-on" : ""}" data-action="video-ribbon" data-ribbon="${key}" aria-pressed="${on}" ${count || on ? "" : "disabled"}>${escapeHtml(label)} <small>${count}</small></button>`;
+function ribbonButton(key, label, count, on, shown) {
+    return `<button type="button" class="vribbon${on ? " is-on" : ""}" data-action="video-ribbon" data-ribbon="${key}" aria-pressed="${on}" ${count || on ? "" : "disabled"}>${escapeHtml(label)} <small>${escapeHtml(String(shown === undefined ? count : shown))}</small></button>`;
 }
 
-function ribbonBarHtml(definitions, rows, quickKeys) {
+// "12 shows, 340 episodes": what a filter counts, by kind of row (TV lists mix shows, seasons and episodes).
+const RIBBON_KINDS = [["show", "show", "shows"], ["season", "season", "seasons"], ["episode", "episode", "episodes"]];
+
+// countKey names the per-show total the server sends for an episode filter. A show whose episodes are not loaded
+// yet adds that total to the episode count, so the figure covers the whole library and not just the opened shows.
+function ribbonBreakdown(rows, test, countKey) {
+    const counts = {};
+    const opened = countKey ? state.video.showDetails : null;
+    (rows || []).forEach((row) => {
+        if (!test(row)) return;
+        const kind = row._kind || "show";
+        counts[kind] = (counts[kind] || 0) + 1;
+        if (countKey && kind === "show" && !opened.has(row.id)) counts.episode = (counts.episode || 0) + (Number(row[countKey]) || 0);
+    });
+    const parts = RIBBON_KINDS.filter(([kind]) => counts[kind]).map(([kind, one, many]) => `${counts[kind]} ${counts[kind] === 1 ? one : many}`);
+    return { total: Object.values(counts).reduce((sum, value) => sum + value, 0), text: parts.join(", ") || "0" };
+}
+
+function ribbonBarHtml(definitions, rows, quickKeys, keepAllOptions, byKind) {
     const quickSet = quickKeys || QUICK_RIBBONS;
-    const countOf = (test) => (rows || []).reduce((sum, row) => sum + (test(row) ? 1 : 0), 0);
-    const quick = definitions.filter(([key]) => quickSet.has(key)).map(([key, label, test]) => {
-        return ribbonButton(key, label, countOf(test), libraryRibbons().has(key));
+    const countOf = (test, countKey) => (byKind ? ribbonBreakdown(rows, test, countKey).total : (rows || []).reduce((sum, row) => sum + (test(row) ? 1 : 0), 0));
+    const shownOf = (test, countKey) => (byKind ? ribbonBreakdown(rows, test, countKey).text : undefined);
+    const quick = definitions.filter(([key]) => quickSet.has(key)).map(([key, label, test, countKey]) => {
+        return ribbonButton(key, label, countOf(test, countKey), libraryRibbons().has(key), shownOf(test, countKey));
     }).join("");
     const rest = definitions.filter(([key]) => !quickSet.has(key));
-    const active = rest.filter(([key]) => libraryRibbons().has(key)).map(([key, label, test]) => {
-        return ribbonButton(key, label, countOf(test), true);
+    const active = rest.filter(([key]) => libraryRibbons().has(key)).map(([key, label, test, countKey]) => {
+        return ribbonButton(key, label, countOf(test, countKey), true, shownOf(test, countKey));
     }).join("");
-    const options = [`<option value="">More filters</option>`].concat(rest.map(([key, label, test]) => {
-        const count = countOf(test);
+    const options = [`<option value="">More filters</option>`].concat(rest.map(([key, label, test, countKey]) => {
+        const count = countOf(test, countKey);
         const on = libraryRibbons().has(key) ? " (on)" : "";
-        return `<option value="${escapeHtml(key)}" ${count || libraryRibbons().has(key) ? "" : "disabled"}>${escapeHtml(label)} (${count})${on}</option>`;
+        return `<option value="${escapeHtml(key)}" ${count || keepAllOptions || libraryRibbons().has(key) ? "" : "disabled"}>${escapeHtml(label)} (${byKind ? shownOf(test, countKey) : count})${on}</option>`;
     })).join("");
     const clear = state.media === "movies" || state.media === "tv" || state.media === "sets"
         ? `<button type="button" class="btn-ghost vribbon-clear" data-action="video-filters-clear" ${libraryFiltersOn() ? "" : "disabled"}>Clear all</button>${savedFilterControls(state.media)}`
@@ -399,12 +451,36 @@ function savedFilterControls(media) {
         </span>`;
 }
 
+const SAVED_FILTER_ACTIONS = { scrape: "Scrape what is missing", integrity: "Quick integrity check", trailers: "Download trailers" };
+const SAVED_FILTER_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+function savedFilterSchedule(row) {
+    if (!row.action || row.action_every === "off") return "";
+    const hour = `${String(row.action_hour || 0).padStart(2, "0")}:00`;
+    const when = row.action_every === "week" ? `every ${SAVED_FILTER_DAYS[row.action_weekday || 0]} ${hour}` : `daily ${hour}`;
+    return `${SAVED_FILTER_ACTIONS[row.action] || row.action}, ${when}`;
+}
+
 function savedFilterRow(row, prefix) {
-    const tag = row.tag ? ` · ${row.tag}` : "";
+    const tag = `${row.tag ? ` · ${row.tag}` : ""}${row.playlist ? " · Kodi playlist" : ""}`;
+    const schedule = savedFilterSchedule(row);
+    const title = [row.action_last_result ? `Last run: ${row.action_last_result}` : "",
+        (row.unmatched_ribbons || []).length ? `Only on screen, not used by the action: ${row.unmatched_ribbons.join(", ")}` : ""]
+        .filter(Boolean).join(" · ");
+    const run = schedule && prefix === "video-filter"
+        ? `<button type="button" class="link" data-action="video-filter-run" data-id="${escapeHtml(row.id)}" title="${escapeHtml(title || "Run the action now")}">Run now</button>`
+        : "";
     return `<span class="saved-filter-row">
-        <button type="button" class="link" data-action="${prefix}-apply" data-id="${escapeHtml(row.id)}">${escapeHtml(row.name)}${escapeHtml(tag)}</button>
+        <button type="button" class="link" data-action="${prefix}-apply" data-id="${escapeHtml(row.id)}">${escapeHtml(row.name)}${escapeHtml(tag)}${schedule ? `<small class="muted"> · ${escapeHtml(schedule)}</small>` : ""}</button>
+        ${run}
         <button type="button" class="link filter-x" data-action="${prefix}-delete" data-id="${escapeHtml(row.id)}" title="Remove saved filter">×</button>
     </span>`;
+}
+
+async function runSavedFilterAction(id) {
+    const data = await api(`/api/v1/filters/${encodeURIComponent(id)}/run`, { method: "POST", body: {} });
+    notify(data.result || "Started.", "info");
+    await loadSavedFilters(state.media === "tv" ? "tv" : "movies");
 }
 
 function currentVideoFilterPayload() {
@@ -457,6 +533,14 @@ function openSavedFilterModal(media) {
     document.getElementById("saved-filter-name").value = "";
     document.getElementById("saved-filter-tag").value = "";
     document.getElementById("saved-filter-tag-row").classList.toggle("hidden", noTag);
+    const playlist = document.getElementById("saved-filter-playlist");
+    if (playlist) playlist.checked = false;
+    document.getElementById("saved-filter-playlist-row").classList.toggle("hidden", media === "sets");
+    const actionRow = document.getElementById("saved-filter-action-row");
+    if (actionRow) actionRow.classList.toggle("hidden", media !== "movies" && media !== "tv");
+    const actionBox = document.getElementById("saved-filter-action");
+    if (actionBox) actionBox.value = "";
+    syncSavedFilterActionRow();
     document.getElementById("saved-filter-note").textContent = music
         ? "This saves the current library preset for music."
         : media === "sets"
@@ -477,13 +561,32 @@ async function confirmSavedFilter() {
     const payload = media === "music"
         ? { preset: (document.getElementById("library-filter") || {}).value || "all" }
         : currentVideoFilterPayload();
-    await api("/api/v1/filters", { method: "POST", body: { media, name, payload, tag: tag || null } });
+    const playlistBox = document.getElementById("saved-filter-playlist");
+    const playlist = !!(playlistBox && playlistBox.checked) && media !== "sets";
+    const value = (id) => (document.getElementById(id) || {}).value || "";
+    const action = (media === "movies" || media === "tv") ? value("saved-filter-action") : "";
+    const schedule = action ? { action, action_every: value("saved-filter-every") || "day",
+        action_hour: Number(value("saved-filter-hour")) || 0, action_weekday: Number(value("saved-filter-weekday")) || 0 } : {};
+    await api("/api/v1/filters", { method: "POST", body: { media, name, payload, tag: tag || null, playlist, ...schedule } });
     document.getElementById("saved-filter-modal").classList.add("hidden");
     await loadSavedFilters(media);
     if (media === "music") renderMusicSavedFilters();
     else renderVideoList();
     notify(tag ? `Saved. A scan can write the tag “${tag}”.` : "Filter saved.", "success");
 }
+
+// The schedule fields only matter with an action; the day only with "every week".
+function syncSavedFilterActionRow() {
+    const action = (document.getElementById("saved-filter-action") || {}).value || "";
+    document.querySelectorAll("#saved-filter-action-row .saved-filter-when").forEach((node) => { node.hidden = !action; });
+    const weekday = document.getElementById("saved-filter-weekday-row");
+    if (weekday) weekday.hidden = !action || (document.getElementById("saved-filter-every") || {}).value !== "week";
+}
+
+document.addEventListener("change", (event) => {
+    const id = event.target && event.target.id;
+    if (id === "saved-filter-action" || id === "saved-filter-every") syncSavedFilterActionRow();
+});
 
 function toggleSavedFilterMenu(id) {
     const list = document.getElementById(id);
@@ -499,8 +602,10 @@ async function applyVideoSavedFilter(id) {
     if (media === "tv") state.video.tvFilters = payload.filters || {};
     else if (media === "movies") state.video.movieFilters = payload.filters || {};
     const ribbons = libraryRibbons();
+    const hadLatest = ribbons.has("latest");
     ribbons.clear();
     (payload.ribbons || []).forEach((key) => ribbons.add(key));
+    if (media !== "sets" && hadLatest !== ribbons.has("latest")) latestRibbonSort(ribbons.has("latest"));
     if (!state.video.filter) state.video.filter = {};
     state.video.filter[media] = payload.search || "";
     const box = document.getElementById("video-filter");
@@ -529,6 +634,7 @@ function renderMusicSavedFilters() {
 function applyMusicPreset(preset) {
     const select = document.getElementById("library-filter");
     if (!select) return;
+    if (typeof clearMusicColumnFilters === "function") clearMusicColumnFilters();
     select.value = preset || "all";
     select.dispatchEvent(new Event("change"));
 }
@@ -566,6 +672,7 @@ function libraryFiltersOn() {
 function clearLibraryFilters() {
     if (state.media === "tv") state.video.tvFilters = {};
     else if (state.media === "movies") state.video.movieFilters = {};
+    if ((state.media === "tv" || state.media === "movies") && libraryRibbons().has("latest")) latestRibbonSort(false);
     libraryRibbons().clear();
     if (state.video.filter) state.video.filter[state.media] = "";
     const box = document.getElementById("video-filter");
@@ -582,7 +689,7 @@ function renderMovieRibbons() {
 }
 
 function matrixTemplate(columns) {
-    const widths = columns.map(columnWidth);
+    const widths = columns.map(matrixColumnWidth);
     const total = 36 + widths.reduce((sum, width) => sum + width, 0);
     return { style: `--vm-cols:36px ${widths.map((width) => `${width}px`).join(" ")};min-width:${total}px` };
 }
@@ -612,7 +719,18 @@ function matrixChecked(row) {
     if (!row) return false;
     if (state.media === "sets") return selectionHas("set", row.id);
     if (row._kind && row._kind !== "movie") return selectionHas(row._kind, row.id);
-    return selectionHas("movie", row.id);
+    return movieRowIds(row).every((id) => selectionHas("movie", id));
+}
+
+// The movies a row stands for: every version of a collapsed versions row, else the row's own movie.
+function movieRowIds(row) {
+    if (row && row._versions && !row._version && Array.isArray(row._versionIds) && row._versionIds.length) return row._versionIds;
+    return row && row.id ? [row.id] : [];
+}
+
+function versionsAttr(row) {
+    const ids = movieRowIds(row);
+    return ids.length > 1 ? ` data-versions="${escapeHtml(ids.join(","))}"` : "";
 }
 
 function renderMovieMatrix() {
@@ -648,15 +766,61 @@ function matrixCell(column, row) {
     if (column.key === "title" && row._kind && row._kind !== "movie" && typeof tvTitleCell === "function") {
         return `<span class="vm-cell" data-col="title">${tvTitleCell(row)}</span>`;
     }
-    const content = column.chip ? column.chip(row) : escapeHtml(columnPlain(column, row));
+    let content = column.chip ? column.chip(row) : escapeHtml(columnPlain(column, row));
     const title = column.key === "title" || column.key === "path" ? ` title="${escapeHtml(columnPlain(column, row))}"` : "";
-    return `<span class="vm-cell ${column.cls || ""}" data-col="${column.key}"${title}>${content}</span>`;
+    let plain = "";
+    if (BADGE_FILTER_COLUMNS.has(column.key)) {
+        content = content.replace(/<span class="vhdr /g, `<span data-action="video-badge-filter" title="Filter by this" class="vhdr vhdr-filter `);
+        plain = ` data-plain="${escapeHtml(columnPlain(column, row))}"`;
+    }
+    return `<span class="vm-cell ${column.cls || ""}" data-col="${column.key}"${title}${plain}>${content}</span>`;
+}
+
+// Quality badges in these columns filter the list when clicked. A badge picks every value of its column that holds it:
+// P7 in Main HDR picks DV P7, DV P7 FEL and DV P7 MEL, and FEL then narrows that to DV P7 FEL.
+const BADGE_FILTER_COLUMNS = new Set(["resolution", "hdr_main", "hdr_profile", "hdr_el", "hdr_secondary", "codec",
+    "audio_codec", "audio_channels", "audio", "source", "source_format", "three_d"]);
+
+function badgeHolds(plain, token) {
+    return plain === token || plain.startsWith(`${token} `) || plain.endsWith(` ${token}`) || plain.includes(` ${token} `);
+}
+
+function sameValues(left, right) {
+    return left.length === right.length && left.every((value) => right.includes(value));
+}
+
+// The new picks for a badge click. Narrows the current picks when they overlap, widens back when they were a part of
+// the badge's values, and clears the column when the badge is exactly what is already picked.
+function badgeFilterPicks(current, values) {
+    if (!current.length) return values;
+    if (sameValues(current, values)) return [];
+    const both = current.filter((value) => values.includes(value));
+    if (both.length === current.length) return values;
+    return both.length ? both : values;
+}
+
+function badgeFilter(badge) {
+    const cell = badge.closest(".vm-cell[data-col]");
+    const key = cell && cell.dataset.col;
+    const column = MOVIE_COLUMNS.find((item) => item.key === key);
+    if (!column) return;
+    const text = String(badge.textContent || "").trim();
+    const token = text === "Dolby Vision" ? "DV" : text;
+    const own = cell.dataset.plain || "";
+    const source = matrixMode() === "tv" && typeof visibleTvRows === "function" ? visibleTvRows(key) : movieMatchRows(key);
+    let values = [...new Set(source.map((row) => columnPlain(column, row)).filter((value) => value && badgeHolds(value, token)))];
+    if (!own || !badgeHolds(own, token)) values = own ? [own] : [];
+    if (!values.length) return;
+    writeColumnPicks(key, badgeFilterPicks(columnPicks(key), values));
 }
 
 function movieRowHtml(movie, index) {
-    const selected = movie.id === state.video.movieId || selectionHas("movie", movie.id);
+    const checked = matrixChecked(movie);
+    const selected = movie.id === state.video.movieId || checked;
     const cells = movieColumns().map((column) => matrixCell(column, movie)).join("");
-    const box = `<span class="vm-cell vm-check"><input type="checkbox" data-action="video-check" data-kind="movie" data-id="${escapeHtml(movie.id)}" ${selectionHas("movie", movie.id) ? "checked" : ""} aria-label="Select ${escapeHtml(movie.title || "movie")}"></span>`;
+    const versions = movieRowIds(movie).length;
+    const label = versions > 1 ? `Select all ${versions} versions of ${movie.title || "this movie"}` : `Select ${movie.title || "movie"}`;
+    const box = `<span class="vm-cell vm-check"><input type="checkbox" data-action="video-check" data-kind="movie" data-id="${escapeHtml(movie.id)}"${versionsAttr(movie)} ${checked ? "checked" : ""} aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"></span>`;
     return `<div class="vm-row${selected ? " is-selected" : ""}${movie.status === "NEW" ? " is-new" : ""}" style="top:${index * VIDEO_ROW}px" data-action="video-open-movie" data-id="${escapeHtml(movie.id)}" role="row">${box}${cells}</div>`;
 }
 
@@ -714,7 +878,7 @@ function bindMatrixChrome(host) {
             const key = handle.dataset.col;
             const column = MOVIE_COLUMNS.find((item) => item.key === key);
             const startX = event.clientX;
-            const start = columnWidth(column);
+            const start = matrixColumnWidth(column);
             const widths = matrixWidths();
             function move(next) {
                 widths[key] = Math.max(48, Math.round(start + next.clientX - startX));
@@ -884,7 +1048,7 @@ function paintVideoSelection() {
         renderVideoSelectBar();
         return;
     }
-    const count = matrixMode() === "tv" ? selectionChecked("tv").size : selectionChecked("movie").size;
+    const count = matrixMode() === "tv" ? tvScopedKeys().length : selectionChecked("movie").size;
     const show = state.media === "movies" || state.media === "tv";
     ["video-batch-art", "video-batch-nfo", "video-batch-rename", "video-batch-subs", "video-batch-trailers", "video-batch-processed", "video-batch-reload"].forEach((id) => {
         const button = document.getElementById(id);
@@ -923,7 +1087,7 @@ function videoSelectionFacts() {
             n,
             noun: n === 1 ? "movie" : "movies",
             detail: fresh ? `${fresh} new` : "",
-            buttons: n ? [["video-scrape-open", selectionCount("Scrape…", n), ""], ["video-batch-edit", selectionCount("Edit fields…", n), "btn-ghost", "movie"], ["video-batch-art", selectionCount("Artwork", n), "btn-ghost"], ["video-batch-nfo", selectionCount("Write .nfo", n), "btn-ghost"], ["video-batch-rename", selectionCount("Rename", n), "btn-ghost"], ["video-batch-subs", selectionCount("Subtitles", n), "btn-ghost"], ["video-batch-trailers", selectionCount("Trailers", n), "btn-ghost"], ["video-batch-themes", selectionCount("Theme songs", n), "btn-ghost"], ["video-batch-lock", selectionCount(videoSelectionAllLocked() ? "Unlock" : "Lock", n), "btn-ghost"], ["video-batch-processed", selectionCount("Processed", n), "btn-process"], ["video-batch-reload", n], ["video-batch-move", selectionCount("Move…", n), "btn-ghost"], ["video-select-clear", "Clear", "btn-ghost"], ["video-batch-remove", selectionCount("Remove from library", n), "btn-ghost btn-remove"], ["video-batch-delete", selectionCount("Delete from disk", n), "btn-ghost btn-remove"]] : [],
+            buttons: n ? [["video-scrape-open", selectionCount("Scrape…", n), ""], ["video-batch-edit", selectionCount("Edit fields…", n), "btn-ghost", "movie"], ["video-batch-ratings", selectionCount("Update ratings", n), "btn-ghost"], ["video-batch-art", selectionCount("Artwork", n), "btn-ghost"], ["video-batch-cleanfanart", selectionCount("Clean artwork…", n), "btn-ghost"], ["video-batch-playerart", selectionCount("Update artwork in players…", n), "btn-ghost"], ["video-batch-nfo", selectionCount("Write .nfo", n), "btn-ghost"], ["video-batch-rename", selectionCount("Rename", n), "btn-ghost"], ["video-batch-subs", selectionCount("Subtitles", n), "btn-ghost"], ["video-batch-origlang", selectionCount("Original language", n), "btn-ghost"], ["video-batch-trailers", selectionCount("Trailers", n), "btn-ghost"], ["video-batch-themes", selectionCount("Theme songs", n), "btn-ghost"], ["video-batch-integrity", selectionCount("Quick integrity check", n), "btn-ghost"], ["video-batch-lock", selectionCount(videoSelectionAllLocked() ? "Unlock" : "Lock", n), "btn-ghost"], ["video-batch-processed", selectionCount("Processed", n), "btn-process"], ["video-batch-reload", n], ["video-batch-move", selectionCount("Move…", n), "btn-ghost"], ["video-select-clear", "Clear", "btn-ghost"], ["video-batch-delete", selectionCount("Remove…", n), "btn-ghost btn-remove"]] : [],
         };
     }
     if (state.media === "sets") {
@@ -935,33 +1099,52 @@ function videoSelectionFacts() {
             n,
             noun: n === 1 ? "set" : "sets",
             detail: movies ? `${movies} movie${movies === 1 ? "" : "s"} in the library` : "",
-            buttons: n ? [["video-scrape-open", selectionCount("Scrape…", n), ""], ["video-batch-art", selectionCount("Artwork", n), "btn-ghost"], ["video-batch-nfo", selectionCount("Write .nfo", n), "btn-ghost"], ["video-batch-lock", selectionCount(videoSelectionAllLocked() ? "Unlock" : "Lock", n), "btn-ghost"], ["video-batch-processed", selectionCount("Processed", n), "btn-process"], ["video-select-clear", "Clear", "btn-ghost"], ["video-set-remove", selectionCount("Remove from library", n), "btn-ghost btn-remove"], ["video-set-delete", selectionCount("Delete from disk", n), "btn-ghost btn-remove"]] : [],
+            buttons: n ? [["video-scrape-open", selectionCount("Scrape…", n), ""], ["video-batch-art", selectionCount("Artwork", n), "btn-ghost"], ["video-batch-cleanfanart", selectionCount("Clean artwork…", n), "btn-ghost"], ["video-batch-nfo", selectionCount("Write .nfo", n), "btn-ghost"], ["video-batch-lock", selectionCount(videoSelectionAllLocked() ? "Unlock" : "Lock", n), "btn-ghost"], ["video-batch-processed", selectionCount("Processed", n), "btn-process"], ["video-select-clear", "Clear", "btn-ghost"], ["video-set-delete", selectionCount("Remove…", n), "btn-ghost btn-remove"]] : [],
         };
     }
     if (state.media === "tv") {
         let shows = 0;
         let seasons = 0;
         let episodes = 0;
+        // Everything that is ticked, and the part of it the footer actions work on (the scope boxes).
+        const all = { show: 0, season: 0, episode: 0 };
         selectionChecked("tv").forEach((key) => {
             const kind = String(key).split(":")[0];
-            if (kind === "show") shows += 1;
-            else if (kind === "season") seasons += 1;
-            else if (kind === "episode") episodes += 1;
+            if (all[kind] !== undefined) all[kind] += 1;
         });
+        const scope = tvScope();
+        shows = scope.show ? all.show : 0;
+        seasons = scope.season ? all.season : 0;
+        episodes = scope.episode ? all.episode : 0;
+        const nouns = { show: ["show", "shows"], season: ["season", "seasons"], episode: ["episode", "episodes"] };
         const parts = [];
-        if (shows) parts.push(`${shows} show${shows === 1 ? "" : "s"}`);
-        if (seasons) parts.push(`${seasons} season${seasons === 1 ? "" : "s"}`);
-        if (episodes) parts.push(`${episodes} episode${episodes === 1 ? "" : "s"}`);
+        const boxes = [];
+        ["show", "season", "episode"].forEach((kind) => {
+            if (!all[kind]) return;
+            const text = `${all[kind]} ${nouns[kind][all[kind] === 1 ? 0 : 1]}`;
+            parts.push(text);
+            boxes.push(`<label class="scope-pick${scope[kind] ? "" : " is-off"}" title="Include the ${nouns[kind][1]} in what the buttons do"><input type="checkbox" data-tv-scope="${kind}" ${scope[kind] ? "checked" : ""}> ${text}</label>`);
+        });
+        if (state.video.tvCascading) {
+            parts.push("counting seasons and episodes…");
+            boxes.push(`<span class="muted">counting seasons and episodes…</span>`);
+        }
+        const total = all.show + all.season + all.episode;
         const n = shows + seasons + episodes;
         const buttons = [];
         if (n) {
             buttons.push(["video-scrape-open", selectionCount("Scrape…", n), ""]);
             if (shows) buttons.push(["video-batch-edit", selectionCount("Edit shows…", shows), "btn-ghost", "show"]);
             if (episodes) buttons.push(["video-batch-edit", selectionCount("Edit episodes…", episodes), "btn-ghost", "episode"]);
+            // Seasons have no scores of their own, so only shows and episodes count here.
+            if (shows + episodes) buttons.push(["video-batch-ratings", selectionCount("Update ratings", shows + episodes), "btn-ghost"]);
             buttons.push(["video-batch-art", selectionCount("Artwork", n), "btn-ghost"]);
+            if (shows) buttons.push(["video-batch-cleanfanart", selectionCount("Clean artwork…", shows), "btn-ghost"]);
+            if (shows) buttons.push(["video-batch-playerart", selectionCount("Update artwork in players…", shows), "btn-ghost"]);
             buttons.push(["video-batch-nfo", selectionCount("Write .nfo", n), "btn-ghost"]);
             buttons.push(["video-batch-rename", selectionCount("Rename", n), "btn-ghost"]);
             buttons.push(["video-batch-subs", selectionCount("Subtitles", n), "btn-ghost"]);
+            buttons.push(["video-batch-origlang", selectionCount("Original language", n), "btn-ghost"]);
             const splitIds = typeof selectedSplitEpisodeIds === "function" ? selectedSplitEpisodeIds() : [];
             if (splitIds.length) {
                 const files = splitTargets(splitIds).length;
@@ -970,15 +1153,17 @@ function videoSelectionFacts() {
             if (shows || seasons) buttons.push(["video-batch-trailers", selectionCount("Trailers", n), "btn-ghost"]);
             if (shows || seasons || episodes) buttons.push(["video-batch-thumbs", selectionCount("Generate thumbs", episodes || n), "btn-ghost"]);
             if (shows) buttons.push(["video-batch-themes", selectionCount("Theme songs", shows), "btn-ghost"]);
+            buttons.push(["video-batch-integrity", selectionCount("Quick integrity check", n), "btn-ghost"]);
             buttons.push(["video-batch-lock", selectionCount(videoSelectionAllLocked() ? "Unlock" : "Lock", n), "btn-ghost"]);
             buttons.push(["video-batch-processed", selectionCount("Processed", n), "btn-process"]);
             buttons.push(["video-batch-reload", n]);
             if (shows) buttons.push(["video-batch-move", selectionCount("Move…", shows), "btn-ghost"]);
             buttons.push(["video-select-clear", "Clear", "btn-ghost"]);
-            buttons.push(["video-batch-remove", selectionCount("Remove from library", n), "btn-ghost btn-remove"]);
-            buttons.push(["video-batch-delete", selectionCount("Delete from disk", n), "btn-ghost btn-remove"]);
+            buttons.push(["video-batch-delete", selectionCount("Remove…", n), "btn-ghost btn-remove"]);
+        } else if (total) {
+            buttons.push(["video-select-clear", "Clear", "btn-ghost"]);
         }
-        return { n, noun: n === 1 ? "item" : "items", detail: parts.join(" · "), buttons };
+        return { n, total, noun: total === 1 ? "item" : "items", detail: parts.join(" · "), detailHtml: boxes.join(""), buttons };
     }
     return { n: 0, noun: "", detail: "", buttons: [] };
 }
@@ -988,21 +1173,50 @@ function renderVideoSelectBar() {
     if (!bar) return;
     paintVideoLegend();
     const facts = videoSelectionFacts();
-    const open = state.media !== "music" && facts.n > 0;
+    // With every kind un-ticked in the scope the bar stays up, so the boxes can be ticked again.
+    const open = state.media !== "music" && (facts.total || facts.n) > 0;
     bar.classList.toggle("is-open", open);
     bar.setAttribute("aria-hidden", open ? "false" : "true");
-    if (!open) return;
-    document.getElementById("video-select-count").textContent = String(facts.n);
+    if (!open) {
+        state.video.tvScope = null;
+        return;
+    }
+    // "4 / 243" when the scope holds part of what is ticked, plain "243" when it holds all of it.
+    document.getElementById("video-select-count").textContent = facts.total && facts.total !== facts.n ? `${facts.n} / ${facts.total}` : String(facts.n);
     document.getElementById("video-select-noun").textContent = facts.noun;
-    document.getElementById("video-select-detail").textContent = facts.detail;
-    const primary = new Set(["video-scrape-open", "video-batch-reload", "video-batch-remove", "video-set-remove", "video-batch-delete", "video-set-delete"]);
+    const detail = document.getElementById("video-select-detail");
+    if (facts.detailHtml) detail.innerHTML = facts.detailHtml;
+    else detail.textContent = facts.detail;
+    const primary = new Set(["video-scrape-open", "video-batch-reload", "video-batch-delete", "video-set-delete"]);
     const html = (items) => items.map(([action, label, cls, kind]) => {
         if (action === "video-batch-reload") return selectionRescanSplit(label);
+        if (action === "video-batch-delete" || action === "video-set-delete") {
+            // One red bin: its window asks whether to remove from the library or delete from disk.
+            return `<button type="button" class="title-delete batch-trash" data-action="${action}" title="${escapeHtml(label)} - from the library or from disk" aria-label="${escapeHtml(label)}">${typeof trashSvg === "function" ? trashSvg() : "Remove"}</button>`;
+        }
         return `<button type="button" class="${cls}" data-action="${action}"${kind ? ` data-kind="${escapeHtml(kind)}"` : ""}>${escapeHtml(label)}</button>`;
     }).join("");
-    const main = facts.buttons.filter((row) => primary.has(row[0]));
-    const more = facts.buttons.filter((row) => !primary.has(row[0]));
-    document.getElementById("video-select-actions").innerHTML = `<div class="select-row select-row-main">${html(main)}</div>${more.length ? `<div class="select-row select-row-more">${html(more)}</div>` : ""}`;
+    // The many small actions live in three drop-down menus so the footer stays one row tall.
+    const groups = [
+        ["Metadata", ["video-batch-edit", "video-batch-ratings", "video-batch-art", "video-batch-cleanfanart", "video-batch-playerart", "video-batch-nfo", "video-batch-rename"]],
+        ["Media", ["video-batch-subs", "video-batch-origlang", "video-batch-trailers", "video-batch-thumbs", "video-batch-themes", "video-batch-split", "video-batch-integrity"]],
+        ["Organize", ["video-batch-lock", "video-batch-processed", "video-batch-move"]],
+    ];
+    const grouped = new Set(groups.flatMap(([, actions]) => actions));
+    const item = ([action, label, , kind]) => `<button type="button" class="group-item" data-action="${action}"${kind ? ` data-kind="${escapeHtml(kind)}"` : ""}>${escapeHtml(label)}</button>`;
+    const menus = groups.map(([name, actions]) => {
+        const rows = facts.buttons.filter((row) => actions.includes(row[0]));
+        if (!rows.length) return "";
+        return `<div class="scan-group rescan-split batch-group">
+            <button type="button" class="btn-ghost group-btn" data-action="video-rescan-menu" aria-expanded="false">${name} ▾</button>
+            <div class="scan-menu hidden">${rows.map(item).join("")}</div>
+        </div>`;
+    }).join("");
+    const lead = facts.buttons.filter((row) => primary.has(row[0]) && !/delete/.test(row[0]));
+    const tail = facts.buttons.filter((row) => primary.has(row[0]) && /delete/.test(row[0]));
+    const rest = facts.buttons.filter((row) => !primary.has(row[0]) && !grouped.has(row[0]));
+    document.getElementById("video-select-actions").innerHTML = `<div class="select-row select-row-main">${html(lead)}${menus}${html(rest)}${html(tail)}</div>`;
+    if (typeof fitSelectBars === "function") fitSelectBars();
 }
 
 function selectionRescanSplit(count) {
@@ -1101,6 +1315,7 @@ function coverActions(kind, item) {
             ${scrapeCoverButtons(kind, item)}
             <button type="button" data-action="video-move" data-kind="${kind}" data-id="${id}">Move…</button>
             <button type="button" data-action="video-match" data-kind="${kind}" data-id="${id}" ${item.locked ? "disabled" : ""}>Fix Match</button>
+            ${item.match_undo ? `<button type="button" class="btn-ghost" data-action="video-match-undo" data-kind="${kind}" data-id="${id}" title="Put back the metadata, ${kind === "show" ? "seasons, episodes, " : ""}artwork and .nfo files from before the Fix Match of ${escapeHtml(String(item.match_undo.taken_at || "").slice(0, 10))}">Undo Fix Match</button>` : ""}
             <button type="button" data-action="video-art-fetch" data-kind="${kind}" data-id="${id}">Download missing artwork</button>
         </div>`;
     }
@@ -1152,7 +1367,8 @@ function renderMovieInfo(movie) {
         <div class="vchips vchips-art">${artMarks(movie.artwork, INFO_ART.movie)}${nfoChip("movie.nfo", movie.nfo_path, "movie", movie.id, movie.nfo_stale)}</div>
         <div class="vchips vchips-media">${fileChips(file ? { ...file, audio_main: briefAudio(file) } : null)}${videoStatus(movie, true)}</div>
         ${isWanted(movie) ? `<p class="muted">Waiting for the file.</p>` : ""}
-        ${videoItemActions("movie", movie)}`;
+        ${videoItemActions("movie", movie)}
+        ${providerIdsRow(movie)}`;
     const facts = factRows([
         ["Set", set, true],
         ["Director", clickableFilterLinks(movie.directors), true],
@@ -1170,7 +1386,7 @@ function renderMovieInfo(movie) {
     const disc = movie.disc_format ? `<p class="muted">${escapeHtml(movie.disc_format)} is a disc image folder, so there is no single video file to probe. CD1 and CD2 files are probed.</p>` : "";
     document.getElementById("video-center").innerHTML = `<article class="vinfo">
         ${videoHero(art, art.poster, body, { kind: "movie", id: movie.id }, coverActions("movie", movie), { actions: videoHeroActions("movie", movie), badges: posterFileBadges(file) })}
-        <section class="vsection">${filePathBlock(shownPath(movie, "file"))}${mediaFlagSection(movie)}${facts}</section>
+        <section class="vsection">${filePathBlock((movie.display_parts || []).length > 1 ? movie.display_parts : shownPath(movie, "file"))}${mediaFlagSection(movie)}${facts}</section>
         ${trailerSection(movie, { kind: "movie", id: movie.id })}
         <section class="vsection">${castHtml(movie.actors)}</section>
         ${isWanted(movie) ? "" : mediaInfoHtml(file, { kind: "movie", id: movie.id })}
@@ -1268,7 +1484,7 @@ function closeRescanMenus() {
         menu.style.visibility = "";
         if (menu._rescanHome && menu.parentElement !== menu._rescanHome) menu._rescanHome.appendChild(menu);
     });
-    document.querySelectorAll(".rescan-split .scan-caret").forEach((button) => button.setAttribute("aria-expanded", "false"));
+    document.querySelectorAll(".rescan-split .scan-caret, .rescan-split .group-btn").forEach((button) => button.setAttribute("aria-expanded", "false"));
 }
 
 function toggleRescanMenu(action) {

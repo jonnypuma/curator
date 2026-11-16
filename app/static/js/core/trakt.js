@@ -18,6 +18,106 @@ function traktSyncSection() {
     </section>`;
 }
 
+function playerSyncSection() {
+    const cfg = videoCfg();
+    const chosen = new Set(cfg.watch_sync_players || []);
+    const box = (name, label) => `<label class="choice"><input type="checkbox" data-watch-player="${name}" ${chosen.has(name) ? "checked" : ""}> ${label}</label>`;
+    setTimeout(() => pollPlayerSync(), 0);   // fills the ready players and the last run once the section is on screen
+    return `<section class="settings-section" data-tab="sync">
+        <h3>Player watched sync</h3>
+        <p class="muted">Copies play counts, last-played times and resume points between the library and Kodi, Jellyfin, Emby and Plex. Items are matched by file path through each player's path rows under Integrations. The higher play count and the later time win, so nothing is marked unwatched. A resume point one side lacks is copied over. Plex can only be marked watched (it has no play count to set) and given a resume point. Changed movies and episodes get their .nfo rewritten unless they are locked. Spreading unwatching needs the last sync to compare with: Curator remembers what both sides agreed on, and a count that fell on one side while the other stayed put is an unwatch. If both sides changed, the higher count still wins.</p>
+        <div class="choice-row">${box("kodi", "Kodi")}${box("jellyfin", "Jellyfin")}${box("emby", "Emby")}${box("plex", "Plex")}</div>
+        <label class="field">Direction ${videoSelect("watch-sync-mode", cfg.watch_sync_mode || "both", [["both", "Both ways"], ["pull", "Players to Curator only"], ["push", "Curator to players only"]])}</label>
+        <label class="field">Sync every <input id="watch-sync-hours" type="number" min="0" max="168" value="${Number(cfg.watch_sync_hours) || 0}"> hours (0 = only when you press Sync now)</label>
+        <label class="field">Jellyfin users <input id="watch-sync-user-jellyfin" type="text" value="${escapeHtml(cfg.watch_sync_user_jellyfin || "")}" placeholder="First administrator"></label>
+        <label class="field">Emby users <input id="watch-sync-user-emby" type="text" value="${escapeHtml(cfg.watch_sync_user_emby || "")}" placeholder="First administrator"></label>
+        <p class="muted">Name one user, several with a comma between, or * for everyone. Several users share one watched state, like a household: what one of them watched counts for all.</p>
+        ${videoCheck("watch-sync-music", !!cfg.watch_sync_music, "Include music play counts (Kodi, Jellyfin, Emby and Plex; not Navidrome)")}
+        ${videoCheck("watch-sync-unwatch", !!cfg.watch_sync_unwatch, "Spread unwatching: marking something unwatched in a player or in Curator reaches the other side (Kodi, Jellyfin, Emby and Plex)")}
+        ${videoCheck("kodi-keep-watched", cfg.kodi_keep_watched !== false, "Put the watched state back after Curator refreshes an item in Kodi")}
+        <p><button type="button" data-action="trakt-players-sync">Sync now</button> <button type="button" class="btn-ghost" data-action="trakt-players-test">Test players</button></p>
+        <div id="player-test-box"></div>
+        <div id="player-sync-box"></div>
+    </section>`;
+}
+
+function collectionsSection() {
+    const cfg = videoCfg();
+    const chosen = new Set(cfg.collections_players || []);
+    const box = (name, label) => `<label class="choice"><input type="checkbox" data-collection-player="${name}" ${chosen.has(name) ? "checked" : ""}> ${label}</label>`;
+    return `<section class="settings-section" data-tab="sync">
+        <h3>Collections in Jellyfin, Emby and Plex</h3>
+        <p class="muted">Kodi reads movie sets from the .nfo files. These players get collections pushed: each movie set with two or more movies, and each saved movie or TV filter that has a tag (the tag is the collection name). Items are matched by file path through each player's path rows. Curator keeps the members of the collections it made, or took over by name, in step with the library; other collections are left alone.</p>
+        <div class="choice-row">${box("jellyfin", "Jellyfin")}${box("emby", "Emby")}${box("plex", "Plex")}</div>
+        ${videoCheck("collections-sets", cfg.collections_sets !== false, "Movie sets")}
+        ${videoCheck("collections-tags", cfg.collections_tags !== false, "Saved filters with a tag")}
+        ${videoCheck("collections-after-scan", !!cfg.collections_after_scan, "Push after every movie or TV scan")}
+        <p><button type="button" data-action="trakt-collections-push">Push now</button></p>
+        <div id="collections-box"></div>
+    </section>`;
+}
+
+async function pushCollections() {
+    state.collectionsPush = await api("/api/v1/trakt/collections", { method: "POST", body: {} });
+    pollCollections();
+}
+
+async function pollCollections() {
+    clearTimeout(state.collectionsTimer);
+    const data = await api("/api/v1/trakt/collections");
+    const host = document.getElementById("collections-box");
+    if (host) host.innerHTML = `<p class="muted">${escapeHtml(data.message || "")}</p>${data.log ? `<pre class="log-box">${escapeHtml(data.log)}</pre>` : ""}`;
+    if (data.status === "running") state.collectionsTimer = setTimeout(() => pollCollections().catch(() => {}), 1500);
+    else if (data.status !== "idle") notify(data.message || "Collections pushed.", data.status === "failed" ? "error" : "info");
+}
+
+async function testPlayers() {
+    const host = document.getElementById("player-test-box");
+    if (host) host.innerHTML = `<p class="muted">Reading each player…</p>`;
+    const data = await api("/api/v1/trakt/players/test");
+    if (host) host.innerHTML = connectionLines(data.results, "player");
+}
+
+// One line per app from a connection test: worked, failed, or not set up.
+function connectionLines(results, nameKey) {
+    return (results || []).map((row) => {
+        const tone = row.ok === true ? "is-done" : row.ok === false ? "is-failed" : "";
+        return `<p class="scan-status ${tone}">${row.ok === true ? "✓ " : row.ok === false ? "✕ " : ""}${escapeHtml(nameKey === "app" ? `${row.app}: ` : "")}${escapeHtml(row.message || "")}</p>`;
+    }).join("");
+}
+
+async function startPlayerSync() {
+    const mode = (document.getElementById("watch-sync-mode") || {}).value || "both";
+    state.playerSync = await api("/api/v1/trakt/players/sync", { method: "POST", body: { mode } });
+    state.playerSyncWasRunning = true;
+    paintPlayerSync();
+    pollPlayerSync();
+}
+
+async function pollPlayerSync() {
+    clearTimeout(state.playerSyncTimer);
+    try {
+        state.playerSync = await api("/api/v1/trakt/players/sync");
+    } catch (error) {
+        return;
+    }
+    paintPlayerSync();
+    if (state.playerSync.status === "running") {
+        state.playerSyncTimer = setTimeout(pollPlayerSync, 1500);
+    } else if (state.playerSyncWasRunning) {
+        state.playerSyncWasRunning = false;
+        notify(state.playerSync.message || "Player sync finished.", state.playerSync.status === "failed" ? "error" : "info");
+    }
+}
+
+function paintPlayerSync() {
+    const host = document.getElementById("player-sync-box");
+    const data = state.playerSync;
+    if (!host || !data) return;
+    const ready = (data.ready || []).join(", ") || "none";
+    host.innerHTML = `<p class="muted">Ready players: ${escapeHtml(ready)}. ${escapeHtml(data.message || "")}</p>${data.log ? `<pre class="log-box">${escapeHtml(data.log)}</pre>` : ""}`;
+}
+
 async function startTraktSync() {
     const mode = (document.getElementById("trakt-sync-mode") || {}).value || "both";
     state.traktSync = await api("/api/v1/trakt/sync", { method: "POST", body: { mode } });
@@ -82,7 +182,7 @@ function paintTrakt() {
                <button type="button" class="btn-ghost" data-action="trakt-disconnect">Disconnect</button>
            </p>
            <p class="muted">${data.last_sync ? `Last watched sync: ${escapeHtml(new Date(data.last_sync * 1000).toLocaleString())}.` : "Watched state has not been synced yet."}</p>`
-        : `<p class="scan-status">Not connected.</p>
+        : `<p class="scan-status${data.needs_reconnect ? " is-error" : ""}">${data.needs_reconnect ? "Trakt sign-in expired. Connect again to resume syncing." : "Not connected."}</p>
            <p class="trakt-actions">
                <button type="button" data-action="trakt-connect" ${data.client_id ? "" : "disabled"}>Connect with Trakt</button>
            </p>`;

@@ -1,13 +1,13 @@
-const VIDEO_SOURCE_LABELS = { tmdb: "TMDB", tvdb: "TheTVDB", tvmaze: "TVMaze", omdb: "OMDb", rottentomatoes: "Rotten Tomatoes", metacritic: "Metacritic", trakt: "Trakt", anilist: "AniList", ofdb: "OFDb", fanart: "Fanart.tv" };
+const VIDEO_SOURCE_LABELS = { tmdb: "TMDB", tvdb: "TheTVDB", tvmaze: "TVMaze", omdb: "OMDb", rottentomatoes: "Rotten Tomatoes", metacritic: "Metacritic", trakt: "Trakt", anilist: "AniList", ofdb: "OFDb", ofdbcc: "Open Film Database", fanart: "Fanart.tv" };
 const VIDEO_ART_LABELS = {
     poster: "Poster", fanart: "Fanart", clearlogo: "Clear logo", clearart: "Clear art", banner: "Banner",
-    extrafanart: "Extra fanart (extrafanart/)", extrathumbs: "Extra thumbs (extrathumbs/)",
+    extrafanart: "Extra fanart (extrafanart/)", extrathumbs: "Extra thumbs (extrathumbs/) · legacy, few players read them",
     landscape: "Landscape", discart: "Disc art", keyart: "Key art (textless poster)", characterart: "Character art",
     squareart: "Square art",
 };
 const VIDEO_ALL_SOURCES = {
-    movie_sources: ["tmdb", "tvdb", "omdb", "rottentomatoes", "metacritic", "trakt", "anilist", "ofdb", "fanart"],
-    tv_sources: ["tmdb", "tvdb", "tvmaze", "omdb", "rottentomatoes", "metacritic", "trakt", "anilist", "ofdb", "fanart"],
+    movie_sources: ["tmdb", "tvdb", "omdb", "rottentomatoes", "metacritic", "trakt", "anilist", "ofdb", "fanart", "ofdbcc"],
+    tv_sources: ["tmdb", "tvdb", "tvmaze", "omdb", "rottentomatoes", "metacritic", "trakt", "anilist", "ofdb", "fanart", "ofdbcc"],
     art_sources: ["fanart", "tmdb", "tvdb"],
     tv_art_sources: ["fanart", "tmdb", "tvdb", "tvmaze"],
 };
@@ -43,6 +43,7 @@ function videoKeyFields() {
             ${videoKeyField("omdb_key", "omdb-key", "OMDb API key", "OMDB_API_KEY", "Adds IMDb, Rotten Tomatoes and Metacritic ratings and English movie details (plot, cast, crew, genres, runtime). A free key allows 1,000 lookups a day. Curator stops asking for the rest of that day once OMDb says the quota is used up.")}
             <label class="choice"><input type="checkbox" id="omdb-patron" ${videoCfg().omdb_patron ? "checked" : ""}> OMDb Patron</label>
             <p class="muted">Turn this on when this key is an OMDb Patron key. Curator then keeps asking after 1,000 lookups in a day.</p>
+            ${imdbPointer()}
             ${openSubtitlesFields()}
             ${videoKeyField("crawlbase_token", "crawlbase-token", "Crawlbase JS token", "CRAWLBASE_TOKEN", "Optional. Rotten Tomatoes and Metacritic draw their scores in the browser. When a title page has no scores in the HTML, this token loads the rendered page. Leave it empty to use the search feed and any scores already in the page.")}`;
 }
@@ -87,7 +88,8 @@ function metaFieldChecks(level, storageKey) {
 function videoChain(key) {
     const cfg = videoCfg();
     const saved = Object.prototype.hasOwnProperty.call(cfg, key) ? cfg[key] : (key === "tv_art_sources" ? cfg.art_sources : null);
-    const chosen = Array.isArray(saved) ? saved : (VIDEO_ALL_SOURCES[key] || []);
+    // With nothing saved, everything is on except OFDb (ofdb.de), which is mostly German information.
+    const chosen = Array.isArray(saved) ? saved : (VIDEO_ALL_SOURCES[key] || []).filter((name) => name !== "ofdb");
     const all = chosen.concat(VIDEO_ALL_SOURCES[key].filter((name) => !chosen.includes(name)));
     const rows = all.map((name) => `<div class="priority-item${chosen.includes(name) ? "" : " is-off"}" draggable="true" data-source="${escapeHtml(name)}">
         ${priorityGrip()}
@@ -177,6 +179,23 @@ const ART_LANGS = [
     ["he", "Hebrew"], ["ar", "Arabic"], ["th", "Thai"], ["hi", "Hindi"], ["none", "Textless"],
 ];
 
+function originalLanguageFields(cfg) {
+    const saved = Array.isArray(cfg.sub_pref_langs) ? cfg.sub_pref_langs : [];
+    const options = [["", "None"], ...TRACK_LANGUAGES];
+    const picks = [0, 1, 2, 3, 4].map((index) => {
+        const current = saved[index] || "";
+        return `<label class="field">${index + 1}. ${videoSelect(`video-sub-pref-${index}`, current, withCurrentOption(options, current))}</label>`;
+    }).join("");
+    return `<h3>Original language</h3>
+            <p class="muted">Enable automatic switch of default language to original language</p>
+            ${videoCheck("video-orig-lang-movies", !!cfg.orig_lang_movies, "Movies")}
+            ${videoCheck("video-orig-lang-tv", !!cfg.orig_lang_tv, "TV show episodes")}
+            <p class="muted">A dual-language release often plays the dubbed track first. When this is on, the default audio of an MKV is switched to the original language after a Radarr or Sonarr import and after a library scan finds a new or changed file. The original language from the scrape is used first. When it is unknown, a release name such as German.DL, DL.French or Italian.DUBBED marks the dubbed language and the one other audio language is used. MULTI or DUAL alone is not enough. A commentary track is never chosen. Only MKV files are changed (mkvpropedit sets the flag in place, nothing is remuxed). A file whose default tracks were set by hand in Curator is left alone until the file is replaced. Switch to original language on the right-click menu does the same for any item, shows the changes first, and also redoes hand-set files.</p>
+            <h4>Preferred subtitle languages</h4>
+            ${picks}
+            <p class="muted">After the audio is switched, the first language in this list with a full (or SDH) subtitle in the file becomes the default subtitle. When the audio is itself in one of these languages, only a forced subtitle in that language is chosen, so the film does not get full subtitles. When nothing matches, no subtitle is the default. Until you save, the list starts from the OpenSubtitles subtitle languages. Music has no language tracks, so there is no music switch.</p>`;
+}
+
 function withCurrentOption(options, current) {
     if (!current || options.some(([key]) => key === current)) return options;
     return [[current, current], ...options];
@@ -196,6 +215,8 @@ function artLanguageFields(cfg) {
     }).join("");
 }
 
+const MEDIAINFO_NOTE = "Curator keeps a small file named like the video, ending in .cmm_mediainfo.xml, with what the probe found, so a moved or renamed folder is not probed again. Turning this off stops new files from being written. Files already there stay and are still read. Movies and TV have their own box; CMM_WRITE_SIDECARS sets both until you save here.";
+
 function videoCheck(id, value, label) {
     return `<label class="choice"><input type="checkbox" id="${id}" ${value ? "checked" : ""}> ${escapeHtml(label)}</label>`;
 }
@@ -205,6 +226,20 @@ function sortTheControl(example) {
     return `<h3>Library</h3>
         <label class="choice"><input type="checkbox" data-sort-ignore-the ${on ? "checked" : ""}> Ignore a leading The, A, or An when sorting the library</label>
         <p class="muted">${escapeHtml(example)} Turn this off to list that name under T. The same choice is on the Music tab and applies to every library.</p>`;
+}
+
+// The last step of a scan: refresh items whose metadata, artwork or ratings changed, on every player.
+function scanRefreshControls(kind) {
+    const cfg = videoCfg();
+    const suffix = kind === "tv" ? "tv" : "movies";
+    const noun = kind === "tv" ? "shows and episodes" : "movies";
+    const box = (name, label) => `<label class="choice"><input type="checkbox" data-video-scan-refresh="${name}" ${cfg[`scan_refresh_${name}_${suffix}`] ? "checked" : ""}> ${label}</label>`;
+    return `${box("metadata", "Update client libraries for items with updated metadata")}
+        ${box("artwork", "Update client libraries for items with updated artwork")}
+        ${box("ratings", "Update client libraries for items with updated ratings")}
+        <label class="choice"><input type="checkbox" data-video-scan-refresh-dry ${cfg[`scan_refresh_dry_${suffix}`] ? "checked" : ""}> Dry run: only log what would be refreshed</label>
+        <p class="muted">With Dry run on, the scan log says "would refresh N items" and names them, and nothing is sent to the players. With no box above ticked, it reports metadata, artwork and ratings changes.</p>
+        <p class="muted">The last step of any scan (incremental, full or deep) refreshes the ${noun} whose stored metadata, artwork or ratings changed during the scan, whichever boxes are ticked. That includes a missing value filled in, a value replaced because overwrite is on, and ${noun} the scan added. A folder scan alone does not make a player read an item it already has again, so Kodi and Plex refresh each item (Kodi reads the .nfo again; the .nfo keeps play count and date added), and Emby and Jellyfin mark the item folders as changed. An item a player does not have yet gets a scan of its folder. Path rows under Integrations are needed for every player. The refresh runs in the library update queue. A webhook import sends its own library update.</p>`;
 }
 
 function scanFillControl(kind) {
@@ -217,7 +252,7 @@ function scanFillControl(kind) {
         ? "During the metadata and artwork lookup, a TV scan downloads a YouTube trailer for a show or a season that does not have one on disk yet. A trailer already there is kept, unless it is below the quality set under Files and YouTube has a taller copy. Several trailers download at once. An incremental deep scan does this for shows that are new or changed. A full or deep scan does it for every show or season that already has a trailer link. When the lookup is off, the trailer step runs on its own."
         : "During the metadata and artwork lookup, a movie scan downloads a YouTube trailer for a movie that does not have one on disk yet. A trailer already there is kept, unless it is below the quality set under Files and YouTube has a taller copy. Several trailers download at once. An incremental deep scan does this for movies that are new or changed. A full or deep scan does it for every movie that already has a trailer link. When the lookup is off, the trailer step runs on its own.";
     const subs = kind === "tv" ? !!cfg.subs_download_tv : !!cfg.subs_download_movies;
-    const subsNote = `After the lookup, a ${kind === "tv" ? "TV" : "movie"} scan searches OpenSubtitles.com for each language in the list under API keys, for every ${kind === "tv" ? "episode" : "movie"} that has no subtitle in that language, embedded or beside the file. The best match is saved next to the video as a .srt: a subtitle made for this exact file first, then trusted uploaders, then the most downloaded. Forced subtitles do not count as having one. An incremental scan does this for ${kind === "tv" ? "shows" : "movies"} that are new or changed; a full or deep scan checks every one. The account's daily download quota applies, and the scan stops asking when it is used up. Needs the API key, username and password under API keys.`;
+    const subsNote = `After the lookup, a ${kind === "tv" ? "TV" : "movie"} scan searches OpenSubtitles.com for each language in the list under API keys, for every ${kind === "tv" ? "episode" : "movie"} that has no subtitle in that language, embedded or beside the file. The best match is saved next to the video as a .srt: a subtitle made for this exact file first, then trusted uploaders, then the most downloaded. Forced subtitles do not count as having one. An incremental scan does this only for the ${kind === "tv" ? "episodes" : "movies"} that are new or changed; a full or deep scan checks every one. The account's daily download quota applies, and the scan stops asking when it is used up. Needs the API key, username and password under API keys.`;
     const themeNote = kind === "tv"
         ? "During the metadata and artwork lookup, a TV scan downloads a local theme.mp3 into the show folder for any show that does not have one on disk yet. An existing theme song is kept. An incremental scan does this for shows that are new or changed; a full or deep scan checks every show in the scanned folders. When the lookup is off, the theme song step runs on its own."
         : "During the metadata and artwork lookup, a movie scan downloads a local theme.mp3 into the movie folder for any movie that does not have one on disk yet. An existing theme song is kept. An incremental scan does this for movies that are new or changed; a full or deep scan checks every movie in the scanned folders. When the lookup is off, the theme song step runs on its own.";
@@ -232,10 +267,29 @@ function scanFillControl(kind) {
         <p class="muted">${subsNote}</p>
         <label class="choice"><input type="checkbox" data-video-scan-themes ${themes ? "checked" : ""}> Download theme songs (theme.mp3) during a scan</label>
         <p class="muted">${themeNote}</p>
+        ${scanCleanArtControl(kind, cfg)}
         ${kind === "movies" ? `<label class="choice"><input type="checkbox" data-video-scan-iso ${cfg.scan_iso ? "checked" : ""}> Scan .iso files</label>
         <p class="muted">On by default. A movie scan opens each .iso with ffprobe and MediaInfo and reads the real video, audio, and subtitle streams. Turn this off to read only the disc file name. A Blu-ray or UHD disc is tens of gigabytes, and reading it seeks through the whole image, so a scan takes longer while this is on. A TV scan always reads the disc file name.</p>` : ""}
+        ${scanRefreshControls(kind)}
         <label class="choice"><input type="checkbox" data-video-scan-rewrite-nfo ${cfg.scan_rewrite_nfo ? "checked" : ""}> Rewrite .nfo files at the end of a scan</label>
-        <p class="muted">The last stage of a scan always writes an .nfo that is missing, from what the library already holds. When this is on, that stage also replaces every .nfo in the scanned folders. A .nfo.bak is kept when that backup option is on. A webhook scan only covers the folders it was given. The same choice is on the Movies and TV tabs.</p>`;
+        <p class="muted">The last stage of a scan always writes an .nfo that is missing, from what the library already holds. When this is on, a full or deep scan also rewrites every .nfo in the scanned folders; an incremental scan and a webhook import still write only the missing ones. A file that already holds the same text is left alone and not counted. A .nfo.bak is kept when that backup option is on and a file really changes. The same choice is on the Movies and TV tabs.</p>`;
+}
+
+// Clean artwork as a scan stage: after the artwork lookup, before the .nfo files.
+function scanCleanArtControl(kind, cfg) {
+    const suffix = kind === "tv" ? "tv" : "movies";
+    const on = !!cfg[`scan_clean_art_${suffix}`];
+    const types = Array.isArray(cfg[`scan_clean_art_types_${suffix}`]) ? cfg[`scan_clean_art_types_${suffix}`] : ["fanart"];
+    const options = kind === "tv"
+        ? [["fanart", "Fanart"], ["characterart", "Character art"], ["extrafanart", "Extra fanart"]]
+        : [["fanart", "Fanart"], ["extrafanart", "Extra fanart"]];
+    const boxes = options.map(([key, label]) => `<label class="choice"><input type="checkbox" data-video-scan-clean-type="${key}" ${types.includes(key) ? "checked" : ""}> ${label}</label>`).join("");
+    const shape = cfg[`scan_fix_art_shape_${suffix}`] !== false;
+    return `<label class="choice"><input type="checkbox" data-video-scan-fix-shape ${shape ? "checked" : ""}> Replace artwork with the wrong shape during a scan</label>
+        <p class="muted">A ${kind === "tv" ? "show" : "movie"} whose poster, fanart, banner or other picture has the wrong shape for its type (a fanart saved as the poster) gets the picture the artwork window suggests for that type.${kind === "tv" ? " Season artwork and episode thumbs are checked too." : ""} The sizes come from the database (a file is opened only once, when its size is not known yet); only ${kind === "tv" ? "a show" : "a movie"} with a wrong shape is looked up online. Pictures you uploaded or kept stay.</p>
+        <label class="choice"><input type="checkbox" data-video-scan-clean-art ${on ? "checked" : ""}> Clean artwork during a scan</label>
+        <div class="art-type-boxes scan-clean-types">${boxes}</div>
+        <p class="muted">A stage after the metadata and artwork lookup and before the .nfo files: the ticked types get Clean artwork, as in the Metadata menu with "Only pictures with a title or logo on them" (extra fanart: repeats out, pictures with text swapped). An incremental scan does the ${kind === "tv" ? "shows" : "movies"} it added or read again; a full or deep scan does every one in the scanned folders, which asks TMDB and Fanart.tv for each, at their usual pace. ${kind === "tv" ? "A show" : "A movie"} whose fanart was already picked or cleaned is skipped unless Extra fanart is ticked. Kodi and the other players get the new pictures through "Update client libraries for items with updated artwork" below. Taken-out files go to the recycle bin.</p>`;
 }
 
 function extraFanartCount() {
@@ -276,8 +330,8 @@ function videoSettingsHtml() {
             ${videoCheck("video-ui-movie-processed", cfg.ui_movie_processed !== false, "Show processed/unprocessed checkmark")}
             ${videoCheck("video-ui-movie-poster-badges", cfg.ui_movie_poster_badges !== false, "Show resolution, HDR and audio badges on the poster")}
             ${videoCheck("video-ui-movie-art-badges", cfg.ui_movie_art_badges !== false, "Show resolution and aspect ratio badges on artwork")}
-            <label class="choice"><input type="checkbox" data-video-collapse ${cfg.collapse_versions ? "checked" : ""}> Collapse versions of the same movie into one row</label>
-            <p class="muted">Movies that share a TMDB id, an IMDb id, or the same title and year sit on one row. The row shows the highest-resolution copy. Expand it to see the other versions.</p>
+            <label class="choice"><input type="checkbox" data-video-collapse ${cfg.collapse_versions ? "checked" : ""}> Collapse versions of the same movie or episode into one row</label>
+            <p class="muted">Movies that share a TMDB id, an IMDb id, or the same title and year sit on one row. The row shows the highest-resolution copy. Expand it to see the other versions. Episodes with a second video file work the same way: the extra file sits under the episode, or on its own row when this is off.</p>
             ${scanFillControl("movies")}
             <h3>Movie scrapers</h3>
             <p class="muted">Sources are asked in parallel. For each field the first source in this order that has a value wins; ratings and ids from every source are kept. Drag a row to change the order. TMDB is required for movies.</p>
@@ -292,6 +346,8 @@ function videoSettingsHtml() {
             <h3>Artwork languages</h3>
             <p class="muted">Artwork is tried in this order. Primary is English unless you pick another. The three rows under it are optional. Textless is an image with no title on it. The same order is used for movies and TV.</p>
             ${artLanguageFields(cfg)}
+            ${videoCheck("video-fanart-textless", cfg.fanart_textless !== false, "Prefer clean fanart and character art (no title or logo on the picture)")}
+            <p class="muted">Fanart and character art without text come first, whatever the order above; a picture with text is used only when no clean one is found. Posters, landscape, banners and the rest keep the order above, so landscape art still gets its title.</p>
             <label class="field">Default rating ${videoSelect("video-default-rating", cfg.default_rating || "themoviedb", [["themoviedb", "TMDB"], ["imdb", "IMDb"], ["trakt", "Trakt"], ["tvdb", "TheTVDB"], ["tomatometerallcritics", "Rotten Tomatoes"], ["tomatometeravguseraudience", "RT audience"], ["metacritic", "Metacritic"], ["metacriticuser", "Metacritic user"], ["anilist", "AniList"], ["ofdb", "OFDb"]])}</label>
             <h3>Artwork sources</h3>
             <p class="muted">Images are taken from the first source in this order that has one. Drag a row to change the order. An unchecked source is not asked, and it drops to the bottom. Movies and sets use this list. TV has its own list on the TV tab.</p>
@@ -306,6 +362,8 @@ function videoSettingsHtml() {
             <label class="field">Movie .nfo name ${videoSelect("video-nfo-name", cfg.movie_nfo_name || "filename", [["filename", "<video name>.nfo"], ["movie", "movie.nfo in the movie folder"]])}</label>
             ${videoCheck("video-write-nfo", cfg.write_nfo !== false, "Write .nfo files after a scrape")}
             ${videoCheck("video-download-art", cfg.download_artwork !== false, "Download artwork next to the files")}
+            ${videoCheck("video-write-mediainfo-movies", cfg.write_mediainfo_movies !== false, "Write a .cmm_mediainfo.xml media info file beside each movie")}
+            <p class="muted">${MEDIAINFO_NOTE}</p>
             ${videoCheck("video-nfo-backup", cfg.nfo_backup !== false, "Keep a .nfo.bak when a rewrite replaces a file")}
             ${videoCheck("video-write-on-edit", cfg.write_on_edit !== false, "Rewrite the .nfo after an inline edit")}
             ${videoCheck("video-actor-thumbs", cfg.actor_thumbs !== false, "Include actor photo links")}
@@ -386,6 +444,9 @@ function videoSettingsHtml() {
             <label class="field">Shortest part (seconds) <input id="video-split-min-part" type="number" min="1" max="600" step="1" value="${splitNum(cfg.split_min_part, 30)}"></label>
             ${videoCheck("video-scan-split-notify", cfg.scan_split_notify === true, "After splitting, send library update to the players (also removes any old entry from Kodi when its file is gone)")}
             ${policyFields("tv", "Shows, seasons, and episodes use these. A scan fills the checked fields and images that are empty. Turn a box on to replace those existing values. An image is replaced only when the new one is larger. The .nfo dialect and the other writing options stay on the Movies tab.")}
+            <h3>Media info files</h3>
+            ${videoCheck("video-write-mediainfo-tv", cfg.write_mediainfo_tv !== false, "Write a .cmm_mediainfo.xml media info file beside each episode")}
+            <p class="muted">${MEDIAINFO_NOTE}</p>
             <h3>On Sonarr import</h3>
             ${videoCheck("video-trailer-sonarr", !!cfg.trailer_on_sonarr_season, "Download the season trailers")}
             <p class="muted">After a Sonarr import has been scanned and scraped, a trailer is downloaded for each season that received episodes, when the scraper has saved a YouTube link for it. A season that already has a trailer is only fetched again when the file is below the quality set under General and YouTube has a taller copy.</p>
@@ -446,6 +507,7 @@ function videoFilesSettingsHtml(cfg) {
             ${videoCheck("video-sub-purge", !!cfg.sub_purge_duplicates, "Remove duplicate subtitles")}
             <p class="muted">A sidecar whose text is the same as another sidecar of the video, or as a subtitle track inside the video, is deleted (compared by SHA-256, ignoring encoding and line endings). The best-named copy is kept. Checking the tracks inside a video reads the whole file. When this is off, duplicates are only listed in the log. Default from CMM_PURGE_DUPLICATE_SUBS.</p>
             <p class="muted">Subtitles without a recognisable language keep their name. When the new name is taken, the file is left alone and the log says so.</p>
+            ${originalLanguageFields(cfg)}
             <h3>Subtitle sync</h3>
             ${videoCheck("video-subs-sync-after", cfg.subs_sync_after === true, "Sync a downloaded subtitle with the audio when it was not made for this exact file")}
             <p class="muted">Applies to subtitles from OpenSubtitles.com, from Find subtitles and from a scan. A subtitle matched by file hash is left as it is. Otherwise Curator runs the automatic sync (alass, fine-tune) and shifts the subtitle, unless the change it proposes is large, which is more often alass being fooled than a real error. A manual download syncs in the background and shows in the Jobs list.</p>
@@ -464,8 +526,28 @@ function videoFilesSettingsHtml(cfg) {
             <p class="muted">Theme songs are saved as <code>theme.mp3</code> in the movie or show folder for Kodi, Plex, Emby, and Jellyfin. You can also download or play theme songs from the movie or show detail page and right-click menu.</p>
             <h3>Export</h3>
             <label class="field">Export format ${videoSelect("video-export-format", cfg.export_format || "csv", [["csv", "CSV (spreadsheets)"], ["xml", "XML"]])}</label>
+            <h3>Integrity checks</h3>
+            ${videoCheck("video-integrity-import", !!cfg.integrity_on_import, "Quick integrity check after a Radarr or Sonarr import")}
+            ${videoCheck("video-integrity-research", !!cfg.integrity_research, "Ask the app to search again when an import is corrupt")}
+            <label class="field">Full integrity check per day <input id="video-integrity-pass" type="number" min="0" max="500" value="${Number(cfg.integrity_pass_files) || 0}"> files (0 = off)</label>
+            <p class="muted">A corrupt file gets the red Corrupt pill and a notification (event "An integrity check found a corrupt video file", under Notifications). A search again does not delete the file: Radarr or Sonarr only replace it when the quality profile allows the new release. The daily pass decodes the files checked longest ago, one at a time, and stops when a scan or job starts. A full check of a 4K movie uses a lot of CPU for several minutes.</p>
+            <h3>Upgrade wishlist</h3>
+            <label class="field">Movies at least ${videoSelect("video-wish-movie", cfg.wish_movie_resolution || "", [["", "Off"], ["720p", "720p"], ["1080p", "1080p"], ["4K", "4K"]])}</label>
+            ${videoCheck("video-wish-movie-hdr", !!cfg.wish_movie_hdr, "Movies must have HDR")}
+            <label class="field">TV at least ${videoSelect("video-wish-tv", cfg.wish_tv_resolution || "", [["", "Off"], ["720p", "720p"], ["1080p", "1080p"], ["4K", "4K"]])}</label>
+            ${videoCheck("video-wish-tv-hdr", !!cfg.wish_tv_hdr, "TV must have HDR")}
+            <label class="field">Music at least ${videoSelect("video-wish-music", cfg.wish_music || "", [["", "Off"], ["lossless", "Lossless"], ["hires", "24-bit lossless"]])}</label>
+            <p class="muted">Upgrade wishlist in Library analytics lists what falls short and can ask the apps to search for it.</p>
+            <h3>Kodi smart playlists</h3>
+            <label class="field">Playlist folder <input id="video-kodi-playlist-dir" type="text" value="${escapeHtml(cfg.kodi_playlist_dir || "")}" placeholder="config/playlists/video"></label>
+            <p class="muted">A saved movie or TV filter with Kodi smart playlist ticked is written here as "Curator - name.xsp", listing the file names that match the filter. It is rewritten after every movie or TV scan and when a saved filter is saved or removed. Point Kodi's playlist folder (userdata/playlists/video) at this folder, or copy the files there. Only files that start with "Curator - " are ever removed from it.</p>
             <p class="muted">Export in the toolbar saves what the shown list holds right now: the filter and ribbons apply, and so does the path picked in the Scan menu. TV exports one row per episode of the shown shows. Every metadata and media info field is included.</p>
         </section>`;
+}
+
+function sectionTypes(root, tab) {
+    const section = root.querySelector(`.settings-section[data-tab="${tab}"]`);
+    return section ? [...section.querySelectorAll("[data-video-scan-clean-type]:checked")].map((box) => box.dataset.videoScanCleanType) : ["fanart"];
 }
 
 function sectionChecked(root, tab, selector) {
@@ -521,9 +603,11 @@ function readVideoSettings(root) {
     Object.assign(video, {
         language: value("video-language"), country: value("video-country"),
         art_languages: [0, 1, 2, 3].map((index) => value(`video-art-lang-${index}`) || ""),
+        fanart_textless: checked("video-fanart-textless"),
         default_rating: value("video-default-rating"),
         nfo_dialect: value("video-dialect"), movie_nfo_name: value("video-nfo-name"),
         write_nfo: checked("video-write-nfo"), download_artwork: checked("video-download-art"), nfo_backup: checked("video-nfo-backup"),
+        write_mediainfo_movies: checked("video-write-mediainfo-movies"), write_mediainfo_tv: checked("video-write-mediainfo-tv"),
         scan_fill_missing: visibleChecked(root, "[data-video-scan-fill]"),
         scan_limited_art: visibleChecked(root, "[data-video-scan-limited]"),
         scan_download_trailers: sectionChecked(root, "movies", "[data-video-scan-trailers]"),
@@ -533,7 +617,23 @@ function readVideoSettings(root) {
         subs_username: value("video-subs-username"),
         subs_languages: value("video-subs-languages") || "en",
         subs_hearing_impaired: value("video-subs-hearing") || "exclude",
+        orig_lang_movies: checked("video-orig-lang-movies"),
+        orig_lang_tv: checked("video-orig-lang-tv"),
+        sub_pref_langs: [0, 1, 2, 3, 4].map((index) => value(`video-sub-pref-${index}`) || "").filter(Boolean),
         scan_download_themes: sectionChecked(root, "movies", "[data-video-scan-themes]"),
+        scan_clean_art_movies: sectionChecked(root, "movies", "[data-video-scan-clean-art]"),
+        scan_clean_art_tv: sectionChecked(root, "tv", "[data-video-scan-clean-art]"),
+        scan_fix_art_shape_movies: sectionChecked(root, "movies", "[data-video-scan-fix-shape]"),
+        scan_fix_art_shape_tv: sectionChecked(root, "tv", "[data-video-scan-fix-shape]"),
+        scan_clean_art_types_movies: sectionTypes(root, "movies"),
+        scan_clean_art_types_tv: sectionTypes(root, "tv"),
+        ...["metadata", "artwork", "ratings"].reduce((out, name) => {
+            out[`scan_refresh_${name}_movies`] = sectionChecked(root, "movies", `[data-video-scan-refresh="${name}"]`);
+            out[`scan_refresh_${name}_tv`] = sectionChecked(root, "tv", `[data-video-scan-refresh="${name}"]`);
+            return out;
+        }, {}),
+        scan_refresh_dry_movies: sectionChecked(root, "movies", "[data-video-scan-refresh-dry]"),
+        scan_refresh_dry_tv: sectionChecked(root, "tv", "[data-video-scan-refresh-dry]"),
         scan_download_tv_themes: sectionChecked(root, "tv", "[data-video-scan-themes]"),
         scan_rewrite_nfo: visibleChecked(root, "[data-video-scan-rewrite-nfo]"),
         scan_split_notify: checked("video-scan-split-notify"),
@@ -567,6 +667,9 @@ function readVideoSettings(root) {
         ui_music_processed: checked("video-ui-music-processed"),
         export_format_music: value("video-export-format-music") || "csv",
         omdb_patron: checked("omdb-patron"),
+        imdb_data: checked("imdb-data"),
+        imdb_refresh_days: Math.max(7, Math.min(365, Number(value("imdb-days")) || 30)),
+        imdb_user_agent: (value("imdb-user-agent") || "").trim(),
         extrafanart_count: visibleNumber(root, "[data-video-extrafanart-count]", 10),
         write_on_edit: checked("video-write-on-edit"), actor_thumbs: checked("video-actor-thumbs"), keywords_as_tags: checked("video-keywords"),
         concurrency: Number(value("video-concurrency")) || 4,
@@ -587,6 +690,15 @@ function readVideoSettings(root) {
         trailer_resolution: value("video-trailer-resolution"), trailer_on_webhook: checked("video-trailer-webhook"), trailer_on_sonarr_season: checked("video-trailer-sonarr"),
         theme_on_webhook: checked("video-theme-webhook"),
         export_format: value("video-export-format") || "csv",
+        kodi_playlist_dir: value("video-kodi-playlist-dir") || "",
+        integrity_on_import: checked("video-integrity-import"),
+        integrity_research: checked("video-integrity-research"),
+        integrity_pass_files: Math.max(0, Math.min(500, Number(value("video-integrity-pass")) || 0)),
+        wish_movie_resolution: value("video-wish-movie") || "",
+        wish_movie_hdr: checked("video-wish-movie-hdr"),
+        wish_tv_resolution: value("video-wish-tv") || "",
+        wish_tv_hdr: checked("video-wish-tv-hdr"),
+        wish_music: value("video-wish-music") || "",
         filename_noise: (value("video-filename-noise") || "").trim(),
         split_chapter_window: Number(value("video-split-chapter-window")),
         split_detect_window: Number(value("video-split-detect-window")),
@@ -602,6 +714,18 @@ function readVideoSettings(root) {
         split_ambiguous_apart: Number(value("video-split-ambiguous-apart")),
         split_min_part: Number(value("video-split-min-part")),
         trakt_sync_mode: value("trakt-sync-mode") || video.trakt_sync_mode,
+        watch_sync_players: [...document.querySelectorAll("[data-watch-player]")].filter((box) => box.checked).map((box) => box.dataset.watchPlayer),
+        watch_sync_mode: value("watch-sync-mode") || video.watch_sync_mode || "both",
+        watch_sync_hours: Math.max(0, Math.min(168, Number(value("watch-sync-hours")) || 0)),
+        watch_sync_user_jellyfin: value("watch-sync-user-jellyfin") || "",
+        watch_sync_user_emby: value("watch-sync-user-emby") || "",
+        kodi_keep_watched: checked("kodi-keep-watched"),
+        watch_sync_music: checked("watch-sync-music"),
+        watch_sync_unwatch: checked("watch-sync-unwatch"),
+        collections_players: [...document.querySelectorAll("[data-collection-player]")].filter((box) => box.checked).map((box) => box.dataset.collectionPlayer),
+        collections_sets: checked("collections-sets"),
+        collections_tags: checked("collections-tags"),
+        collections_after_scan: checked("collections-after-scan"),
         trakt_sync_hours: Number(value("trakt-sync-hours")) || 0,
     });
     video.rename = {};
@@ -696,8 +820,8 @@ async function loadSubCacheInfo() {
         const row = (which, label) => {
             const c = data.caches[which] || { files: 0, bytes: 0, limit_bytes: 0 };
             const cap = c.limit_bytes ? ` of ${formatCacheBytes(c.limit_bytes)}` : "";
-            return `<div>${label}: ${formatCacheBytes(c.bytes)}${cap} in ${c.files} file${c.files === 1 ? "" : "s"}
-                <button type="button" class="ghost" data-sub-cache-clear="${which}">Clear</button></div>`;
+            return `<div class="cache-row"><span>${label}: ${formatCacheBytes(c.bytes)}${cap} in ${c.files} file${c.files === 1 ? "" : "s"}</span>
+                <button type="button" class="btn-ghost" data-sub-cache-clear="${which}">Clear</button></div>`;
         };
         const ocr = data.tesseract
             ? `Picture subtitle OCR is ready. Languages installed: ${escapeHtml((data.languages || []).join(", ") || "none")}.`

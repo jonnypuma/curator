@@ -17,6 +17,8 @@ from resonance.errors import AppError
 from resonance.library import clock
 from resonance import thumbs
 
+from curator.routes.fast_json import json_reply
+
 router = APIRouter()
 
 THUMB_WIDTHS = thumbs.WIDTHS
@@ -49,7 +51,7 @@ def movies():
         logging.getLogger(__name__).info(
             "movie list: %d movies, %.1fs to build (query, paths, .nfo check), %.1fs to prepare the reply",
             len(rows), built, total - built)
-    return payload
+    return json_reply(payload)
 
 
 @router.get("/library/changes")
@@ -85,13 +87,20 @@ def create_set(body: CreateSetBody):
     if not name:
         raise AppError("Enter a movie set name", 400)
     set_id = store.save_set({"name": name, "overview": (body.overview or "").strip(), "tmdb_id": (body.tmdb_id or "").strip() or None})
-    if body.movie_ids:
-        for mid in body.movie_ids:
+    # A movie that cannot join (locked, busy, gone) is named in the reply instead of being left out without a word.
+    errors = []
+    for mid in body.movie_ids or []:
+        try:
+            store.edit("movie", _uuid(mid), {"set_name": name})
+        except Exception as exc:
             try:
-                store.edit("movie", _uuid(mid), {"set_name": name})
+                label = store.title_of("movies", _uuid(mid))
             except Exception:
-                pass
-    return _found(store.set_detail(str(set_id)))
+                label = "A movie"
+            errors.append(f"{label}: {exc}")
+    detail = _found(store.set_detail(str(set_id)))
+    detail["errors"] = errors
+    return detail
 
 
 @router.get("/sets/{set_id}")
@@ -101,7 +110,18 @@ def movie_set(set_id: str):
 
 @router.get("/tv/shows")
 def shows():
-    return db.clean({"shows": store.list_shows(), "as_of": clock()})
+    return json_reply(db.clean({"shows": store.list_shows(), "as_of": clock()}))
+
+
+class TvSelectionBody(BaseModel):
+    show_ids: list[str] = []
+    filters: list[str] = []
+
+
+@router.post("/tv/selection")
+def tv_selection(body: TvSelectionBody):
+    """Seasons and episodes that go with ticked shows, for the active list filters, in one request."""
+    return store.tv_selection([_uuid(item) for item in body.show_ids], body.filters)
 
 
 @router.get("/tv/shows/{show_id}")
@@ -134,89 +154,45 @@ def generate_episode_thumb(episode_id: str):
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise AppError("ffmpeg is required to generate thumbnails", 500)
 
-    # Get duration with ffprobe
-    try:
-        probe = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", file_path],
-            capture_output=True, text=True, timeout=30
-        )
-        import json as _json
-        probe_data = _json.loads(probe.stdout or "{}")
-        duration = float((probe_data.get("format") or {}).get("duration") or 0)
-    except Exception:
-        duration = 0
+    from curator.video import framegrab
 
-    if duration < 30:
+    info = framegrab.probe(file_path)
+    if info["duration"] < 30:
         raise AppError("File too short to generate a useful thumbnail", 400)
-
-    # Target position: 40% into the file, never within first 5% or last 10%
-    min_pos = max(30, duration * 0.05)
-    max_pos = duration * 0.90
-    target = min(max(duration * 0.40, min_pos), max_pos)
 
     # Determine output path: <video_stem>-thumb.jpg next to the video file
     folder = os.path.dirname(file_path)
     stem = os.path.splitext(os.path.basename(file_path))[0]
     season_num = ep.get("season_number")
     ep_num = ep.get("episode_number")
-    if season_num is not None and ep_num is not None:
+    # One episode per file is <stem>-thumb.jpg, which is what Kodi and the scan look for. Only a file that holds
+    # several episodes gets a name with the episode mark, one thumb for each.
+    from resonance import db
+
+    shared = db.fetchone("SELECT count(*)::int AS n FROM tv_episodes WHERE path = %s", (file_path,)) or {}
+    if season_num is not None and ep_num is not None and int(shared.get("n") or 0) > 1:
         from curator.video.naming import episode_mark
         ep_mark = episode_mark(season_num, ep_num)
-        if ep_mark and ep_mark.lower() in stem.lower():
-            thumb_name = f"{stem}-thumb.jpg"
-        else:
-            thumb_name = f"{stem}-{ep_mark}-thumb.jpg"
+        thumb_name = f"{stem}-{ep_mark}-thumb.jpg" if ep_mark else f"{stem}-thumb.jpg"
     else:
         thumb_name = f"{stem}-thumb.jpg"
     thumb_path = os.path.join(folder, thumb_name)
 
-    # Use ffmpeg to extract a non-black frame near target position.
-    # Strategy: seek to target - 60s, then use 'select' filter to skip black frames,
-    # take the first frame that has a scene score > 0.05 within a 120s window.
-    seek_start = max(0, target - 60)
+    # HDR10, HLG and Dolby Vision sources are tone mapped to SDR, so the still has normal colours.
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
-        result = subprocess.run(
-            [
-                "ffmpeg", "-y", "-v", "error",
-                "-ss", str(seek_start),
-                "-i", file_path,
-                "-t", "120",
-                "-vf", r"select=gt(scene\,0.05),scale=1280:-2",
-                "-frames:v", "1",
-                "-q:v", "2",
-                tmp_path,
-            ],
-            capture_output=True, timeout=60
-        )
-        if result.returncode != 0 or not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) == 0:
-            # Fallback: just grab a frame at the target position without scene filter
-            result2 = subprocess.run(
-                [
-                    "ffmpeg", "-y", "-v", "error",
-                    "-ss", str(target),
-                    "-i", file_path,
-                    "-vf", "scale=1280:-2",
-                    "-frames:v", "1",
-                    "-q:v", "2",
-                    tmp_path,
-                ],
-                capture_output=True, timeout=30
-            )
-            if result2.returncode != 0 or not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) == 0:
-                raise AppError("ffmpeg could not extract a frame from this file", 500)
-
-        import shutil as _shutil
-        _shutil.move(tmp_path, thumb_path)
+        if not framegrab.grab(file_path, tmp_path, info):
+            why = f": {framegrab.last_error}" if framegrab.last_error else ""
+            kind = "Dolby Vision" if info.get("dv_profile") is not None else "HDR" if info.get("hdr") else "SDR"
+            raise AppError(f"ffmpeg could not extract a frame from this {kind} file{why}", 500)
+        shutil.move(tmp_path, thumb_path)
         art = dict(ep.get("artwork") or {})
         art["thumb"] = thumb_path
         store.set_artwork("tv_episodes", _uuid(episode_id), art)
     except AppError:
         raise
-    except subprocess.TimeoutExpired:
-        raise AppError("Thumbnail generation timed out", 500)
     except Exception as exc:
         raise AppError(f"Thumbnail generation failed: {exc}", 500)
     finally:
@@ -240,7 +216,9 @@ class StatusBody(BaseModel):
 def set_status(body: StatusBody):
     if body.status not in {"NEW", "PROCESSED", "IGNORED"}:
         raise AppError("Unknown status change", 400)
-    ids = [_uuid(item) for item in body.ids][:5000]
+    if len(body.ids) > 500000:
+        raise AppError("Too many items in one request (limit 500000).", 400)
+    ids = [_uuid(item) for item in body.ids]
     if body.kind == "set":
         store.mark_sets(ids, body.status)
         return {"updated": len(ids)}
@@ -258,6 +236,19 @@ def set_status(body: StatusBody):
     return {"updated": len(ids)}
 
 
+class ForgetEpisodeBody(BaseModel):
+    season_id: str
+    episode_number: int
+
+
+@router.post("/tv/forget-episode")
+def forget_listed_episode(body: ForgetEpisodeBody):
+    """Remove an episode number from what a season expects, for a missing row that does not belong."""
+    if not store.forget_listed_episode(_uuid(body.season_id), body.episode_number):
+        raise AppError("That season is not in the library any more", 404)
+    return {"ok": True}
+
+
 def _thumbnail(path, width):
     return thumbs.thumbnail(path, width, "video/thumbs")
 
@@ -268,7 +259,9 @@ def artwork(path: str = Query(...), w: int = Query(0)):
     real = os.path.realpath(path)
     if not is_image(real) or not os.path.isfile(real) or not folders.servable(real):
         raise AppError("Artwork is not available", 404)
-    headers = {"Cache-Control": "private, max-age=3600"}
+    # no-cache, not max-age: the browser asks each time and gets a cheap 304 when the file is unchanged, so a
+    # regenerated or replaced image shows at once instead of an hour later.
+    headers = {"Cache-Control": "private, no-cache"}
     if w and not real.lower().endswith(".tbn"):
         width = min(THUMB_WIDTHS, key=lambda item: abs(item - w))
         try:
@@ -519,7 +512,7 @@ def _family_nfo_changes(show_id):
     episodes = db.fetchall(
         """
         SELECT * FROM tv_episodes
-        WHERE show_id = %s AND nfo_path IS NOT NULL
+        WHERE show_id = %s AND nfo_path IS NOT NULL AND NOT missing
         ORDER BY season_number, episode_number
         """,
         (show_id,),

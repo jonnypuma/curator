@@ -148,6 +148,7 @@ async function pollSystem() {
             if (state.videoScanRoots[kind] && !scanPaths(kind).includes(state.videoScanRoots[kind])) state.videoScanRoots[kind] = "";
         });
         renderScanButton(data.scan || {});
+        notePageBuild(data.page_build);
         renderFooter(data);
         const memory = data.memory || null;
         const stamp = memory ? `${memory.app_bytes || 0}:${memory.available_bytes || 0}` : "";
@@ -190,6 +191,17 @@ async function pollSystem() {
             notify(latestArtistArt.message || "Artist artwork download failed.", "error");
         }
         state.missingArtistArtSeen = latestArtistArt ? latestArtistArt.status : "";
+        // A lyrics download started on this page: say what it saved when it ends, and refresh the open album's lyrics marks.
+        const latestLyrics = (data.work || []).find((job) => job.kind === "missing-lyrics");
+        if (state.missingLyricsSeen === "running" && latestLyrics && latestLyrics.status !== "running") {
+            const saved = /saved [1-9]/i.test(latestLyrics.message || "");
+            if (latestLyrics.status === "completed") notify(latestLyrics.message || "Lyrics download finished.", saved ? "success" : "warning");
+            else if (latestLyrics.status === "failed") notify(`Lyrics download failed: ${latestLyrics.message || "see the Jobs panel"}`, "error");
+            if (state.album && state.album.album && typeof selectAlbum === "function") selectAlbum(state.album.album.id, true);
+        }
+        if (state.missingLyricsSeen === "running" || !latestLyrics || latestLyrics.status !== "running") {
+            state.missingLyricsSeen = latestLyrics ? latestLyrics.status : "";
+        }
         const artLive = (latestMissing && latestMissing.status === "running") || missingJustDone
             || (latestArtistArt && latestArtistArt.status === "running") || artistArtJustDone;
         if (artLive) await refreshLiveArtwork();
@@ -789,6 +801,35 @@ function replaceHtml(node, html) {
     node.innerHTML = html;
 }
 
+// Replace a scrolled list without moving what the reader is looking at. The first row in view is found again in the
+// new content (by its data-key) and put back at the same place, so rows added above it or rows that changed height
+// do not push it away. At the top of the list nothing is held: new rows appear there as before.
+function replaceHtmlAnchored(node, html, rowSelector = "[data-key]") {
+    if (!node || scanLogSelectionHeld(node) || node.innerHTML === html) return;
+    const anchor = scrollAnchor(node, rowSelector);
+    node.innerHTML = html;
+    if (anchor) restoreScrollAnchor(node, rowSelector, anchor);
+}
+
+function scrollAnchor(node, rowSelector) {
+    if (!(node.scrollTop > 0) || typeof node.getBoundingClientRect !== "function") return null;
+    const top = node.getBoundingClientRect().top;
+    for (const row of node.querySelectorAll(rowSelector)) {
+        const rect = row.getBoundingClientRect();
+        if (rect.bottom > top && row.dataset && row.dataset.key) return { key: row.dataset.key, offset: rect.top - top };
+    }
+    return null;
+}
+
+function restoreScrollAnchor(node, rowSelector, anchor) {
+    const top = node.getBoundingClientRect().top;
+    for (const row of node.querySelectorAll(rowSelector)) {
+        if (!row.dataset || row.dataset.key !== anchor.key) continue;
+        node.scrollTop += row.getBoundingClientRect().top - top - anchor.offset;
+        return;
+    }
+}
+
 function setLogText(node, text) {
     if (!node || scanLogSelectionHeld(node)) return;
     const next = text == null ? "" : String(text);
@@ -863,7 +904,7 @@ function scanIconMedia() {
 function scanEngineIcon(media) {
     const glass = `<circle cx="17.3" cy="16.6" r="3.5"/><path d="m19.9 19.2 2.5 2.5"/>`;
     const marks = {
-        music: `<path d="M7.2 20.2V11.4l8.6-1.5v7.6"/><circle cx="5.2" cy="20.2" r="2"/><circle cx="13.8" cy="18.8" r="2"/><circle cx="17.4" cy="5.3" r="3"/><path d="m19.6 3.2 2.5-1.8"/>`,
+        music: `<path d="M5.6 13.2V4.6l7.6-1.6v8.4M5.6 7.4l7.6-1.6"/><circle cx="3.6" cy="13.2" r="2"/><circle cx="11.2" cy="11.4" r="2"/>${glass}`,
         movies: `<rect x="1.2" y="3.8" width="16.4" height="14.8" rx="1.6"/><path d="M5.5 3.8v14.8M13.4 3.8v14.8M1.2 8.2h4.3M1.2 14h4.3M13.4 8.2h4.2M13.4 14h4.2"/>${glass}`,
         sets: `<rect x="1" y="7.6" width="10.4" height="12.2" rx="1.3"/><path d="M4.4 7.6V5.5A1.2 1.2 0 0 1 5.6 4.3h9.4A1.2 1.2 0 0 1 16.2 5.5v10.2a1.2 1.2 0 0 1-1.2 1.2H12"/>${glass}`,
         tv: `<rect x="1.2" y="7.2" width="15.2" height="11.4" rx="1.6"/><path d="M5.2 2.8 8.6 7.2 12 2.8"/>${glass}`,
@@ -887,7 +928,7 @@ function paintScanHeading(id, media, text) {
 const SCAN_ORIGINS = { manual: "Manual scan", scheduled: "Scheduled scan", webhook: "Webhook", "file job": "File job" };
 
 function scanEngineTitle(media, mode, forced, origin) {
-    const names = { music: "Music", movies: "Movies", tv: "TV Shows", sets: "Movie Sets" };
+    const names = { music: "Music", movies: "Movies", tv: "TV shows", sets: "Movie sets" };
     const modes = { incremental: "Incremental deep", full: "Full", deep: "Deep" };
     const modeLabel = forced ? "Forced" : (modes[mode] || "Incremental deep");
     const from = SCAN_ORIGINS[origin] ? ` (${SCAN_ORIGINS[origin]})` : "";
@@ -1071,7 +1112,9 @@ const PHASE_LABELS = {
     walk: "Folders and files",
     read: "Folders and files",
     lookup: "Metadata and artwork",
-    trailers: "Trailers",
+    trailers: "Trailers and subtitles",
+    subtitles: "Trailers and subtitles",
+    cleanart: "Clean artwork",
     nfo: "Write .nfo",
 };
 
@@ -1086,13 +1129,15 @@ function scanPhasePlan(scan) {
         const fill = cfg.scan_fill_missing !== false;
         const trailers = scan.media === "tv" ? !!cfg.scan_download_tv_trailers : !!cfg.scan_download_trailers;
         const parallel = !!(scan.trailers_alongside || scan.trailers_done);
-        return ["walk", "read"].concat(fill ? ["lookup"] : []).concat(trailers && !parallel ? ["trailers"] : []).concat(["nfo"]);
+        const clean = !!cfg[scan.media === "tv" ? "scan_clean_art_tv" : "scan_clean_art_movies"]
+            || cfg[scan.media === "tv" ? "scan_fix_art_shape_tv" : "scan_fix_art_shape_movies"] !== false;
+        return ["walk", "read"].concat(fill ? ["lookup"] : []).concat(clean ? ["cleanart"] : []).concat(trailers && !parallel ? ["trailers"] : []).concat(["nfo"]);
     }
     return fillMissingDuringScan() ? PHASES.slice() : PHASES.filter((phase) => phase !== "metadata" && phase !== "artwork");
 }
 
 const VIDEO_FILE_WALK = 0.15;
-const VIDEO_STAGE_WEIGHT = { walk: 10, read: 45, lookup: 40, trailers: 5, nfo: 5 };
+const VIDEO_STAGE_WEIGHT = { walk: 10, read: 45, lookup: 40, cleanart: 10, trailers: 5, nfo: 5 };
 
 function ratio(done, total) {
     const whole = Number(total) || 0;
@@ -1349,12 +1394,13 @@ function scanBytes(size) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-async function openScanHistory(targetMedia) {
+async function openScanHistory(targetMedia, kind) {
+    const scrapes = kind === "scrape";
     const list = document.getElementById("scan-history-list");
     const modal = document.getElementById("scan-history-modal");
     if (!list || !modal) return;
     const scanModalOpen = document.getElementById("scan-modal") && !document.getElementById("scan-modal").classList.contains("hidden");
-    const media = targetMedia || (
+    const media = scrapes ? "" : targetMedia || (
         scanModalOpen
             ? "music"
             : (state.videoScanFocus || (scanKind() === "tv" ? "tv" : (state.media === "sets" ? "sets" : "movies")))
@@ -1363,21 +1409,23 @@ async function openScanHistory(targetMedia) {
     const title = document.getElementById("scan-history-title");
     const labels = { music: "Music", movies: "Movie", tv: "TV", sets: "Movie set" };
     const label = labels[media] || "";
-    if (title) title.textContent = label ? `Saved ${label.toLowerCase()} scans` : "Saved scans";
-    list.innerHTML = `<p class="muted">Loading saved scans…</p>`;
+    if (title) title.textContent = scrapes ? "Saved scrapes" : (label ? `Saved ${label.toLowerCase()} scans` : "Saved scans");
+    list.innerHTML = `<p class="muted">Loading saved ${scrapes ? "scrapes" : "scans"}…</p>`;
     modal.classList.remove("hidden");
     try {
-        const query = media ? `?media=${encodeURIComponent(media)}` : "";
+        const query = scrapes ? "?kind=scrape" : (media ? `?media=${encodeURIComponent(media)}` : "");
         const data = await api(`/api/v1/scan/logs${query}`);
         const logs = data.logs || [];
         if (!logs.length) {
             const noun = label ? `${label.toLowerCase()} ` : "";
-            list.innerHTML = `<p class="muted">No saved ${noun}scans yet. A finished scan writes a report under config/logs.</p>`;
+            list.innerHTML = scrapes
+                ? `<p class="muted">No saved scrapes yet. A finished scrape writes its log under config/logs.</p>`
+                : `<p class="muted">No saved ${noun}scans yet. A finished scan writes a report under config/logs.</p>`;
             return;
         }
         list.innerHTML = logs.map((item) => `
             <button type="button" class="scan-history-row" data-action="open-scan-report" data-name="${escapeHtml(item.name)}">
-                <span>${escapeHtml(item.label || "Scan")}</span>
+                <span>${escapeHtml(item.label || (scrapes ? "Scrape" : "Scan"))}</span>
                 <span class="muted">${escapeHtml(item.when || item.name)}</span>
                 <span class="muted">${scanBytes(item.bytes)}</span>
             </button>
@@ -1393,7 +1441,7 @@ async function openScanReport(name) {
     const modal = document.getElementById("scan-report-modal");
     if (!body || !modal || !name) return;
     scanReport = { name, text: "" };
-    title.textContent = "Scan report";
+    title.textContent = /_scrape\.log$/.test(name) ? "Scrape log" : "Scan report";
     body.textContent = "Loading…";
     modal.classList.remove("hidden");
     try {
@@ -1455,5 +1503,19 @@ async function copyScanResults() {
         notify("Scan results copied.", "success");
     } catch (error) {
         notify("The results could not be copied. Select the text and copy it by hand.", "warning");
+    }
+}
+
+
+// Curator was rebuilt while this page was open: the scripts here are the old ones until a reload, so windows can show
+// old behaviour. Offer a reload (once per new build; Later hides it until the next build).
+function notePageBuild(build) {
+    const meta = document.querySelector('meta[name="curator-build"]');
+    const mine = meta ? meta.getAttribute("content") : "";
+    if (!build || !mine || build === mine || state.pageBuildDismissed === build) return;
+    const banner = document.getElementById("update-banner");
+    if (banner) {
+        banner.dataset.build = build;
+        banner.classList.remove("hidden");
     }
 }

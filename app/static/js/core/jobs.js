@@ -74,12 +74,14 @@ function renderJobs(data) {
         });
     }
     (data.scan_queue || []).forEach((item, index) => {
-        if (item.kind === "move") {
+        if (item.kind === "move" || item.kind === "files" || item.kind === "action") {
+            if (item.kind === "files" && item.status === "running") return;   // shown as the file job
+            const running = item.status === "running";
             entries.push({
                 key: `scan-queue-${index}`,
                 label: item.label || "Move",
-                lane: "Job",
-                job: { status: "queued", message: "Waiting until the library is free" },
+                lane: item.kind === "files" || item.kind === "move" ? "Files" : "Job",
+                job: { status: running ? "running" : "queued", message: running ? "Running" : "Waiting until the library is free", queueId: item.id || "" },
             });
             return;
         }
@@ -96,7 +98,7 @@ function renderJobs(data) {
             label,
             media,
             lane: scrapeWait || sets ? "Scrape" : "Scan",
-            job: { status: "queued", message: named ? `Waiting for ${named}` : (scrapeWait || sets ? `Waiting for ${label}` : `Waiting for a ${mode.toLowerCase()} scan`) },
+            job: { status: "queued", message: named ? `Waiting for ${named}` : (scrapeWait || sets ? `Waiting for ${label}` : `Waiting for a ${mode.toLowerCase()} scan`), queueId: item.id || "" },
         });
     });
     const fileJob = data.file_job;
@@ -122,7 +124,7 @@ function renderJobs(data) {
             key: `arr-queue-${item.id || item.title || "arr"}`,
             label: item.title || "ARR",
             lane: "ARR",
-            job: { status: item.status || "queued", message: item.where || "", kind: item.kind || item.source || "arr" },
+            job: { status: item.status || "queued", message: item.where || "", kind: item.kind || item.source || "arr", queueId: item.id || "" },
         });
     });
     const imports = Number(queue.queued_items_count) || 0;
@@ -134,7 +136,9 @@ function renderJobs(data) {
             lane: "Webhook",
             job: {
                 status: queue.running ? "running" : "queued",
-                message: queue.message || titles || (imports ? `${imports} waiting` : "Waiting"),
+                message: queue.running
+                    ? [queue.message, webhookProgressText(queue)].filter(Boolean).join(" · ") || "Running"
+                    : (queue.message || titles || (imports ? `${imports} waiting` : "Waiting")),
                 kind: "webhook",
             },
         });
@@ -159,7 +163,8 @@ function renderJobs(data) {
     const waiting = entries.filter((entry) => !jobIsRunning(entry.job));
     const group = (title, list) => list.length ? `<h3 class="job-group">${title}</h3>${list.map((entry) => jobRow(entry.label, entry.job, entry.key, entry.media, entry.lane)).join("")}` : "";
     const rows = `${group("Running", running)}${group("Waiting", waiting)}`;
-    replaceHtml(host, rows || `<p class="muted">Nothing is running.</p>`);
+    replaceHtml(host, (rows || `<p class="muted">Nothing is running.</p>`) + recentJobsHtml());
+    loadRecentJobs();
     logPlaces.forEach((place) => {
         const log = host && host.querySelector(`[data-job-log="${CSS.escape(place.key)}"]`);
         if (!log) return;
@@ -235,6 +240,7 @@ function visibleVideoJob(live, incoming) {
 }
 
 function scrapeJobLabel(scrape) {
+    if (scrape.ratings_only) return scrape.media === "tv" ? "TV ratings" : (scrape.media === "episodes" ? "Episode ratings" : "Movie ratings");
     if (scrape.media === "episodes") return scrape.art_only ? "Episode artwork" : "Episode scrape";
     if (scrape.media === "seasons") return scrape.art_only ? "Season artwork" : "Season scrape";
     const name = scrape.media === "tv" ? "TV" : (scrape.media === "sets" ? "Movie set" : "Movie");
@@ -263,7 +269,7 @@ function rememberJob(key, label, job) {
 }
 
 function fileJobLabel(op) {
-    return { move: "Move", rename: "Rename", subtitles: "Subtitles", extras: "Extras", trailers: "Trailers" }[op] || "File job";
+    return { move: "Move", rename: "Rename", subtitles: "Subtitles", extras: "Extras", trailers: "Trailers", themes: "Theme songs", thumbs: "Episode thumbnails" }[op] || "File job";
 }
 
 function jobQueueTab(key, lane, job) {
@@ -284,6 +290,8 @@ function jobLabel(kind) {
         audit: "Audit",
         artwork: "Artwork lookup",
         "missing-art": "Album artwork",
+        "missing-lyrics": "Lyrics download",
+        "album-bulk": "Album batch",
         "missing-artist-art": "Artist artwork",
         "lidarr-search": "Lidarr search",
         "radarr-add": "Add to Radarr",
@@ -296,6 +304,7 @@ function jobLabel(kind) {
         "sub-sync": "Subtitle sync",
         "sub-download": "Subtitle download",
         "episode-split": "Episode split",
+        imdb_data: "IMDb data",
     }[kind] || kind || "Job";
 }
 
@@ -320,7 +329,37 @@ function jobRow(label, job, key, media, lane) {
         : (scanJob ? `<button type="button" class="btn-ghost" data-action="open-scan" data-scan-media="${escapeHtml(media || "music")}">${scanEngineIcon(media || "music")}Scan engine</button>` : "");
     const tools = `<div class="job-actions">${scanEngine}<button type="button" class="btn-ghost" data-action="copy-job" data-job="${escapeHtml(key)}">Copy</button><button type="button" class="btn-ghost" data-action="export-job" data-job="${escapeHtml(key)}">Export JSON</button></div>`;
     const bar = running && job.total ? scanJobBar(job) : "";
-    return `<div class="job-row${running ? " is-running" : ""}"${open}>${body}</div>${bar}${log}${tools}`;
+    const stop = jobCancelButton(key, job, media, running);
+    return `<div class="job-row${running ? " is-running" : ""}"${open}>${body}${stop}</div>${bar}${log}${tools}`;
+}
+
+// The red X on a job: stops it when it runs, takes it out of the queue when it waits.
+function jobCancelButton(key, job, media, running) {
+    const text = String(key || "");
+    let how = "";
+    if (text === "scan") how = "music-scan";
+    else if (text === "video-scan" || text === "video-scan-other" || text === "video-scan-paused") how = "video-scan";
+    else if (text === "video-scrape") how = "scrape";
+    else if (text === "file-job") how = "files";
+    else if (text.startsWith("scan-queue-") && job.queueId) how = running ? "queue-cancel" : "queue-drop";
+    else if (text.startsWith("arr-queue-") && job.queueId && !running) how = "arr-drop";
+    else if (text.startsWith("work-") && job.kind === "album-bulk" && running) how = "album-bulk";
+    if (!how) return "";
+    const title = running ? "Stop this job" : "Remove this job from the queue";
+    return `<button type="button" class="btn-ghost btn-remove job-cancel" data-action="job-cancel" data-how="${how}" data-id="${escapeHtml(job.queueId || "")}" title="${title}" aria-label="${title}">✕</button>`;
+}
+
+async function cancelJob(how, id) {
+    if (how === "music-scan") await api("/api/scan/cancel", { method: "POST", body: {} });
+    else if (how === "video-scan") await api("/api/v1/scan/cancel", { method: "POST", body: {} });
+    else if (how === "scrape") await api("/api/v1/scrape/cancel", { method: "POST", body: {} });
+    else if (how === "files") await api("/api/v1/files/cancel", { method: "POST", body: {} });
+    else if (how === "queue-cancel") await api(`/api/v1/queue/scans/${encodeURIComponent(id)}/cancel`, { method: "POST", body: {} });
+    else if (how === "queue-drop") await api(`/api/v1/queue/scans/${encodeURIComponent(id)}`, { method: "DELETE", body: {} });
+    else if (how === "arr-drop") await api(`/api/v1/queue/arr/${encodeURIComponent(id)}`, { method: "DELETE", body: {} });
+    else if (how === "album-bulk") await api("/api/bulk/cancel", { method: "POST", body: {} });
+    notify(how.endsWith("drop") ? "Removed from the queue." : "Stopping the job.", "info");
+    if (typeof pollSystem === "function") pollSystem();
 }
 
 function jobLineClass(line) {
@@ -424,3 +463,109 @@ const SPECIAL_COUNTRIES = {
     XU: "Unknown country",
     XX: "Unknown country",
 };
+
+
+// Recent: finished jobs of every kind (file jobs, scans, scrapes, background jobs), with how they ended and their log.
+// Read while the Jobs panel is open, at most every 5 seconds; a job that just ended shows here instead of vanishing.
+function loadRecentJobs(force) {
+    const drawer = document.getElementById("job-drawer");
+    if (!drawer || drawer.classList.contains("hidden")) return;
+    const now = Date.now();
+    if (!force && (state.recentJobsLoading || now - (state.recentJobsAt || 0) < 5000)) return;
+    state.recentJobsLoading = true;
+    state.recentJobsAt = now;
+    api("/api/v1/jobs/recent?limit=30").then((data) => {
+        const before = JSON.stringify(state.recentJobs || []);
+        state.recentJobs = data.jobs || [];
+        if (JSON.stringify(state.recentJobs) !== before) paintRecentJobs();
+    }).catch(() => {}).finally(() => { state.recentJobsLoading = false; });
+}
+
+function recentJobLabel(job) {
+    if (job.source === "files") return job.label || fileJobLabel(job.kind);
+    if (job.source === "work") return jobLabel(job.kind);
+    return job.label || "Job";
+}
+
+// What a finished job worked on: "Heat (1995), Alien (1979) and 3 more", every kept name in the tooltip.
+function recentJobItemsText(job, shown = 5) {
+    const names = (job && Array.isArray(job.items) ? job.items : []).filter(Boolean);
+    if (!names.length) return "";
+    const count = Math.max(Number(job.item_count) || 0, names.length);
+    const head = names.slice(0, shown).join(", ");
+    const rest = count - Math.min(shown, names.length);
+    return rest > 0 ? `${head} and ${rest} more` : head;
+}
+
+function recentJobItemsHtml(job) {
+    const text = recentJobItemsText(job);
+    if (!text) return "";
+    const all = (job.items || []).join("\n") + ((Number(job.item_count) || 0) > (job.items || []).length ? "\n…" : "");
+    return `<div class="recent-job-items" title="${escapeHtml(all)}">${escapeHtml(text)}</div>`;
+}
+
+function recentJobsHtml() {
+    const jobs = state.recentJobs || [];
+    if (!jobs.length) return "";
+    const status = (value) => {
+        const text = String(value || "").toLowerCase();
+        const word = { done: "Done", completed: "Done", failed: "Failed", error: "Failed", cancelled: "Stopped", canceled: "Stopped" }[text] || (value || "");
+        const tone = word === "Failed" ? "is-failed" : word === "Stopped" ? "is-stopped" : "is-done";
+        return `<span class="recent-job-status ${tone}">${escapeHtml(word)}</span>`;
+    };
+    const when = (value) => escapeHtml(String(value || "").replace("T", " ").slice(0, 19));
+    const open = state.recentJobOpen || "";
+    const rows = jobs.map((job) => {
+        const key = `${job.source}:${job.id}`;
+        const logButton = job.has_log
+            ? `<button type="button" class="btn-ghost" data-action="recent-job-log" data-key="${escapeHtml(key)}">${open === key ? "Hide log" : "Log"}</button>`
+            : (job.source === "video-scan" || job.source === "scrape" ? `<span class="muted" title="Open the scan engine, Scan history, for this log">Log in Scan history</span>` : "");
+        const log = open === key ? `<div class="recent-job-log"><div class="job-actions"><button type="button" class="btn-ghost" data-action="recent-job-copy" data-key="${escapeHtml(key)}">Copy</button></div><pre class="job-log">${escapeHtml(state.recentJobLog || "Loading…")}</pre></div>` : "";
+        return `<div class="recent-job">
+            <div class="recent-job-head">${status(job.status)}<strong>${escapeHtml(recentJobLabel(job))}</strong><span class="muted">${when(job.finished_at)}</span>${logButton}</div>
+            ${recentJobItemsHtml(job)}
+            ${job.message ? `<div class="recent-job-message muted">${escapeHtml(job.message)}</div>` : ""}
+            ${log}
+        </div>`;
+    }).join("");
+    return `<div id="recent-jobs"><h3 class="job-group">Recent</h3>${rows}</div>`;
+}
+
+function paintRecentJobs() {
+    const host = document.getElementById("job-list");
+    if (!host) return;
+    const old = document.getElementById("recent-jobs");
+    const html = recentJobsHtml();
+    if (old) old.outerHTML = html || "";
+    else if (html) host.insertAdjacentHTML("beforeend", html);
+}
+
+async function toggleRecentJobLog(key) {
+    if (state.recentJobOpen === key) {
+        state.recentJobOpen = "";
+        paintRecentJobs();
+        return;
+    }
+    state.recentJobOpen = key;
+    state.recentJobLog = "";
+    paintRecentJobs();
+    const [source, id] = key.split(":");
+    try {
+        const data = await api(`/api/v1/jobs/recent/${encodeURIComponent(source)}/${encodeURIComponent(id)}/log`);
+        state.recentJobLog = data.log || "This job kept no log.";
+    } catch (error) {
+        state.recentJobLog = `The log could not be read: ${error.message}`;
+    }
+    if (state.recentJobOpen === key) paintRecentJobs();
+}
+
+async function copyRecentJobLog() {
+    const text = state.recentJobLog || "";
+    try {
+        if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
+        else copyPlainText(text);
+        notify("Job log copied.", "info");
+    } catch (error) {
+        notify("Could not copy the job log.", "warning");
+    }
+}

@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+# New folders come out as 775 and new files as 664: the owner and the group can write, everyone can read.
+umask "${UMASK:-0002}" 2>/dev/null || { echo "UMASK=${UMASK} is not a valid umask, using 0002" >&2; umask 0002; }
+
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
 

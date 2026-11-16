@@ -172,7 +172,9 @@ def _post(path, body):
         from resonance.connections import note
 
         note("trakt", message)
-        raise AppError(message, 502)
+        error = AppError(message, 502)
+        error.refused = response.status_code
+        raise error
     from resonance.connections import clear
 
     clear("trakt")
@@ -368,6 +370,7 @@ def cancel_device():
 
 def _store_tokens(cid, tokens, previous=None):
     data = dict(previous or _load())
+    data.pop("needs_reconnect", None)
     data["client_id"] = data.get("client_id") or ""
     created = int(tokens.get("created_at") or time.time())
     data.update({
@@ -437,8 +440,22 @@ def access_token():
     uri = _refresh_redirect(data.get("redirect_uri") or os.environ.get("TRAKT_REDIRECT_URI"))
     if uri:
         body["redirect_uri"] = uri
-    tokens = _post("/oauth/token", body)
+    try:
+        tokens = _post("/oauth/token", body)
+    except AppError as exc:
+        if getattr(exc, "refused", 0) in (400, 401, 403):
+            _expire(data, str(exc))
+            return None
+        raise
     return _store_tokens(cid, tokens, data).get("access_token")
+
+
+def _expire(data, reason):
+    """Trakt no longer accepts the saved refresh token: forget the tokens and ask for a new sign-in."""
+    logger.warning("Trakt sign-in expired, reconnect needed: %s", reason)
+    kept = {key: data[key] for key in ("client_id", "client_secret", "username", "last_sync") if data.get(key)}
+    kept["needs_reconnect"] = True
+    _save(kept)
 
 
 def disconnect():
@@ -474,6 +491,7 @@ def status():
     connected = bool(data.get("access_token"))
     pending = _active_device()
     return {
+        "needs_reconnect": bool(data.get("needs_reconnect")) and not connected,
         "client_id": client_id(),
         "client_secret_set": bool(client_secret()),
         "client_source": client_source(),

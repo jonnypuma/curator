@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from curator.routes import arr_search, automation, copies, files, filters, insights, language, library, radarr, remux, opensubs, scan, scrape, split, sub_sync, system, tags, trakt, wanted
+from curator.routes import arr_orphans, arr_search, automation, copies, files, filters, insights, language, library, musicvideos, radarr, remux, opensubs, scan, scrape, setup, split, sub_sync, system, tags, tools, trakt, trash, wanted
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(system.router)
@@ -22,3 +22,8 @@ router.include_router(copies.router)
 router.include_router(tags.router)
 router.include_router(insights.router)
 router.include_router(wanted.router)
+router.include_router(trash.router)
+router.include_router(musicvideos.router)
+router.include_router(arr_orphans.router)
+router.include_router(tools.router)
+router.include_router(setup.router)

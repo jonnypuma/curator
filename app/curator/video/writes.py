@@ -1,4 +1,4 @@
-"""Guarded writes into movie, TV and movie set folders. Anything outside a configured, mounted video folder is refused."""
+"""Guarded writes into movie, TV, music video and movie set folders. Anything outside a configured, mounted video folder is refused."""
 from __future__ import annotations
 
 import os
@@ -17,7 +17,8 @@ def _video_roots():
         from curator import folders
 
         sets = folders.set_root()
-        _roots["list"] = folders.mounted("movies") + folders.mounted("tv") + ([sets] if sets else [])
+        _roots["list"] = (folders.mounted("movies") + folders.mounted("tv") + folders.mounted("musicvideos")
+                          + ([sets] if sets else []))
         _roots["at"] = time.monotonic()
     return _roots["list"]
 
@@ -30,7 +31,7 @@ def forget_roots():
 def check(path):
     real = os.path.realpath(path)
     if not any(real == root or inside(root, real) for root in _video_roots()):
-        raise AppError(f"Refusing to write outside the movie, TV and movie set folders: {path}", 403)
+        raise AppError(f"Refusing to write outside the movie, TV, music video and movie set folders: {path}", 403)
     return real
 
 

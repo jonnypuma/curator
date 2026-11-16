@@ -4,8 +4,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from curator.routes.scrape import _ids
-from curator.video import files, reprobe, scanner
-from resonance import backup
+from curator.video import files, reprobe
 from resonance.errors import AppError
 
 router = APIRouter()
@@ -26,6 +25,9 @@ class FilesBody(BaseModel):
     op: str
     kind: str
     ids: list[str]
+    players: list[str] | None = None     # Clean fanart: the players to update afterwards (None: every enabled one)
+    art_types: list[str] | None = None   # Replace artwork: the artwork types to replace (None: fanart)
+    fill_missing: bool = True            # Clean artwork: also download missing clean pictures
 
 
 def _picked(body):
@@ -35,6 +37,50 @@ def _picked(body):
     return ids
 
 
+class PlayerArtBody(BaseModel):
+    kind: str
+    ids: list[str] = []
+    players: list[str] | None = None
+
+
+@router.get("/players/art-targets")
+def player_art_targets(media: str = "movies"):
+    """The players an artwork refresh of movies or TV can go to, one box each in the windows."""
+    from curator import library_queue
+
+    return {"players": library_queue.art_players("tv" if media == "tv" else "movies")}
+
+
+@router.post("/players/refresh-art")
+def refresh_player_art(body: PlayerArtBody):
+    """Show the current artwork of these movies or shows in the players without a rescan: Kodi forgets its cached
+    copies and points each item at the files; Plex, Emby and Jellyfin refresh the items. One queue job per media."""
+    from curator import library_queue
+    from curator.video import art_pick, store
+
+    if body.kind not in ("movie", "show"):
+        raise AppError("Pick movies or shows", 400)
+    items = []
+    for item_id in _ids(body.ids):
+        row = (store.movie_row(item_id) if body.kind == "movie" else store.show_row(item_id)) or {}
+        art = {key: value for key, value in (row.get("artwork") or {}).items()
+               if key in art_pick.PLAYER_ART and isinstance(value, str) and os.path.isfile(value)}
+        found = art_pick.player_art_item(body.kind, item_id, art)
+        if found:
+            items.append(found[1])
+    if not items:
+        raise AppError("None of these have artwork files to show", 400)
+    media = "movies" if body.kind == "movie" else "tv"
+    if body.players is not None and not body.players:
+        raise AppError("Tick at least one player", 400)
+    queued, skipped = library_queue.queue_refresh(media, items, players=body.players)
+    if not queued:
+        raise AppError(" ".join(skipped) or "No player takes artwork refreshes for this library", 400)
+    noun = ("movie" if body.kind == "movie" else "show") + ("" if len(items) == 1 else "s")
+    return {"items": len(items), "players": queued, "skipped": skipped,
+            "message": f"Artwork of {len(items)} {noun} queued for {', '.join(queued)}."}
+
+
 @router.post("/files/preview")
 def preview_files(body: FilesBody):
     return files.preview(body.op, body.kind, _picked(body))
@@ -42,12 +88,23 @@ def preview_files(body: FilesBody):
 
 @router.post("/files/run")
 def run_files(body: FilesBody):
+    from resonance import scan_queue
+
     picked = _picked(body)
-    if not files.running():
-        backup.snapshot_before("a file job", len(picked))
-    if not files.start(body.op, body.kind, picked):
-        raise AppError("A file job is already running", 409)
-    return {"started": True, "files": files.status(include_log=False)}
+    files._check_op(body.op, body.kind)
+    label = f"{files.OPS[body.op]} {len(picked)} item{'' if len(picked) == 1 else 's'}"
+    spec = {"kind": "files", "op": body.op, "media": body.kind, "ids": picked, "label": label}
+    if body.players is not None:
+        spec["players"] = [str(name).lower() for name in body.players]
+    if body.art_types:
+        spec["art_types"] = [str(name).lower() for name in body.art_types]
+    if not body.fill_missing:
+        spec["fill_missing"] = False
+    outcome = scan_queue.submit(spec)
+    if outcome == "duplicate":
+        raise AppError("That file job is already queued", 409)
+    return {"started": outcome == "started", "queued": max(1, scan_queue.depth()) if outcome != "started" else 0,
+            "files": files.status(include_log=False)}
 
 
 class MoveBody(BaseModel):
@@ -155,8 +212,6 @@ def update_subtitle(body: SubtitleBody):
 
     if body.kind not in {"movie", "episode"}:
         raise AppError("Subtitles are edited on a movie or an episode", 400)
-    if scanner.running() or files.running():
-        raise AppError("Wait for the running scan or file job to finish", 409)
     row_id = _ids([body.id])[0]
     detail = store.movie_detail(row_id) if body.kind == "movie" else store.episode_detail(row_id)
     if not detail:
@@ -196,14 +251,13 @@ def default_track(body: DefaultTrackBody):
     stored = file.get("audio_tracks") if body.track == "audio" else file.get("subtitle_tracks")
     tracks.apply(video, body.track, body.index, stored or [])
     result = reprobe.refresh(body.kind, [row_id])
+    tracks.mark_user_set(video)
     result["message"] = "Default track saved."
     return result
 
 
 @router.post("/mediainfo")
 def update_mediainfo(body: MediaInfoBody):
-    if scanner.running() or files.running():
-        raise AppError("Wait for the running scan or file job to finish", 409)
     return reprobe.refresh(body.kind, _picked(body))
 
 

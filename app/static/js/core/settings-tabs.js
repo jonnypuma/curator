@@ -16,6 +16,15 @@ function bindSettingsTabs() {
     });
 }
 
+function gotoSettingsTab(tab, target) {
+    if (!SETTINGS_TABS.includes(tab)) return;
+    state.settingsTab = tab;
+    sessionStorage.setItem("curator.settingsTab", tab);
+    applySettingsTab();
+    const section = target ? document.getElementById(target) : null;
+    if (section) section.scrollIntoView({ block: "start" });
+}
+
 function applySettingsTab(options) {
     const active = SETTINGS_TABS.includes(state.settingsTab) ? state.settingsTab : "general";
     document.querySelectorAll("#settings-tabs [data-settings-tab]").forEach((tab) => {
@@ -42,24 +51,37 @@ function videoSettingsSections() {
         ${radarrSettingsHtml()}
         ${sonarrBazarrSettingsHtml()}
         ${playerSettingsHtml()}
+        ${imdbDataSection()}
         ${traktSection()}
         ${traktSyncSection()}
+        ${playerSyncSection()}
+        ${collectionsSection()}
+        ${imdbScheduleSection()}
         ${playerCleanScheduleSection()}
         ${aboutSettingsSection()}`;
 }
 
 function aboutSettingsSection() {
-    const brandVer = (document.querySelector(".brand-version") || {}).textContent || "";
-    const version = brandVer.trim() || "v2.4.0";
+    // The header pill shows the version; the server's About answer (VERSION and RELEASE_DATE files) fills both rows.
+    const version = ((document.querySelector(".version-pill") || {}).textContent || "").trim() || "…";
+    api("/api/v1/about").then((about) => {
+        const date = document.getElementById("about-release-date");
+        if (date && about && about.release_date) date.textContent = about.release_date;
+        const shown = document.getElementById("about-version");
+        if (shown && about && about.version) shown.textContent = `v${about.version}`;
+    }).catch(() => {});
     return `<section class="settings-section" data-tab="about">
         <h3>Curator Media Manager</h3>
         <div class="facts">
-            <div><span>Version</span><strong>${escapeHtml(version)}</strong></div>
-            <div><span>Release date</span><strong>2026-10-20</strong></div>
+            <div><span>Version</span><strong id="about-version">${escapeHtml(version)}</strong></div>
+            <div><span>Release date</span><strong id="about-release-date">…</strong></div>
             <div><span>Libraries</span><strong>Movies, Movie Sets, TV Shows, Music</strong></div>
             <div><span>NFO dialects</span><strong>Kodi 22, Emby / Jellyfin, Plex</strong></div>
         </div>
         <p class="muted">Unified media curation, NFO management, multi-source metadata &amp; artwork scraping, subtitle synchronization, and player library automation.</p>
+        <h3>Setup wizard</h3>
+        <p class="muted">Walks through library folders, metadata keys, download apps and players one step at a time, with a test for each, then offers to start the first scans. It opens by itself on a new install. Changes in this Settings window that are not saved yet are dropped when the wizard opens.</p>
+        <p><button type="button" data-action="setup-open">Run setup wizard</button></p>
         <h3>Keyboard Shortcuts</h3>
         <p class="muted">Press <kbd>?</kbd> anywhere outside a text input, or click the button below to view the full keyboard shortcuts reference.</p>
         <p><button type="button" data-action="open-shortcuts">Keyboard Shortcuts Cheat Sheet</button></p>

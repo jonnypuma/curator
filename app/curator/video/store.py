@@ -7,7 +7,7 @@ import os
 
 from psycopg.types.json import Jsonb
 
-from curator.video import health
+from curator.video import health, integrity
 from resonance import db
 from resonance.paths import like_prefix
 
@@ -47,6 +47,7 @@ ID_COLUMNS = {
     "imdb": "imdb_id", "tmdb": "tmdb_id", "tvdb": "tvdb_id",
     "anilist": "anilist_id", "ofdb": "ofdb_id", "trakt": "trakt_id",
 }
+EDITABLE_ID_KEYS = (*ID_COLUMNS, "ofdbcc", "wikidata")
 ID_ON_TABLE = {
     "movies": ("imdb_id", "tmdb_id", "anilist_id", "ofdb_id", "trakt_id"),
     "tv_shows": ("imdb_id", "tmdb_id", "tvdb_id", "anilist_id", "ofdb_id", "trakt_id"),
@@ -94,9 +95,34 @@ def _update_clause(table, column):
             f"THEN {table}.{column} ELSE EXCLUDED.{column} END")
 
 
+def keep_sources(old, new):
+    """An artwork map rebuilt from the files on disk (a scan) has no _sources, the online picture each file was
+    downloaded from. Keep the source of every type whose file is still the same path, so the artwork window still marks
+    that picture In use. A map that brings its own _sources (a pick or Clean artwork) is kept as it is."""
+    if not isinstance(new, dict) or "_sources" in new or not isinstance(old, dict):
+        return new
+    files = {(extra, os.path.basename(value)) for key, value in new.items() for extra in ("extrafanart", "extrathumbs")
+             if str(key).startswith(extra) and isinstance(value, str)}
+    kept = {kind: url for kind, url in (old.get("_sources") or {}).items()
+            if (isinstance(new.get(kind), str) and new.get(kind) == old.get(kind))
+            or (":" in str(kind) and tuple(str(kind).split(":", 1)) in files)}
+    return {**new, "_sources": kept} if kept else new
+
+
 def _upsert(conn, table, keys, values):
     if table in ("movies", "tv_shows", "tv_episodes"):
         values = project_source_columns(table, dict(values))
+    if "artwork" in values and table in ("movies", "tv_shows", "tv_seasons", "tv_episodes") and all(key in values for key in keys):
+        from curator.video import art_sizes
+
+        found = conn.execute(f"SELECT artwork FROM {table} WHERE {' AND '.join(f'{key} = %s' for key in keys)}",
+                             [values[key] for key in keys]).fetchone()
+        art = values["artwork"]
+        if found:
+            art = keep_sources(found.get("artwork"), art)
+        # Width and height of each file, kept while the file is unchanged.
+        art = art_sizes.with_sizes((found or {}).get("artwork"), art)
+        values = {**values, "artwork": art}
     columns = list(values)
     updates = [_update_clause(table, column) for column in columns if column not in keys]
     updates.append("updated_at = NOW()")
@@ -115,6 +141,14 @@ def _under(roots):
         clauses.append("(path = %s OR path LIKE %s)")
         params.extend([root, like_prefix(root)])
     return " OR ".join(clauses) or "FALSE", params
+
+
+def movie_file_paths(row):
+    """Every video file of a movie row that carries file_path (video_files.path) and parts.
+
+    movies.path is the movie's folder, not its file. Players, playlists and the apps all name the file."""
+    parts = row.get("parts") if isinstance(row.get("parts"), list) else []
+    return [path for path in dict.fromkeys([row.get("file_path"), *parts]) if path]
 
 
 def known_files(roots):
@@ -185,7 +219,7 @@ def save_file(path, kind, size, mtime, summary=None, external=None):
         payload["external_subtitles"] = external or summary.get("external_subtitles") or []
         try:
             from curator.video import mediainfo_xml
-            mediainfo_xml.write(path, payload, size)
+            mediainfo_xml.write(path, payload, size, kind)
         except OSError:
             pass
     return file_id
@@ -273,6 +307,15 @@ def set_movie_edition(movie_id, file_id, edition):
 
 
 def set_artwork(table, row_id, art):
+    if isinstance(art, dict):
+        from curator.video import art_sizes
+
+        found = db.fetchone(f"SELECT artwork FROM {table} WHERE id = %s", (row_id,))
+        old = (found or {}).get("artwork")
+        if "_sources" not in art:
+            art = keep_sources(old, art)
+        # The width and height of each file, read only for a new or changed file (shape checks read these).
+        art = art_sizes.with_sizes(old, art)
     db.execute(f"UPDATE {table} SET artwork = %s, updated_at = NOW() WHERE id = %s", (Jsonb(art), row_id))
 
 
@@ -451,7 +494,7 @@ def find_title(media, title, year=None):
 
 def known_shows(roots):
     rows = db.fetchall(
-        "SELECT id, path, nfo_path, nfo_mtime, artwork, updated_at FROM tv_shows WHERE root = ANY(%s)", (list(roots),)
+        "SELECT id, path, nfo_path, nfo_mtime, artwork, updated_at, tvdb_id FROM tv_shows WHERE root = ANY(%s)", (list(roots),)
     )
     return {row["path"]: row for row in rows}
 
@@ -480,7 +523,7 @@ def episode_index(roots):
     """Episode paths already stored, grouped by show, so an unchanged show can be left alone."""
     rows = db.fetchall(
         """
-        SELECT e.show_id::text AS show_id, e.season_number, e.episode_number, e.path
+        SELECT e.show_id::text AS show_id, e.season_number, e.episode_number, e.path, e.locked_fields
         FROM tv_episodes e
         JOIN tv_shows s ON s.id = e.show_id
         WHERE s.root = ANY(%s) AND NOT e.missing
@@ -497,7 +540,7 @@ def known_episodes(show_id):
     rows = db.fetchall(
         """
         SELECT id, show_id, season_number, episode_number, path, nfo_path, nfo_mtime, file_id, artwork, file_span,
-               title, plot, ratings, rating, votes, guest_stars, mpaa, certifications, missing
+               title, plot, ratings, rating, votes, guest_stars, mpaa, certifications, missing, locked_fields
         FROM tv_episodes WHERE show_id = %s
         """,
         (show_id,),
@@ -519,6 +562,39 @@ def season_nfo_index(show_id):
         (show_id,),
     )
     return {row["season_number"]: row for row in rows}
+
+
+def prune_placeholders(show_id, keep):
+    """Drop the missing-episode placeholders a source no longer lists, and the seasons left empty.
+
+    Used after Fix Match, when the show now has another identity and its old placeholders (seasons and episodes of
+    the wrong show) would otherwise stay. Locks do not matter, the old identity is gone. Only database entries go; episodes with a file are never touched.
+    Returns the number of placeholders removed.
+    """
+    numbers = sorted(keep)
+    with db.transaction() as conn:
+        removed = conn.execute(
+            """
+            DELETE FROM tv_episodes e
+            WHERE e.show_id = %s AND e.missing AND e.path LIKE 'missing://%%'
+              AND NOT EXISTS (
+                SELECT 1 FROM unnest(%s::int[], %s::int[]) AS k(s, n)
+                WHERE k.s = e.season_number AND k.n = e.episode_number
+              )
+            RETURNING id
+            """,
+            (show_id, [item[0] for item in numbers], [item[1] for item in numbers]),
+        ).fetchall()
+        if removed:
+            conn.execute(
+                """
+                DELETE FROM tv_seasons x
+                WHERE x.show_id = %s
+                  AND NOT EXISTS (SELECT 1 FROM tv_episodes e WHERE e.season_id = x.id)
+                """,
+                (show_id,),
+            )
+    return len(removed)
 
 
 def prune_show(show_id, keep):
@@ -664,6 +740,7 @@ def drop_orphans():
             WHERE NOT EXISTS (SELECT 1 FROM movies m WHERE m.file_id = f.id OR f.path = ANY(m.parts))
               AND NOT EXISTS (SELECT 1 FROM tv_episodes e WHERE e.file_id = f.id)
               AND NOT EXISTS (SELECT 1 FROM episode_copies c WHERE c.file_id = f.id)
+              AND NOT EXISTS (SELECT 1 FROM music_videos v WHERE v.file_id = f.id)
             RETURNING id
             """
         ).fetchall()
@@ -703,7 +780,8 @@ FILE_BRIEF = """
     f.resolution, f.width, f.height, f.video_codec, f.video_profile, f.hdr_format, f.hdr_secondary,
     f.is_hybrid, f.dovi_profile, f.dovi_el_type, f.is_3d, f.stereo_mode, f.bit_depth, f.audio_tracks, f.subtitle_tracks,
     f.external_subtitles, f.size_bytes, f.bitrate_mbps, f.duration_seconds, f.container, f.probe_error,
-    f.video_source, f.source_format, f.probed_at, f.fps, f.aspect_ratio, f.max_cll, f.max_fall, f.mtime
+    f.video_source, f.source_format, f.probed_at, f.fps, f.aspect_ratio, f.max_cll, f.max_fall, f.mtime,
+    f.integrity, f.integrity_size, f.integrity_mtime
 """
 
 
@@ -828,6 +906,8 @@ def _annotate_display(row):
         from curator.video.sources import canonical_edition
 
         row["edition"] = canonical_edition(row.get("edition"))
+    if isinstance(row.get("parts"), list) and row["parts"]:
+        row["display_parts"] = [display_path(str(part)) for part in row["parts"] if part]
     nested = row.get("file")
     if isinstance(nested, dict):
         _annotate_display(nested)
@@ -837,13 +917,15 @@ def _annotate_display(row):
 def _movie_rows(where="", params=()):
     import time
 
+    from curator.video import nfo_digest
+
     started = time.monotonic()
     rows = db.fetchall(
         f"""
         SELECT m.id, m.title, m.sort_title, m.original_title, m.english_title, m.year, m.edition, m.runtime_minutes, m.mpaa,
                m.genres, m.studios, m.countries, m.directors, m.rating, m.votes, m.imdb_id, m.tmdb_id,
                m.status, m.playcount, m.path, m.folder, m.root, m.nfo_path, m.nfo_digest, m.nfo_path IS NOT NULL AS has_nfo,
-               m.tagline, m.outline, m.plot, m.premiered, m.tags, m.writers, m.trailer, m.has_local_trailer, m.has_local_theme,
+               m.tags, m.trailer, m.has_local_trailer, m.has_local_theme, {nfo_digest.sig_sql("movies", "m")},
                concat_ws(' ', array_to_string(m.writers, ' '), array_to_string(m.tags, ' '),
                          (SELECT string_agg(e->>'name', ' ') FROM jsonb_array_elements(COALESCE(m.actors, '[]'::jsonb)) e)) AS search_extra,
                (m.plot IS NOT NULL AND btrim(m.plot) <> '') AS has_plot, m.artwork,
@@ -864,7 +946,7 @@ def _movie_rows(where="", params=()):
     queried = time.monotonic()
     movies = [_annotate_display(db.clean(brief_file(dict(row)))) for row in rows]
     shaped = time.monotonic()
-    from curator.video import copies, nfo_digest
+    from curator.video import copies
 
     movies = copies.library_rows(movies)
     deduped = time.monotonic()
@@ -875,7 +957,7 @@ def _movie_rows(where="", params=()):
                     queried - started, shaped - queried, deduped - shaped, finished - deduped, len(rows))
     for movie in movies:
         movie["has_trailer"] = bool(movie.get("trailer"))
-        for key in ("tagline", "outline", "plot", "premiered", "tags", "writers", "trailer", "nfo_digest", "english_title"):
+        for key in ("tagline", "outline", "plot", "premiered", "tags", "writers", "trailer", "nfo_digest", "english_title", "nfo_sig"):
             movie.pop(key, None)
     return movies
 
@@ -924,6 +1006,9 @@ def movie_detail(movie_id):
 
     movie["studio_icons"] = brands.icons(movie.get("studios"), "studios")
     movie["media_flags"] = mediaflags.cards(movie.get("file"))
+    from curator.video import match_undo
+
+    movie["match_undo"] = match_undo.available(movie_id)
     return _with_local_art(movie, movie.get("folder") or movie.get("path"))
 
 
@@ -1009,27 +1094,31 @@ def save_set_parts(set_id, parts):
         conn.execute("UPDATE movie_sets SET parts_synced_at = NOW() WHERE id = %s", (set_id,))
 
 
-def _family_nfo_shows():
-    """Show ids whose season.nfo or episode.nfo no longer matches the database."""
+def _family_nfo_shows(show_ids=None):
+    """Show ids whose season.nfo or episode.nfo no longer matches the database.
+
+    show_ids limits the check to those shows (a refresh while a scan runs); None checks every show."""
     from curator.video import nfo_digest
 
+    only, params = "", ()
+    if show_ids is not None:
+        if not show_ids:
+            return set()
+        only, params = " AND show_id = ANY(%s::uuid[])", ([str(item) for item in show_ids],)
     seasons = [
         db.clean(dict(row)) for row in db.fetchall(
             """
-            SELECT id, show_id, nfo_path, nfo_digest, title, plot, premiered, year, season_number,
-                   sort_title, ids
-            FROM tv_seasons WHERE nfo_path IS NOT NULL
-            """
+            SELECT id, show_id, nfo_path, nfo_digest, """ + nfo_digest.sig_sql("tv_seasons", "tv_seasons") + """
+            FROM tv_seasons WHERE nfo_path IS NOT NULL""" + only,
+            params,
         )
     ]
     episodes = [
         db.clean(dict(row)) for row in db.fetchall(
             """
-            SELECT id, show_id, nfo_path, nfo_digest, title, plot, aired, season_number, episode_number,
-                   rating, directors, playcount, user_rating, display_season, display_episode,
-                   resume_position, resume_total, mpaa, certifications, original_title, english_title
-            FROM tv_episodes WHERE nfo_path IS NOT NULL
-            """
+            SELECT id, show_id, nfo_path, nfo_digest, """ + nfo_digest.sig_sql("tv_episodes", "tv_episodes") + """
+            FROM tv_episodes WHERE nfo_path IS NOT NULL AND NOT missing""" + only,
+            params,
         )
     ]
     nfo_digest.apply("tv_seasons", seasons)
@@ -1037,11 +1126,186 @@ def _family_nfo_shows():
     return {str(row["show_id"]) for row in seasons + episodes if row.get("nfo_stale")}
 
 
+GAP_KEYS = ("no_imdb_count", "no_subs_count", "no_en_subs_count", "multi_audio_count",
+            "unknown_audio_count", "unknown_subs_count", "no_thumb_count", "no_nfo_count",
+            "uhd_count", "fhd_count", "fel_count", "dv_count", "hdr10plus_count", "hdr10_count", "hlg_count", "sdr_count",
+            "corrupt_count")
+# Per-show quality totals and the episode filter each one counts.
+QUALITY_GAPS = {"uhd_count": "uhd", "fhd_count": "fhd", "fel_count": "fel", "dv_count": "dv",
+                "hdr10plus_count": "hdr10plus", "hdr10_count": "hdr10", "hlg_count": "hlg", "sdr_count": "sdr"}
+
+
+def _episode_gaps(show_ids=None):
+    """Per show, how many of its episodes on disk lack a score, subtitles, a thumb and so on.
+
+    The list filters (No IMDb rating, No subtitles ...) need this for a show whose episodes the page has not
+    loaded yet, so they match only shows that really have such an episode."""
+    where = "WHERE NOT e.missing"
+    params = ()
+    if show_ids is not None:
+        if not show_ids:
+            return {}
+        where += " AND e.show_id = ANY(%s)"
+        params = (list(show_ids),)
+    rows = db.fetchall(
+        f"""
+        SELECT e.show_id, e.rating_imdb, e.artwork, e.nfo_path, f.audio_tracks, f.subtitle_tracks, f.external_subtitles,
+               f.resolution, f.hdr_format, f.hdr_secondary, f.dovi_profile, f.dovi_el_type,
+               f.integrity, f.integrity_size, f.integrity_mtime, f.size_bytes, f.mtime
+        FROM tv_episodes e LEFT JOIN video_files f ON f.id = e.file_id
+        {where}
+        """,
+        params,
+    )
+    totals = {}
+    for row in rows:
+        brief = brief_file({
+            "audio_tracks": row.get("audio_tracks"), "subtitle_tracks": row.get("subtitle_tracks"),
+            "external_subtitles": row.get("external_subtitles"), "artwork": row.get("artwork"),
+        })
+        count = totals.setdefault(str(row["show_id"]), dict.fromkeys(GAP_KEYS, 0))
+        if not (_number(row.get("rating_imdb")) > 0):
+            count["no_imdb_count"] += 1
+        if not brief["sub_langs"]:
+            count["no_subs_count"] += 1
+        if not any(str(lang).lower().startswith("en") for lang in brief["sub_langs"]):
+            count["no_en_subs_count"] += 1
+        if len(brief["audio_langs"]) > 1:
+            count["multi_audio_count"] += 1
+        if brief["audio_unknown"] > 0:
+            count["unknown_audio_count"] += 1
+        if brief["sub_unknown"] > 0:
+            count["unknown_subs_count"] += 1
+        if "thumb" not in brief["artwork"]:
+            count["no_thumb_count"] += 1
+        if not row.get("nfo_path"):
+            count["no_nfo_count"] += 1
+        if integrity.corrupt(row):
+            count["corrupt_count"] += 1
+        for key, name in QUALITY_GAPS.items():
+            if EPISODE_FILTERS[name](row):
+                count[key] += 1
+    return totals
+
+
+def _number(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# What each episode filter means for one episode, so a selection made under a filter can be worked out in one query.
+# The page has the same tests for rows it already holds (TV_RIBBONS in tv.js).
+EPISODE_FILTERS = {
+    "noimdb": lambda f: not (_number(f.get("rating_imdb")) > 0),
+    "nosubs": lambda f: not f["sub_langs"],
+    "noen_subs": lambda f: not any(str(lang).lower().startswith("en") for lang in f["sub_langs"]),
+    "multi_audio": lambda f: len(f["audio_langs"]) > 1,
+    "unknown_audio": lambda f: f["audio_unknown"] > 0,
+    "unknown_subs": lambda f: f["sub_unknown"] > 0,
+    "nothumb": lambda f: "thumb" not in f["artwork"],
+    "nonfo": lambda f: not f.get("nfo_path"),
+    "locked": lambda f: bool(f.get("locked")),
+    "upgrade": lambda f: bool(f.get("upgrade_source_id") or (f.get("upgrade_copy_path") or "")),
+    "duplicate": lambda f: bool(f.get("duplicate_release")),
+    "new": lambda f: f.get("status") == "NEW",
+    "ignored": lambda f: f.get("status") == "IGNORED",
+    "scrapefail": lambda f: bool(f.get("scrape_error")),
+    "unscraped": lambda f: not f.get("scraped_at"),
+    "probefail": lambda f: bool(f.get("probe_error")),
+    "corrupt": lambda f: integrity.corrupt(f),
+    "uhd": lambda f: f.get("resolution") in ("4K", "8K"),
+    "fhd": lambda f: f.get("resolution") == "1080p",
+    "fel": lambda f: str(f.get("dovi_profile") or "").startswith("7") and f.get("dovi_el_type") == "FEL",
+    "dv": lambda f: f.get("hdr_format") == "dovi",
+    "hdr10plus": lambda f: f.get("hdr_format") == "hdr10plus" or f.get("hdr_secondary") == "HDR10+",
+    "hdr10": lambda f: f.get("hdr_format") == "hdr10" or f.get("hdr_secondary") == "HDR10",
+    "hlg": lambda f: f.get("hdr_format") == "hlg" or f.get("hdr_secondary") == "HLG",
+    "sdr": lambda f: f.get("hdr_format") == "sdr",
+    "multi": lambda f: len(_span(f.get("file_span"))) > 1,
+}
+# Filters that are about the show or the season, never about an episode: no episode passes them.
+SHOW_ONLY_FILTERS = {"noposter", "notrailer", "missing_trailer", "missing_theme", "unmatched"}
+SEASON_FILTERS = {"noposter"}          # a show-level filter that a season can match too (no poster)
+
+
+def _span(value):
+    if isinstance(value, str):
+        try:
+            import json
+
+            value = json.loads(value)
+        except ValueError:
+            return []
+    return value if isinstance(value, list) else []
+
+
+def tv_selection(show_ids, filters=None):
+    """The seasons and episodes that go with ticked shows, in one pass.
+
+    Only episodes that are on disk and pass every active filter are picked. A season is picked when it holds a picked
+    episode (or, with no filter, always). Filters this cannot judge come back as `unsupported`; the page then works
+    them out itself from the opened shows."""
+    ids = [str(item) for item in (show_ids or []) if item]
+    names = [str(item) for item in (filters or []) if item]
+    unsupported = [name for name in names if name not in EPISODE_FILTERS and name not in SHOW_ONLY_FILTERS]
+    if unsupported:
+        return {"unsupported": unsupported}
+    if not ids:
+        return {"seasons": [], "episodes": [], "by_show": {}}
+    tests = [EPISODE_FILTERS[name] for name in names if name in EPISODE_FILTERS]
+    no_episode_passes = any(name in SHOW_ONLY_FILTERS for name in names)
+    by_show = {}
+
+    def bucket(show_id):
+        return by_show.setdefault(str(show_id), {"seasons": [], "episodes": []})
+
+    if not names:
+        for row in db.fetchall("SELECT id, show_id FROM tv_seasons WHERE show_id = ANY(%s)", (ids,)):
+            bucket(row["show_id"])["seasons"].append(str(row["id"]))
+        for row in db.fetchall("SELECT id, show_id FROM tv_episodes WHERE NOT missing AND show_id = ANY(%s)", (ids,)):
+            bucket(row["show_id"])["episodes"].append(str(row["id"]))
+    elif not no_episode_passes:
+        rows = db.fetchall(
+            """
+            SELECT e.id, e.show_id, e.season_id, e.rating_imdb, e.artwork, e.nfo_path, e.locked, e.status, e.scrape_error,
+                   e.scraped_at, e.duplicate_release, e.upgrade_source_id, e.upgrade_copy_path, e.file_span,
+                   f.audio_tracks, f.subtitle_tracks, f.external_subtitles, f.resolution, f.hdr_format, f.hdr_secondary,
+                   f.dovi_profile, f.dovi_el_type, f.probe_error,
+                   f.integrity, f.integrity_size, f.integrity_mtime, f.size_bytes, f.mtime
+            FROM tv_episodes e LEFT JOIN video_files f ON f.id = e.file_id
+            WHERE NOT e.missing AND e.show_id = ANY(%s)
+            """,
+            (ids,),
+        )
+        seasons = {}
+        for row in rows:
+            facts = dict(row)
+            facts.update(brief_file(dict(row)))
+            if all(test(facts) for test in tests):
+                bucket(row["show_id"])["episodes"].append(str(row["id"]))
+                seasons.setdefault(str(row["show_id"]), set()).add(str(row["season_id"]))
+        for show_id, picked in seasons.items():
+            bucket(show_id)["seasons"] = sorted(picked)
+    elif set(names) <= SEASON_FILTERS:
+        # No poster alone: the seasons without a poster, and no episodes.
+        for row in db.fetchall("SELECT id, show_id FROM tv_seasons WHERE NOT (artwork ? 'poster') AND show_id = ANY(%s)", (ids,)):
+            bucket(row["show_id"])["seasons"].append(str(row["id"]))
+    return {
+        "seasons": [item for kids in by_show.values() for item in kids["seasons"]],
+        "episodes": [item for kids in by_show.values() for item in kids["episodes"]],
+        "by_show": by_show,
+    }
+
+
 def _show_rows(where="", params=()):
+    from curator.video import nfo_digest
+
     rows = db.fetchall(
         f"""
         SELECT s.id, s.title, s.sort_title, s.original_title, s.year, s.show_status, s.genres, s.studios, s.countries,
-               s.directors, s.mpaa, s.rating, s.plot, s.outline, s.tagline, s.runtime_minutes, s.premiered,
+               s.directors, s.mpaa, s.rating, s.runtime_minutes, s.premiered, {nfo_digest.sig_sql("tv_shows", "s")},
                s.tags, s.trailer, s.has_local_trailer, s.has_local_theme, s.nfo_digest, s.user_rating, s.top250, s.playcount, s.last_played,
                s.original_language, s.english_title,
                concat_ws(' ', array_to_string(s.tags, ' '),
@@ -1050,15 +1314,26 @@ def _show_rows(where="", params=()):
                {source_column_sql("s")},
                (s.plot IS NOT NULL AND btrim(s.plot) <> '') AS has_plot,
                s.artwork, s.created_at, s.locked, s.scraped_at, s.scrape_error, s.wanted, s.prune_held,
+               GREATEST(s.created_at, ep.last_added) AS last_added,
                (SELECT count(*)::int FROM tv_seasons x WHERE x.show_id = s.id) AS season_count,
-               (SELECT count(*)::int FROM tv_episodes e WHERE e.show_id = s.id) AS episode_count,
-               (SELECT count(*)::int FROM tv_episodes e WHERE e.show_id = s.id AND e.status = 'NEW') AS new_count,
-               (SELECT count(*)::int FROM tv_episodes e WHERE e.show_id = s.id AND e.missing) AS missing_count,
-               (SELECT EXISTS (SELECT 1 FROM tv_episodes e WHERE e.show_id = s.id AND e.duplicate_release)) AS duplicate_release,
-               (SELECT EXISTS (SELECT 1 FROM tv_episodes e WHERE e.show_id = s.id AND (e.upgrade_source_id IS NOT NULL OR COALESCE(e.upgrade_copy_path, '') <> ''))) AS upgrade,
-               (SELECT count(*)::int FROM tv_episodes e WHERE e.show_id = s.id
-                    AND jsonb_typeof(e.file_span) = 'array' AND jsonb_array_length(e.file_span) > 1) AS multi_count
+               COALESCE(ep.episode_count, 0) AS episode_count,
+               COALESCE(ep.new_count, 0) AS new_count,
+               COALESCE(ep.missing_count, 0) AS missing_count,
+               COALESCE(ep.duplicate_release, FALSE) AS duplicate_release,
+               COALESCE(ep.upgrade, FALSE) AS upgrade,
+               COALESCE(ep.multi_count, 0) AS multi_count
         FROM tv_shows s
+        -- One pass over a show's episodes for every count, instead of a separate pass for each.
+        LEFT JOIN LATERAL (
+            SELECT max(e.created_at) FILTER (WHERE NOT e.missing) AS last_added,
+                   count(*)::int AS episode_count,
+                   (count(*) FILTER (WHERE e.status = 'NEW' AND NOT e.missing))::int AS new_count,
+                   (count(*) FILTER (WHERE e.missing))::int AS missing_count,
+                   bool_or(e.duplicate_release) AS duplicate_release,
+                   bool_or(e.upgrade_source_id IS NOT NULL OR COALESCE(e.upgrade_copy_path, '') <> '') AS upgrade,
+                   (count(*) FILTER (WHERE jsonb_typeof(e.file_span) = 'array' AND jsonb_array_length(e.file_span) > 1))::int AS multi_count
+            FROM tv_episodes e WHERE e.show_id = s.id
+        ) ep ON TRUE
         {where}
         ORDER BY lower(COALESCE(s.sort_title, s.title)), s.year NULLS LAST
         """,
@@ -1069,15 +1344,30 @@ def _show_rows(where="", params=()):
         item = db.clean(dict(row))
         item["artwork"] = art_keys(item.get("artwork") or {})
         shows.append(_annotate_display(item))
-    from curator.video import nfo_digest
-
+    scoped = [show["id"] for show in shows] if where else None
+    gaps = _episode_gaps(scoped)
+    for show in shows:
+        show.update(gaps.get(str(show["id"])) or dict.fromkeys(GAP_KEYS, 0))
     nfo_digest.apply("tv_shows", shows)
-    family = _family_nfo_shows()
+    # A refresh of a few changed shows checks only their seasons and episodes, and only their twins.
+    family = _family_nfo_shows(scoped)
+    from curator.video.copies import show_twins
+
+    try:
+        twins = show_twins(scoped)
+    except Exception:
+        logger.exception("could not look for show folders that hold the same show")
+        twins = {}
+    for show in shows:
+        others = twins.get(str(show["id"])) or []
+        show["duplicate_show"] = len(others)
+        if others:
+            show["duplicate_release"] = True
     for show in shows:
         show["nfo_family_stale"] = bool(show.get("nfo_stale")) or str(show["id"]) in family
         show["has_trailer"] = bool(show.get("trailer"))
         for key in ("plot", "outline", "tagline", "runtime_minutes", "premiered", "tags", "trailer", "nfo_digest", "original_title",
-                    "user_rating", "top250", "playcount", "last_played", "original_language", "english_title"):
+                    "user_rating", "top250", "playcount", "last_played", "original_language", "english_title", "nfo_sig"):
             show.pop(key, None)
     return shows
 
@@ -1145,9 +1435,12 @@ def show_detail(show_id):
         SELECT s.*, s.nfo_path IS NOT NULL AS has_nfo,
                (SELECT count(*)::int FROM tv_episodes e WHERE e.season_id = s.id) AS episode_count,
                (SELECT count(*)::int FROM tv_episodes e WHERE e.season_id = s.id AND e.missing) AS missing_count,
-               (SELECT count(*)::int FROM tv_episodes e WHERE e.season_id = s.id AND e.status = 'NEW') AS new_count,
+               (SELECT count(*)::int FROM tv_episodes e WHERE e.season_id = s.id AND e.status = 'NEW' AND NOT e.missing) AS new_count,
                (SELECT count(*)::int FROM tv_episodes e WHERE e.season_id = s.id
-                    AND jsonb_typeof(e.file_span) = 'array' AND jsonb_array_length(e.file_span) > 1) AS multi_count
+                    AND jsonb_typeof(e.file_span) = 'array' AND jsonb_array_length(e.file_span) > 1) AS multi_count,
+               EXISTS (SELECT 1 FROM tv_episodes e WHERE e.season_id = s.id
+                    AND (e.upgrade_source_id IS NOT NULL OR COALESCE(e.upgrade_copy_path, '') <> '')) AS upgrade,
+               EXISTS (SELECT 1 FROM tv_episodes e WHERE e.season_id = s.id AND e.duplicate_release) AS duplicate_release
         FROM tv_seasons s WHERE s.show_id = %s ORDER BY s.season_number
         """,
         (show_id,),
@@ -1185,7 +1478,12 @@ def show_detail(show_id):
         (show_id,),
     )
     show["episodes"] = [_annotate_display(db.clean(brief_file(dict(item)))) for item in episodes]
-    nfo_digest.apply("tv_episodes", show["episodes"])
+    _attach_episode_versions(show["episodes"])
+    # A missing-episode placeholder has no file of its own, so an .nfo left on it is never a change.
+    nfo_digest.apply("tv_episodes", [item for item in show["episodes"] if not item.get("missing")])
+    for item in show["episodes"]:
+        if item.get("missing"):
+            item["nfo_stale"] = False
     for episode in show["episodes"]:
         episode.pop("plot", None)
         episode.pop("nfo_digest", None)
@@ -1200,7 +1498,7 @@ def show_detail(show_id):
     _annotate_season_gaps(show)
     from curator.video import brands, mediaflags
 
-    show["network_icons"] = brands.icons(show.get("studios"), "network")
+    show["network_icons"] = brands.icons(show.get("studios"), "network", show.get("countries"))
     by_season = {}
     for episode in show["episodes"]:
         episode_flags = mediaflags.cards(episode)
@@ -1209,7 +1507,60 @@ def show_detail(show_id):
     for season in show["seasons"]:
         season["media_flags"] = mediaflags.unique(by_season.get(season.get("id")) or [])
         season["network_icons"] = show["network_icons"]
+    from curator.video import match_undo
+
+    show["match_undo"] = match_undo.available(show_id)
     return _with_local_art(show, show.get("path"))
+
+
+def _attach_episode_versions(episodes):
+    """Give each episode the other video files stored for it, as brief file rows, best first.
+
+    An episode row holds one file. A second file of the same episode is an episode copy. The list shows it as
+    another version of that episode, the way two files of one movie are versions.
+    """
+    ids = [item["id"] for item in episodes if item.get("id")]
+    if not ids:
+        return
+    rows = db.fetchall(
+        f"""
+        SELECT c.episode_id, c.path, f.path AS file_path, {FILE_BRIEF}
+        FROM episode_copies c
+        LEFT JOIN video_files f ON f.id = c.file_id
+        WHERE c.episode_id = ANY(%s::uuid[])
+        ORDER BY c.path
+        """,
+        (db.uuid_array([str(item) for item in ids]),),
+    )
+    if not rows:
+        return
+    from curator.video import copies as marks
+    from resonance.paths import display_path
+
+    by_episode = {}
+    for row in rows:
+        by_episode.setdefault(str(row["episode_id"]), []).append(row)
+    for episode in episodes:
+        extras = by_episode.get(str(episode.get("id")))
+        if not extras:
+            continue
+        mine = marks.score(episode)
+        built = []
+        for extra in extras:
+            data = db.clean(brief_file(dict(extra)))
+            path = data.pop("path", "") or ""
+            data.pop("file_path", None)
+            data.pop("episode_id", None)
+            data["copy_path"] = display_path(path) if path else ""
+            data["copy_score"] = marks.score(data)
+            built.append(data)
+        built.sort(key=lambda item: (-item["copy_score"], item["copy_path"]))
+        best = max([mine] + [item["copy_score"] for item in built])
+        for item in built:
+            item["upgrade"] = item["copy_score"] < best
+        episode["copies"] = built
+        episode["copy_score"] = mine
+        episode["copy_path"] = episode.get("display_path") or display_path(episode.get("path") or "")
 
 
 def episode_file_count(path):
@@ -1250,7 +1601,7 @@ def episode_detail(episode_id):
     episode = _annotate_display(copies.present(episode, "tv_episodes"))
     from curator.video import brands, mediaflags
 
-    episode["network_icons"] = brands.icons(episode.get("show_studios"), "network")
+    episode["network_icons"] = brands.icons(episode.get("show_studios"), "network", episode.get("show_countries"))
     episode["media_flags"] = mediaflags.cards(episode.get("file"))
     return episode
 
@@ -1285,6 +1636,33 @@ def start_job(media, mode, roots):
         (media, mode, list(roots)),
     )
     return str(row["id"]) if row else None
+
+
+_NAME_SQL = {
+    "movie": "SELECT id::text AS id, title, year FROM movies WHERE id = ANY(%s::uuid[])",
+    "show": "SELECT id::text AS id, title, year FROM tv_shows WHERE id = ANY(%s::uuid[])",
+    "set": "SELECT id::text AS id, name AS title, NULL::int AS year FROM movie_sets WHERE id = ANY(%s::uuid[])",
+    "episode": ("SELECT e.id::text AS id, s.title || ' S' || lpad(e.season_number::text, 2, '0') || 'E' "
+                "|| lpad(e.episode_number::text, 2, '0') AS title, NULL::int AS year "
+                "FROM tv_episodes e JOIN tv_shows s ON s.id = e.show_id WHERE e.id = ANY(%s::uuid[])"),
+}
+
+
+def item_names(kind, ids, limit=25):
+    """'Heat (1995)', 'Landman S01E03' … for the first `limit` ids, in their order. Ids that are gone are left out."""
+    import re
+
+    wanted = [str(item) for item in dict.fromkeys(ids or ()) if re.fullmatch(r"[0-9a-fA-F-]{36}", str(item or ""))][:limit]
+    sql = _NAME_SQL.get(kind)
+    if not wanted or not sql:
+        return []
+    rows = {row["id"]: row for row in db.fetchall(sql, (wanted,))}
+    names = []
+    for item in wanted:
+        row = rows.get(item)
+        if row and row.get("title"):
+            names.append(f"{row['title']} ({row['year']})" if row.get("year") else str(row["title"]))
+    return names
 
 
 def finish_job(job_id, status, message, result):
@@ -1384,7 +1762,7 @@ def ids_for_nfo(media, roots, folders=None, rewrite=False):
                             SELECT 1 FROM tv_episodes e
                             WHERE e.season_id = x.id AND NOT e.missing
                               AND COALESCE(e.path, '') <> ''
-                              AND e.path NOT LIKE 'missing://%'
+                              AND e.path NOT LIKE 'missing://%%'
                         )
                       )
                 )
@@ -1562,7 +1940,7 @@ def ids_with_gaps(media, roots, cfg):
         parts.append(
             "EXISTS (SELECT 1 FROM tv_episodes e WHERE e.show_id = s.id AND NOT e.locked "
             "AND e.status IS DISTINCT FROM 'IGNORED' AND NOT e.missing "
-            "AND COALESCE(e.path, '') <> '' AND e.path NOT LIKE 'missing://%' AND ("
+            "AND COALESCE(e.path, '') <> '' AND e.path NOT LIKE 'missing://%%' AND ("
             + " OR ".join(episode_clauses) + "))"
         )
     if not parts:
@@ -1812,6 +2190,11 @@ def save_set_meta(set_id, overview, tmdb_id):
 
 
 def save_set_art(set_id, art, folder, nfo_path, error=None):
+    if isinstance(art, dict):
+        from curator.video import art_sizes
+
+        found = db.fetchone("SELECT artwork FROM movie_sets WHERE id = %s", (set_id,))
+        art = art_sizes.with_sizes((found or {}).get("artwork"), art)
     db.execute(
         "UPDATE movie_sets SET artwork = %s, folder = %s, nfo_path = COALESCE(%s, nfo_path), scraped_at = NOW(), "
         "scrape_error = %s, updated_at = NOW() WHERE id = %s",
@@ -1992,418 +2375,55 @@ def merge_ids(kind, row_id, ids):
     db.execute(f"UPDATE {table} SET {', '.join(sets)}, updated_at = NOW() WHERE id = %s", params)
 
 
-def save_season_meta(season_id, values):
-    allowed = ("title", "plot", "premiered", "trailer", "year", "sort_title", "tmdb_episode_count", "tmdb_episode_numbers")
-    if values.get("premiered") and "year" not in values:
-        text = str(values["premiered"])
-        if len(text) >= 4 and text[:4].isdigit():
-            values = dict(values)
-            values["year"] = int(text[:4])
-    columns = [column for column in allowed if column in values]
-    ids = values.get("ids") if isinstance(values.get("ids"), dict) else None
-    if not columns and not ids:
-        return
-    sets = [f"{column} = %s" for column in columns]
-    params = [values[column] for column in columns]
-    if ids:
-        sets.append("ids = COALESCE(ids, '{}'::jsonb) || %s::jsonb")
-        params.append(Jsonb({key: value for key, value in ids.items() if value}))
-    params.append(season_id)
-    db.execute(
-        f"UPDATE tv_seasons SET {', '.join(sets)}, updated_at = NOW() WHERE id = %s AND NOT locked",
-        params,
-    )
-
-
-def merge_season_name(show_id, number, name):
-    """Remember a season title that is a name, so tvshow.nfo can write namedseason."""
-    if not show_id or number is None:
-        return
-    text = str(name or "").strip()
-    if not text:
-        db.execute(
-            """
-            UPDATE tv_shows
-            SET season_names = COALESCE(season_names, '{}'::jsonb) - %s, updated_at = NOW()
-            WHERE id = %s AND NOT locked
-            """,
-            (str(number), show_id),
-        )
-        return
-    db.execute(
-        """
-        UPDATE tv_shows
-        SET season_names = COALESCE(season_names, '{}'::jsonb) || %s::jsonb, updated_at = NOW()
-        WHERE id = %s AND NOT locked
-        """,
-        (Jsonb({str(number): text}), show_id),
-    )
-
-
-def save_nfo_state(table, row_id, nfo_path, nfo_mtime):
-    db.execute(
-        f"UPDATE {table} SET nfo_path = %s, nfo_mtime = %s WHERE id = %s", (nfo_path, nfo_mtime, row_id)
-    )
-
-
-def link_set(movie_id, info):
-    set_id = save_set(info)
-    row = db.fetchone(
-        "SELECT set_id FROM movies WHERE id = %s AND NOT locked AND NOT ('set' = ANY(locked_fields))",
-        (movie_id,),
-    )
+def forget_listed_episode(season_id, number):
+    """Take one episode number out of the list a season expects, so it stops showing as missing.
+    The next scrape may list it again if the source still does. Returns False when the season is unknown."""
+    row = db.fetchone("SELECT season_number, tmdb_episode_count, tmdb_episode_numbers FROM tv_seasons WHERE id = %s", (season_id,))
     if not row:
-        return set_id
-    previous = row.get("set_id")
-    db.execute("UPDATE movies SET set_id = %s WHERE id = %s", (set_id, movie_id))
-    if str(previous or "") != str(set_id):
-        note_set_new(set_id)
-    return set_id
-
-
-def set_watched(kind, row_id, watched):
-    """Mark a movie or episode watched without lowering a play count that is already above one."""
-    table = table_for(kind)
-    if table not in {"movies", "tv_episodes"}:
-        raise ValueError(kind)
-    if watched:
-        assignment = "playcount = GREATEST(COALESCE(playcount, 0), 1)"
-        locked = ["playcount"]
-    else:
-        assignment = "playcount = 0, last_played = NULL"
-        locked = ["playcount", "last_played"]
-    db.execute(
-        f"UPDATE {table} SET {assignment}, "
-        "locked_fields = (SELECT ARRAY(SELECT DISTINCT unnest(locked_fields || %s::text[]))), "
-        "updated_at = NOW() WHERE id = %s AND NOT locked",
-        (locked, row_id),
-    )
-
-
-def edit(kind, row_id, values):
-    """Inline edit from the UI. Every edited field joins locked_fields so scrapes leave it alone."""
-    table = table_for(kind)
-    allowed = FIELDS[table]
-    values = dict(values)
-    locked_extra = []
-    if kind == "movie" and "set_name" in values:
-        set_name = str(values.pop("set_name") or "").strip()
-        set_overview = str(values.pop("set_overview", "") or "").strip()
-        if set_name:
-            values["set_id"] = save_set({"name": set_name, "overview": set_overview})
-        else:
-            values["set_id"] = None
-        locked_extra.append("set")
-    columns = [column for column in values if column in allowed or column == "set_id"]
-    if not columns:
         return False
-    sets = [f"{column} = %s" for column in columns]
-    params = [_value(column, values[column]) for column in columns]
-    locked_cols = [col for col in columns if col != "set_id"] + locked_extra
-    sets.append("locked_fields = (SELECT ARRAY(SELECT DISTINCT unnest(locked_fields || %s::text[])))")
-    params.append(locked_cols)
-    sets.append("updated_at = NOW()")
-    params.append(row_id)
-    row = db.fetchone(f"UPDATE {table} SET {', '.join(sets)} WHERE id = %s RETURNING id", params)
-    return bool(row)
-
-
-def match_ids(source, source_id, extra=None):
-    """Ids to store for a Fix Match pick. Companions from the search hit are kept; anything else is dropped."""
-    allowed = {"tmdb", "imdb", "tvdb", "trakt"}
-    ids = {}
-    for key, value in (extra or {}).items():
-        text = str(value or "").strip()
-        if text and key in allowed:
-            ids[key] = text
-    source_id = str(source_id or "").strip()
-    if source == "omdb":
-        ids["imdb"] = source_id
-    elif source in allowed:
-        ids[source] = source_id
-    return ids
-
-
-def set_match(kind, row_id, source, source_id, extra=None):
-    """Point an item at a different scraper id. Old ids are dropped so the next scrape cannot mix two titles.
-
-    Returns the duplicate and upgrade flags for the copies that share the old or new identity.
-    None means the item is locked or gone.
-    """
-    from curator.video import copies
-
-    ids = match_ids(source, source_id, extra)
-    if kind == "movie" and source in {"tmdb", "tvdb", "omdb", "trakt"}:
-        before = copies.movie_seed_rows([row_id])
-        row = db.fetchone(
-            "UPDATE movies SET ids = %s, tmdb_id = %s, imdb_id = %s, trakt_id = %s "
-            "WHERE id = %s AND NOT locked RETURNING id",
-            (Jsonb(ids), ids.get("tmdb"), ids.get("imdb"), ids.get("trakt"), row_id),
-        )
-    elif kind == "show" and source in {"tmdb", "tvdb", "omdb", "trakt"}:
-        before = copies.episode_seeds_for_shows([row_id])
-        row = db.fetchone(
-            "UPDATE tv_shows SET ids = %s, tmdb_id = %s, tvdb_id = %s, imdb_id = %s, trakt_id = %s "
-            "WHERE id = %s AND NOT locked RETURNING id",
-            (Jsonb(ids), ids.get("tmdb"), ids.get("tvdb"), ids.get("imdb"), ids.get("trakt"), row_id),
-        )
-    elif kind == "set" and source == "tmdb":
-        row = db.fetchone(
-            "UPDATE movie_sets SET tmdb_collection_id = %s, updated_at = NOW() "
-            "WHERE id = %s AND NOT COALESCE(locked, FALSE) RETURNING id",
-            (ids.get("tmdb"), row_id),
-        )
-        return [] if row else None
-    else:
-        raise ValueError(f"{kind}/{source}")
-    if not row:
-        return None
-    # A title the user matched by hand is no longer waiting for Apply match.
-    clear_pending_match("movies" if kind == "movie" else "tv_shows", row_id)
-    if kind == "movie":
-        seeds = list(before) + list(copies.movie_seed_rows([row_id]))
-        copies.refresh_movie_seeds(seeds)
-        return copies.peer_flags("movie", seeds)
-    seeds = list(before) + list(copies.episode_seeds_for_shows([row_id]))
-    copies.refresh_episode_seeds(seeds)
-    return copies.peer_flags("episode", seeds)
-
-
-_PREF_TABLES = {"movie": "movies", "show": "tv_shows", "season": "tv_seasons", "episode": "tv_episodes"}
-
-
-def scrape_prefs(kind, row_id):
-    table = _PREF_TABLES.get(kind)
-    if not table:
-        raise ValueError(kind)
-    columns = "preferred_source, preferred_art"
-    if kind == "show":
-        columns += ", episode_order"
-    row = db.fetchone(f"SELECT {columns} FROM {table} WHERE id = %s", (row_id,))
-    return dict(row) if row else None
-
-
-def save_scrape_prefs(kind, row_id, source, art, episode_order=None):
-    """Store a per-item provider. Empty values mean the global chain. Episode order locks like Edit."""
-    table = _PREF_TABLES.get(kind)
-    if not table:
-        raise ValueError(kind)
-    source = source or None
-    art = art or None
-    if kind != "show":
-        row = db.fetchone(
-            f"UPDATE {table} SET preferred_source = %s, preferred_art = %s, updated_at = NOW() WHERE id = %s RETURNING id",
-            (source, art, row_id),
-        )
-        return bool(row)
-    if episode_order:
-        row = db.fetchone(
-            """
-            UPDATE tv_shows
-            SET preferred_source = %s, preferred_art = %s, episode_order = %s,
-                locked_fields = (
-                    SELECT ARRAY(SELECT DISTINCT unnest(locked_fields || ARRAY['episode_order']::text[]))
-                ),
-                updated_at = NOW()
-            WHERE id = %s
-            RETURNING id
-            """,
-            (source, art, episode_order, row_id),
-        )
-    else:
-        row = db.fetchone(
-            """
-            UPDATE tv_shows
-            SET preferred_source = %s, preferred_art = %s, episode_order = NULL,
-                locked_fields = ARRAY(
-                    SELECT unnest(locked_fields) EXCEPT SELECT 'episode_order'
-                ),
-                updated_at = NOW()
-            WHERE id = %s
-            RETURNING id
-            """,
-            (source, art, row_id),
-        )
-    return bool(row)
-
-
-def lock_fields(kind, row_id, fields):
-    table = table_for(kind)
+    keep = sorted(expected_episode_numbers(row) - {int(number)})
     db.execute(
-        f"UPDATE {table} SET locked_fields = (SELECT ARRAY(SELECT DISTINCT unnest(locked_fields || %s::text[]))), "
-        "updated_at = NOW() WHERE id = %s",
-        (list(fields), row_id),
+        "UPDATE tv_seasons SET tmdb_episode_numbers = %s::int[], tmdb_episode_count = %s, updated_at = NOW() WHERE id = %s",
+        (keep, len(keep) or None, season_id),
+    )
+    return True
+
+
+def reset_season_listings(show_id):
+    """Forget the episode counts and numbers a source listed for the seasons (Fix Match, locks do not matter)."""
+    db.execute(
+        "UPDATE tv_seasons SET tmdb_episode_count = NULL, tmdb_episode_numbers = ARRAY[]::INT[] WHERE show_id = %s",
+        (show_id,),
     )
 
 
-def unlock_fields(kind, row_id, fields):
-    table = table_for(kind)
-    db.execute(
-        f"UPDATE {table} SET locked_fields = ARRAY(SELECT unnest(locked_fields) EXCEPT SELECT unnest(%s::text[])), "
-        "updated_at = NOW() WHERE id = %s",
-        (list(fields), row_id),
-    )
-
-
-def set_lock(kind, ids, locked):
-    ids = list(ids)
-    with db.transaction() as conn:
-        if kind == "movie":
-            conn.execute("UPDATE movies SET locked = %s WHERE id = ANY(%s::uuid[])", (locked, ids))
-        elif kind == "show":
-            conn.execute("UPDATE tv_shows SET locked = %s WHERE id = ANY(%s::uuid[])", (locked, ids))
-            conn.execute("UPDATE tv_seasons SET locked = %s WHERE show_id = ANY(%s::uuid[])", (locked, ids))
-            conn.execute("UPDATE tv_episodes SET locked = %s WHERE show_id = ANY(%s::uuid[])", (locked, ids))
-        elif kind == "season":
-            conn.execute("UPDATE tv_seasons SET locked = %s WHERE id = ANY(%s::uuid[])", (locked, ids))
-            conn.execute("UPDATE tv_episodes SET locked = %s WHERE season_id = ANY(%s::uuid[])", (locked, ids))
-        elif kind == "episode":
-            conn.execute("UPDATE tv_episodes SET locked = %s WHERE id = ANY(%s::uuid[])", (locked, ids))
-        elif kind == "set":
-            conn.execute("UPDATE movie_sets SET locked = %s WHERE id = ANY(%s::uuid[])", (locked, ids))
-        else:
-            raise ValueError(kind)
-
-
-def remove(kind, ids):
-    ids = list(ids)
-    flag_kind, seeds, flag_ids = _removal_seeds(kind, ids)
-    table = {"movie": "movies", "show": "tv_shows", "season": "tv_seasons", "episode": "tv_episodes", "set": "movie_sets"}.get(kind)
-    if not table:
-        raise ValueError(kind)
-    if not ids:
-        return []
-    file_ids, paths, set_ids = [], [], []
-    with db.transaction() as conn:
-        if kind in {"show", "season"}:
-            column = "show_id" if kind == "show" else "season_id"
-            held = conn.execute(
-                f"""
-                SELECT e.file_id, e.path FROM tv_episodes e WHERE e.{column} = ANY(%s::uuid[])
-                UNION ALL
-                SELECT c.file_id, NULL::text FROM episode_copies c
-                JOIN tv_episodes e ON e.id = c.episode_id
-                WHERE e.{column} = ANY(%s::uuid[])
-                """,
-                (ids, ids),
-            ).fetchall()
-            for row in held:
-                if row["file_id"]:
-                    file_ids.append(row["file_id"])
-                if row["path"]:
-                    paths.append(row["path"])
-        if kind == "movie":
-            rows = conn.execute(
-                "DELETE FROM movies WHERE id = ANY(%s::uuid[]) RETURNING id, file_id, parts, set_id",
-                (ids,),
-            ).fetchall()
-            for row in rows:
-                if row["file_id"]:
-                    file_ids.append(row["file_id"])
-                paths.extend(row["parts"] or [])
-                if row["set_id"]:
-                    set_ids.append(row["set_id"])
-        elif kind == "episode":
-            copies = conn.execute(
-                "SELECT file_id FROM episode_copies WHERE episode_id = ANY(%s::uuid[])",
-                (ids,),
-            ).fetchall()
-            file_ids.extend(row["file_id"] for row in copies if row["file_id"])
-            rows = conn.execute(
-                "DELETE FROM tv_episodes WHERE id = ANY(%s::uuid[]) RETURNING id, file_id, path",
-                (ids,),
-            ).fetchall()
-            for row in rows:
-                if row["file_id"]:
-                    file_ids.append(row["file_id"])
-                if row["path"]:
-                    paths.append(row["path"])
-        else:
-            rows = conn.execute(f"DELETE FROM {table} WHERE id = ANY(%s::uuid[]) RETURNING id", (ids,)).fetchall()
-    _drop_released_files(file_ids, paths)
-    _drop_empty_sets(set_ids)
-    removed = [str(row["id"]) for row in rows]
-    peers = _settle_removed_flags(flag_kind, seeds, flag_ids) if removed else []
-    return removed, peers
-
-
-def _removal_seeds(kind, ids):
-    """Identity rows and the item ids whose Not duplicates rows should go, read before the delete."""
-    from curator.video import copies
-
-    if kind == "movie":
-        return "movie", copies.movie_seed_rows(ids), list(ids)
-    if kind == "episode":
-        return "episode", copies.episode_seed_rows(ids), list(ids)
-    if kind == "season":
-        rows = db.fetchall(
-            "SELECT id::text AS id FROM tv_episodes WHERE season_id = ANY(%s::uuid[])",
-            (list(ids),),
-        )
-        return "episode", copies.episode_seeds_for_seasons(ids), [row["id"] for row in rows]
-    if kind == "show":
-        rows = db.fetchall(
-            "SELECT id::text AS id FROM tv_episodes WHERE show_id = ANY(%s::uuid[])",
-            (list(ids),),
-        )
-        return "episode", copies.episode_seeds_for_shows(ids), [row["id"] for row in rows]
-    return "", [], []
-
-
-def _settle_removed_flags(kind, seeds, ids):
-    """Drop Not duplicates rows for the removed copies and rewrite the flags on whatever remains."""
-    from curator.video import copies
-
-    ids = [str(item) for item in ids or [] if item]
-    if ids and kind in {"movie", "episode"}:
-        db.execute(
-            """
-            DELETE FROM video_dismissed_duplicates
-            WHERE kind = %s AND (left_id = ANY(%s::uuid[]) OR right_id = ANY(%s::uuid[]))
-            """,
-            (kind, ids, ids),
-        )
-    if kind == "movie":
-        copies.refresh_movie_seeds(seeds)
-        return copies.peer_flags("movie", seeds)
-    if kind == "episode":
-        copies.refresh_episode_seeds(seeds)
-        return copies.peer_flags("episode", seeds)
-    return []
-
-
-def _drop_released_files(file_ids, paths):
-    """Drop probe rows that belonged to the items just removed and are not used by anything left."""
-    file_ids = [item for item in file_ids if item] or ["00000000-0000-0000-0000-000000000000"]
-    paths = [item for item in paths if item]
-    if paths == [] and file_ids == ["00000000-0000-0000-0000-000000000000"]:
-        return
-    if not paths:
-        paths = [""]
-    db.execute(
-        """
-        DELETE FROM video_files f
-        WHERE (f.id = ANY(%s::uuid[]) OR f.path = ANY(%s))
-          AND NOT EXISTS (SELECT 1 FROM movies m WHERE m.file_id = f.id OR f.path = ANY(m.parts))
-          AND NOT EXISTS (SELECT 1 FROM tv_episodes e WHERE e.file_id = f.id)
-          AND NOT EXISTS (SELECT 1 FROM episode_copies c WHERE c.file_id = f.id)
-        """,
-        (file_ids, paths),
-    )
-
-
-def _drop_empty_sets(set_ids):
-    set_ids = [item for item in set_ids if item]
-    if not set_ids:
-        return
-    db.execute(
-        """
-        DELETE FROM movie_sets s
-        WHERE s.id = ANY(%s::uuid[])
-          AND NOT EXISTS (SELECT 1 FROM movies m WHERE m.set_id = s.id)
-        """,
-        (set_ids,),
-    )
+from curator.video.store_edits import (  # noqa: E402,F401  kept in store_edits.py; every old name still works
+    SeasonExists,
+    _PREF_TABLES,
+    _drop_empty_sets,
+    _drop_released_files,
+    _fold_episode,
+    _removal_seeds,
+    _settle_removed_flags,
+    drop_empty_seasons,
+    edit,
+    link_set,
+    lock_fields,
+    match_ids,
+    merge_season_name,
+    move_episode,
+    remove,
+    renumber_season,
+    save_nfo_state,
+    save_scrape_prefs,
+    save_season_meta,
+    scrape_prefs,
+    set_episode_number,
+    set_lock,
+    set_match,
+    set_watched,
+    unlock_fields,
+)
 
 
 def start_scrape_job(media, scope):

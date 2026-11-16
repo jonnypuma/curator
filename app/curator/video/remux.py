@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 
-from resonance import db
+from resonance import db, history
 from resonance.errors import AppError
 
 logger = logging.getLogger(__name__)
@@ -31,10 +31,6 @@ def status():
 
 
 def _busy():
-    from curator.video import files, scanner, scrape
-
-    if scanner.running() or scrape.running() or files.running():
-        raise AppError("Wait for the running scan, scrape or file job to finish", 409)
     with _LOCK:
         if _JOB.get("status") == "running":
             raise AppError("A remux is already running", 409)
@@ -68,6 +64,7 @@ def start_profile8(kind, item_id, remove_original=False):
         try:
             dest = profile8_path(path)
             convert_profile7(path, dest)
+            history.record("changed", os.path.basename(dest), kind, dest, "Dolby Vision Profile 7 converted to Profile 8 (a new file)")
             if not remove_original:
                 _set(status="done", message=f"Wrote {os.path.basename(dest)}. The original was left in place.", failed=[], item_id=str(item_id), kind=kind)
                 return
@@ -207,6 +204,10 @@ def _retire_original(kind, item_id, original, dest):
     else:
         kept = _retire_episode(item_id, original, dest, file_row["id"])
     os.remove(original)
+    history.record("deleted", os.path.basename(original), kind, original, "The original, removed after the Profile 8 file was scanned")
+    from curator import library_queue
+
+    library_queue.request_clean("Clean after replacing a file")
     return kept
 
 
@@ -280,6 +281,7 @@ def keep(kind, item_id, track_ids):
     def work():
         try:
             rewrite_tracks(path, chosen)
+            history.record("changed", os.path.basename(path), kind, path, "Rewritten so only the chosen audio and subtitle tracks remain")
             _reprobe(kind, item_id)
             _set(status="done", message="Tracks saved.", failed=[])
         except Exception as exc:

@@ -21,6 +21,19 @@ def album(album_id):
     return _check(tracks, f"Audit {album.get('title') or ''}")
 
 
+def check_album(album_id):
+    """Audit one album's tracks without a job of its own (a bulk job has its own). Returns the newly corrupt tracks;
+    the caller reports them (_report_corrupt) once for the whole run."""
+    broken = []
+    for track in db.fetchall("SELECT * FROM tracks WHERE album_id = %s ORDER BY disc_number, track_number", (album_id,)):
+        flag = inspect(track)
+        if flag:
+            db.execute("UPDATE tracks SET audio_flag = %s WHERE id = %s", (flag, track["id"]))
+        if flag == "corrupt" and track.get("audio_flag") != "corrupt":
+            broken.append(track)
+    return broken
+
+
 def unchecked():
     tracks = db.fetchall(
         """
@@ -39,7 +52,10 @@ def inspect(track):
     if not path or not os.path.isfile(path):
         return None
     flac_file = path.lower().endswith(".flac")
-    flag = _flac_test(path) if flac_file else None
+    # FLAC checks its own stored MD5; other formats are decoded once with ffmpeg. Either way a bad file is "corrupt".
+    flag = _flac_test(path) if flac_file else _decode_test(path)
+    if flag == "corrupt":
+        return flag
     rate = int(track.get("sample_rate") or 0)
     if rate > 44100:
         cutoff, ran = _cutoff(path, rate)
@@ -47,9 +63,9 @@ def inspect(track):
             return "upscaled"
         if not ran:
             return flag
-    if flac_file and flag is None:
+    if flag is None:
         return None
-    return flag or "checked"
+    return flag
 
 
 def _check(tracks, message):
@@ -62,11 +78,14 @@ def _check(tracks, message):
         (message, len(tracks)),
     )
     processed = 0
+    broken = []
     try:
         for track in tracks:
             flag = inspect(track)
             if flag:
                 db.execute("UPDATE tracks SET audio_flag = %s WHERE id = %s", (flag, track["id"]))
+            if flag == "corrupt" and track.get("audio_flag") != "corrupt":
+                broken.append(track)
             processed += 1
             db.execute(
                 "UPDATE work_jobs SET processed = %s WHERE id = %s",
@@ -88,9 +107,30 @@ def _check(tracks, message):
         SET status = 'completed', message = %s, processed = %s, finished_at = NOW()
         WHERE id = %s
         """,
-        (f"Checked {processed} tracks", processed, job["id"]),
+        (f"Checked {processed} tracks" + (f", {len(broken)} corrupt" if broken else ""), processed, job["id"]),
     )
-    return {"processed": processed, "total": len(tracks)}
+    _report_corrupt(broken)
+    return {"processed": processed, "total": len(tracks), "corrupt": len(broken)}
+
+
+def _report_corrupt(tracks):
+    """Activity history and the "corrupt file" notification, as for a video integrity check. Only newly found ones."""
+    if not tracks:
+        return
+    from resonance import history
+
+    for track in tracks:
+        history.record("corrupt", os.path.basename(track.get("file_path") or ""), "track", track.get("file_path") or "",
+                       "Audit audio: the file does not decode cleanly")
+    try:
+        from curator import outbound
+
+        names = ", ".join(os.path.basename(track.get("file_path") or "") for track in tracks[:5])
+        more = f" and {len(tracks) - 5} more" if len(tracks) > 5 else ""
+        outbound.send("file_corrupt", f"Corrupt music file{'s' if len(tracks) != 1 else ''}: {len(tracks)}",
+                      f"{names}{more}", "warning")
+    except Exception:
+        logger.exception("could not send the corrupt file notification")
 
 
 def _flac_test(path):
@@ -104,6 +144,21 @@ def _flac_test(path):
         logger.info("flac is not installed; integrity check skipped")
         return None
     return "verified" if completed.returncode == 0 else "corrupt"
+
+
+def _decode_test(path):
+    """Decode the audio of a non-FLAC file and discard it. "checked" when it decodes cleanly, "corrupt" when ffmpeg
+    reports an error, None when ffmpeg is missing or the check could not run."""
+    try:
+        completed = subprocess.run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-i", path, "-map", "0:a:0", "-f", "null", "-"],
+            capture_output=True, text=True, errors="replace", timeout=600, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.info("ffmpeg could not check %s", path)
+        return None
+    errors = [line for line in (completed.stderr or "").splitlines() if line.strip()]
+    return "corrupt" if completed.returncode or errors else "checked"
 
 
 def _cutoff(path, sample_rate):

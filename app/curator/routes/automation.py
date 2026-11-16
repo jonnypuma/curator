@@ -52,6 +52,16 @@ def queue_status():
     return {**data, "items": ingest.items()}
 
 
+@router.get("/queue/events/{event_id}/call")
+def queue_event_call(event_id: str):
+    """The webhook call a Recent webhooks row came from (Show call)."""
+    try:
+        key = str(uuid.UUID(event_id))
+    except ValueError as exc:
+        raise AppError("Unknown webhook", 404) from exc
+    return ingest.call_payload(key)
+
+
 @router.get("/queue/events")
 def queue_events(limit: int = 100):
     from curator import work_log
@@ -112,8 +122,19 @@ def library_arr_rescan(body: LibraryUpdate):
         sent = sum(1 for row in rows if str(row.get("tmdb_id") or "").strip() and radarr.rescan_movie(tmdb_id=str(row["tmdb_id"]).strip()))
     elif kind == "show":
         app, noun = "Sonarr", "show"
-        rows = db.fetchall("SELECT tvdb_id FROM tv_shows WHERE id = ANY(%s::uuid[])", (ids,))
-        sent = sum(1 for row in rows if str(row.get("tvdb_id") or "").strip() and sonarr.rescan_series(tvdb_id=str(row["tvdb_id"]).strip()))
+        rows = db.fetchall("SELECT id, tvdb_id, title, path, root FROM tv_shows WHERE id = ANY(%s::uuid[])", (ids,))
+        followups = []
+        for row in rows:
+            tvdb = str(row.get("tvdb_id") or "").strip()
+            if not tvdb:
+                continue
+            command = sonarr.rescan_series_command(tvdb_id=tvdb)
+            if command is None:
+                continue
+            sent += 1
+            followups.append((command, row))
+        if followups:
+            _scan_after_sonarr(followups)
     else:
         app, noun = "Lidarr", "artist"
         rows = db.fetchall("SELECT musicbrainz_artist_id AS mbid FROM artists WHERE id = ANY(%s::uuid[])", (ids,))
@@ -143,14 +164,46 @@ def library_arr_rescan(body: LibraryUpdate):
         else:
             where = " It is first in Lidarr's queue."
         where += " Lidarr then fetches fresh artist data before it rescans the folder."
-    return {"sent": sent, "message": f"{app} was asked to rescan {sent} {noun}{plural}.{skipped}{where}"}
+    after = " Curator scans it too when Sonarr is done, and that scan shows in the queue." if app == "Sonarr" else ""
+    return {"sent": sent, "message": f"{app} was asked to rescan {sent} {noun}{plural}.{skipped}{where}{after}"}
+
+
+def _scan_after_sonarr(followups):
+    """Sonarr only tells Curator about files it adds or removes, so a rescan with changed numbers or paths can pass
+    unnoticed. Once Sonarr has finished, Curator scans those shows itself, and the scan shows in the queue."""
+    import threading
+
+    def run():
+        from curator import sonarr
+        from resonance import scan_queue
+
+        for command, row in followups:
+            try:
+                if command:
+                    sonarr.wait_for_command(command)
+                else:
+                    import time
+
+                    time.sleep(10)
+                sonarr.clear_numbers()
+                if not row.get("path") or not row.get("root"):
+                    continue
+                scan_queue.submit({
+                    "media": "tv", "mode": "incremental", "kind": "library",
+                    "roots": [row["root"]], "targets": [row["path"]],
+                    "label": f"Scan of {row['title']} after the Sonarr rescan",
+                })
+            except Exception as exc:
+                logger.info("The scan after the Sonarr rescan of %s was not queued: %s", row.get("title"), exc)
+
+    threading.Thread(target=run, name="scan-after-sonarr", daemon=True).start()
 
 
 @router.post("/library/update")
 def library_update(body: LibraryUpdate):
     """Queue a movie, TV, or music folder scan on the players the user picked."""
     import posixpath
-    from curator import library_queue
+    from curator import library_queue, queue_quality
     from resonance import db
 
     kind = (body.kind or "").strip().lower()
@@ -165,11 +218,13 @@ def library_update(body: LibraryUpdate):
     if not ids:
         raise AppError("Choose a movie, a TV show, or an artist", 400)
     if kind == "movie":
-        rows = db.fetchall("SELECT title, path, folder FROM movies WHERE id = ANY(%s::uuid[])", (ids,))
+        rows = db.fetchall("SELECT title, path, folder, year, imdb_id, tmdb_id FROM movies WHERE id = ANY(%s::uuid[])", (ids,))
+        stale_rows = rows
         pairs = [(row.get("folder") or row.get("path"), row.get("title")) for row in rows]
         media = "movies"
     elif kind == "show":
-        rows = db.fetchall("SELECT title, path FROM tv_shows WHERE id = ANY(%s::uuid[])", (ids,))
+        rows = db.fetchall("SELECT title, path, year, imdb_id, tmdb_id, tvdb_id FROM tv_shows WHERE id = ANY(%s::uuid[])", (ids,))
+        stale_rows = rows
         pairs = [(row.get("path"), row.get("title")) for row in rows]
         media = "tv"
     elif kind in {"artist", "music"}:
@@ -205,8 +260,26 @@ def library_update(body: LibraryUpdate):
     chosen, skipped = library_queue.pick_players(body.players, library_queue.enabled_players(cfg))
     if not chosen:
         raise AppError("Turn on a library under Settings, Integrations, and give it an address and a key.", 400)
-    library_queue.queue_for(chosen, media, folders, False, "Library update", cfg, titles)
+    quality = queue_quality.for_movies(ids) if kind == "movie" else None
+    from curator import journey
+
+    trips = [journey.requested(title, folder, media) for folder, title in pairs if folder]
+    with journey.bound(trips):
+        count = library_queue.queue_for(chosen, media, folders, False, "Library update", cfg, titles, quality)
+    journey.settle(trips)
+    if not count:
+        raise AppError("Nothing was queued: the chosen libraries have this media type switched off or have no library for it.", 400)
     message = f"Queued {_library_names(chosen)}."
+    if kind in ("movie", "show") and "kodi" in chosen:
+        # A Kodi scan never removes the entry of a file that is gone. Do that for these movies or shows only, in the
+        # background (it asks Kodi about every movie or show), instead of cleaning the whole library.
+        import threading
+        from curator import notify
+
+        prune = notify.prune_stale_movies if kind == "movie" else notify.prune_stale_shows
+        threading.Thread(target=prune, args=([dict(row) for row in stale_rows],), daemon=True).start()
+        message += (" Kodi's entries for files that are gone are removed for these movies." if kind == "movie"
+                    else " Kodi's entries for episodes that are gone are removed for these shows.")
     if skipped:
         message += f" {_library_names(skipped)} {'was' if len(skipped) == 1 else 'were'} left out."
     return {"queued": chosen, "skipped": skipped, "message": message}
@@ -242,7 +315,12 @@ def queue_kodi_library(body: KodiLibrary):
     if not paths:
         raise AppError("None of those folders have a Kodi path. Add one under Settings.", 400)
     title = f"Kodi {label} library update · {len(paths)} folder{'s' if len(paths) != 1 else ''}"
-    enqueue("kodi", media, False, paths, False, title)
+    from curator import journey
+
+    trips = [journey.requested(f"Kodi {label} library", ", ".join(roots), media)]
+    with journey.bound(trips):
+        enqueue("kodi", media, False, paths, False, title)
+    journey.settle(trips)
     skipped = len(roots) - len(paths)
     message = f"{title} queued."
     if skipped:
@@ -276,7 +354,11 @@ def queue_manual_library(body: ManualLibrary):
         if player != "kodi" or media not in {"video", "music"}:
             raise AppError("Only Kodi can clean a video or music library from here.", 400)
         stored = "music" if media == "music" else "video"
-        enqueue("kodi", stored, False, [], False, f"Clean the Kodi {media} library", clean_only=True)
+        from curator import journey
+
+        trips = [journey.requested(f"Kodi {media} library", "", media, "Clean")]
+        with journey.bound(trips):
+            enqueue("kodi", stored, False, [], False, f"Clean the Kodi {media} library", clean_only=True)
         return {"message": f"Kodi {media} library clean queued."}
     if player == "navidrome" and media != "music":
         raise AppError("Navidrome scans its music library.", 400)
@@ -286,7 +368,12 @@ def queue_manual_library(body: ManualLibrary):
     label = {"movies": "movie", "tv": "TV", "music": "music"}[media]
     if not roots:
         raise AppError(f"No {label} folders are mounted. Add one in Settings.", 400)
-    queued = queue_for([player], media, roots, False, "Manual library update", cfg)
+    from curator import journey
+
+    trips = [journey.requested(f"{player.title()} {label} library", ", ".join(roots), media)]
+    with journey.bound(trips):
+        queued = queue_for([player], media, roots, False, "Manual library update", cfg)
+    journey.settle(trips)
     if not queued:
         raise AppError("That library update was not queued.", 400)
     name = {"kodi": "Kodi", "emby": "Emby", "jellyfin": "Jellyfin", "plex": "Plex", "navidrome": "Navidrome"}[player]
@@ -473,6 +560,23 @@ def kodi_sources_test(body: SourcesProbeBody):
 
 class OutboundTest(BaseModel):
     target: dict
+
+
+@router.get("/outbound/digest/preview")
+def outbound_digest_preview(every: str = "", hour: int = 9, weekday: int = 0):
+    """The "Added to the library" message as it would go out now, for the schedule on screen. Nothing is sent."""
+    from curator import digest
+
+    return digest.preview({"every": every or "day", "hour": hour, "weekday": weekday})
+
+
+@router.post("/outbound/digest/send")
+def outbound_digest_send():
+    """Send the "Added to the library" message now to the targets that have it ticked, and start the next window."""
+    from curator import digest
+    from resonance import settings
+
+    return digest.send_now(settings.load().get("outbound_digest"))
 
 
 @router.post("/outbound/test")

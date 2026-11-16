@@ -37,11 +37,20 @@ def set_skip_patterns(patterns: list[str]) -> None:
 EXTRA_DIRS = {
     "extras", "extra", "featurettes", "featurette", "behind the scenes", "deleted scenes", "interviews",
     "scenes", "shorts", "trailers", "trailer", "other", "others", "sample", "samples", "bonus",
+    # Disc rips name the bonus folder these ways; its videos are not episodes.
+    "special features", "special feature", "bonus features", "bonus feature", "bonus material", "bonus materials",
 }
 DISC_DIRS = {"bdmv": "BDMV", "video_ts": "VIDEO_TS"}
 
 _EXTRA_SUFFIX = re.compile(r"-(trailer|behindthescenes|deleted|deletedscene|featurette|interview|scene|short|other|extra)s?$", re.I)
 _SAMPLE = re.compile(r"(?:^|[-._ ])sample$", re.I)
+# A release file names its resolution, source or codec. Its group can be called OTHER, SCENE or SHORT, which an extras
+# suffix (-other, -scene, -short) would otherwise match, so such a file is never taken for an extra.
+_RELEASE_TAG = re.compile(
+    r"(?:^|[ ._\[(-])(?:480p|576p|720p|1080[pi]|2160p|4320p|4k|uhd|blu-?ray|bdrip|brrip|bdremux|remux|web-?dl|webrip|web"
+    r"|hdtv|dvdrip|hdrip|x26[45]|h\.?26[45]|hevc|avc|xvid|divx)(?=$|[ ._\])(-])",
+    re.I,
+)
 _STACK = re.compile(r"^(.*?)[ _.-]*(?:cd|dvd|part|pt|disc|disk)[ _.-]*(\d{1,2})(\D.*)?$", re.I)
 _YEAR = re.compile(r"[(\[ ._-]((?:19|20)\d{2})(?=[)\] ._-])")
 _ID_TAGS = re.compile(r"[\[{]\s*(imdb|imdbid|tmdb|tmdbid|tvdb|tvdbid)\s*[-=]\s*([a-z0-9]+)\s*[\]}]", re.I)
@@ -177,7 +186,9 @@ def skip_dir(name):
 
 def is_extra_file(name):
     stem = os.path.splitext(name)[0]
-    return bool(_EXTRA_SUFFIX.search(stem) or _SAMPLE.search(stem) or stem.lower() == "trailer")
+    if _EXTRA_SUFFIX.search(stem) and not _RELEASE_TAG.search(stem):
+        return True
+    return bool(_SAMPLE.search(stem) or stem.lower() == "trailer")
 
 
 _PART_DIR = re.compile(r"^(?:cd|dvd|part|pt|disc|disk)[ _.-]*(\d{1,2})$", re.I)
@@ -365,6 +376,11 @@ def _more_episodes(rest, first):
         if value <= numbers[-1] or value - numbers[-1] > 50:
             break
         if match.group(1) and value - numbers[-1] > 1:
+            # "S12E02.-.19.Title" is the episode and a number in its title, not episodes 2 to 19. A range is written
+            # against the number (S01E01-04) or with an E (S01E01 - E04).
+            spaced = re.match(r"^[ ._]+-[ ._]+\d", match.group(0))
+            if spaced:
+                break
             numbers.extend(range(numbers[-1] + 1, value + 1))
         else:
             numbers.append(value)

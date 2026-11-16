@@ -70,3 +70,91 @@ def fetch_album(album_id, only_missing=False, on_progress=None):
     if unavailable:
         missing = max(0, len(tracks) - written - skipped)
     return {"written": written, "skipped_instrumental": skipped, "missing": missing, "unavailable": unavailable}
+
+
+def download_summary(written, albums, counts):
+    """The closing line of a lyrics download, shown in the Jobs panel and as the notice on the page."""
+    noun = "album" if albums == 1 else "albums"
+    parts = [f"Lyrics: saved {written} for {albums} {noun}"]
+    if counts.get("missing"):
+        parts.append(f"{counts['missing']} track{'s' if counts['missing'] != 1 else ''} not found on LRCLIB")
+    if counts.get("complete"):
+        parts.append(f"{counts['complete']} {'album' if counts['complete'] == 1 else 'albums'} already had lyrics")
+    if counts.get("failed"):
+        parts.append(f"{counts['failed']} failed" + (" (LRCLIB could not be reached)" if counts.get("unreachable") else ""))
+    return ", ".join(parts)
+
+
+def start_download(album_ids=None, artist_ids=None):
+    """Queue a lyrics-only search and download for albums (and every album of the artists). Tracks that already have
+    lyrics are skipped. Returns (job, started); started is False when a lyrics download is already running."""
+    import threading
+
+    from resonance import artwork, jobs, library
+
+    ids = []
+    seen = set()
+
+    def add(value):
+        album_id = str(library.require_uuid(value))
+        if album_id not in seen:
+            seen.add(album_id)
+            ids.append(album_id)
+
+    for item in album_ids or []:
+        add(item)
+    artists = [str(library.require_uuid(item)) for item in (artist_ids or [])]
+    if artists:
+        for row in db.fetchall(
+            "SELECT id FROM albums WHERE artist_id = ANY(%s::uuid[]) ORDER BY title", (db.uuid_array(artists),)
+        ):
+            add(row["id"])
+    if not ids:
+        raise AppError("Select at least one album or artist")
+    running = db.fetchone(
+        "SELECT * FROM work_jobs WHERE kind = 'missing-lyrics' AND status = 'running' ORDER BY started_at DESC LIMIT 1"
+    )
+    if running:
+        return running, False
+    row = jobs.begin_work("missing-lyrics", f"Searching and downloading lyrics for {len(ids)} albums", len(ids))
+
+    def run():
+        labels = artwork._labels_for(ids, "albums")
+        order = [labels.get(album_id, "Album") for album_id in ids]
+        done = []
+        written = 0
+        counts = {"missing": 0, "complete": 0, "failed": 0, "unreachable": False}
+        try:
+            for index, album_id in enumerate(ids, start=1):
+                label = order[index - 1]
+                queued = order[index:]
+                working = f"Working — {label} ({index} of {len(ids)})"
+                jobs.touch_work(row["id"], index - 1, working, artwork._queue_log(working, done, queued))
+                try:
+                    result = fetch_album(album_id, only_missing=True)
+                    written += int(result.get("written") or 0)
+                    counts["missing"] += int(result.get("missing") or 0)
+                    if result.get("unavailable"):
+                        counts["unreachable"] = True
+                        counts["failed"] += 1
+                        done.insert(0, f"Failed — {label} — LRCLIB is not reachable")
+                    elif result.get("written"):
+                        done.insert(0, f"Saved — {label} — {result['written']} lyrics, {result.get('missing') or 0} not found")
+                    elif result.get("missing"):
+                        done.insert(0, f"No lyrics — {label} — {result['missing']} not found")
+                    else:
+                        counts["complete"] += 1
+                        done.insert(0, f"Already complete — {label}")
+                except Exception as exc:
+                    counts["failed"] += 1
+                    done.insert(0, f"Failed — {label} — {exc}")
+                jobs.touch_work(row["id"], index, f"Finished {index} of {len(ids)}", artwork._queue_log("", done, queued))
+            jobs.finish_work(
+                row["id"], "completed", download_summary(written, len(ids), counts), len(ids),
+                artwork._queue_log("", done, []),
+            )
+        except Exception as exc:
+            jobs.finish_work(row["id"], "failed", str(exc)[:300], log=artwork._queue_log("", done, []))
+
+    threading.Thread(target=run, name="missing-lyrics", daemon=True).start()
+    return row, True

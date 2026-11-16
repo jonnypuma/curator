@@ -135,7 +135,7 @@ function removePendingMatchRow(button) {
 async function applyPendingMatches(ids) {
     const data = await api("/api/v1/match/apply", { method: "POST", body: ids ? { ids } : {} });
     if (data.scrape) noteScrapeStart(data);
-    notify("Apply match is writing the held movies and shows.", "info");
+    notify(data.queued && !data.started ? "Apply match is queued and runs when the running job finishes." : "Apply match is writing the held movies and shows.", "info");
     renderVideoScanModal();
 }
 
@@ -200,6 +200,10 @@ function applyVideoScan(scan) {
     state.videoScan = { ...live, log };
 
     if (!state.videoScans) state.videoScans = {};
+    // Each library's state before this update. The WebSocket pushes the running scan (say TV) while the page polls the
+    // scan of the open tab (say Movies): a scan must only be compared with the earlier state of its own library, or a
+    // running TV scan followed by the last finished movie scan reads as a movie scan that just finished.
+    const before = { movies: { ...(state.videoScans.movies || {}) }, tv: { ...(state.videoScans.tv || {}) } };
     if (incoming.scans) {
         if (incoming.scans.movies) {
             const prevM = state.videoScans.movies || {};
@@ -226,12 +230,17 @@ function applyVideoScan(scan) {
         state.videoPaused = null;
     }
     scan = state.videoScan;
-    const started = previous.status !== "running" && scan.status === "running";
-    const finished = previous.status === "running" && scan.status !== "running";
+    const earlier = !scan.media || previous.media === scan.media ? previous : (before[scan.media] || {});
+    const started = earlier.status !== "running" && scan.status === "running";
+    const finished = earlier.status === "running" && scan.status !== "running";
     const finishStamp = `${scan.media || ""}:${scan.status || ""}:${scan.finished_at || ""}`;
     const startStamp = scan.started_at || "running";
     if (finished && state.videoScanNoted === finishStamp) return;
     if (finished) state.videoScanNoted = finishStamp;
+    // A scan the webhook queue started is part of an import: Follow imports shows it, so it does not pop up toasts or
+    // the results window over whatever the user is doing. A failure still says so.
+    const fromImport = scan.origin === "webhook";
+    if (started && state.videoScanStarted !== startStamp && fromImport) state.videoScanStarted = startStamp;
     if (started && state.videoScanStarted !== startStamp) {
         state.videoScanStarted = startStamp;
         const name = scan.media === "tv" ? "TV" : "Movie";
@@ -241,12 +250,13 @@ function applyVideoScan(scan) {
     if (finished) {
         state.videoStopping = false;
         if (scan.status === "failed") notify(scan.message || "The scan failed.", "error");
+        else if (fromImport) { /* quiet: Follow imports has it */ }
         else if (scan.status === "cancelled") notify(scan.message || "Scan stopped.", "info");
         else notify(`${scan.media === "tv" ? "TV" : "Movie"} scan finished. ${scan.message || ""}`.trim(), "info");
         loadMediaTotals();
         reloadVideoAfterScan(scan.media);
         refreshOpenAfterScan(scan.media);
-        showVideoScanResults(scan);
+        if (!fromImport) showVideoScanResults(scan);
     } else if (scan.status === "running" && Date.now() - state.videoScanReloaded > 20000) {
         state.videoScanReloaded = Date.now();
         if (previous.status === "running") reloadVideoAfterScan(scan.media, true);
@@ -324,8 +334,12 @@ function paintVideoScanSteps(scan) {
     const cfg = typeof videoCfg === "function" ? videoCfg() : {};
     const fill = cfg.scan_fill_missing !== false;
     const trailers = scan.media === "tv" ? !!cfg.scan_download_tv_trailers : !!cfg.scan_download_trailers;
-    const order = ["walk"].concat(fill ? ["lookup"] : []).concat(trailers ? ["trailers"] : []).concat(["nfo"]);
-    const phase = scan.phase === "read" ? "walk" : scan.phase;
+    // Subtitles download right after the trailers, so they share that step.
+    const subtitles = scan.media === "tv" ? !!cfg.subs_download_tv : !!cfg.subs_download_movies;
+    const clean = !!cfg[scan.media === "tv" ? "scan_clean_art_tv" : "scan_clean_art_movies"]
+        || cfg[scan.media === "tv" ? "scan_fix_art_shape_tv" : "scan_fix_art_shape_movies"] !== false;
+    const order = ["walk"].concat(fill ? ["lookup"] : []).concat(clean ? ["cleanart"] : []).concat(trailers || subtitles ? ["trailers"] : []).concat(["nfo"]);
+    const phase = scan.phase === "read" ? "walk" : scan.phase === "subtitles" ? "trailers" : scan.phase;
     const current = order.indexOf(phase);
     document.querySelectorAll("#video-scan-steps span").forEach((step) => {
         const index = order.indexOf(step.dataset.phase);

@@ -1,9 +1,31 @@
-"""Sonarr v3 API: search missing episodes, and add a show Sonarr does not have yet."""
+"""Sonarr API: search missing episodes, and add a show Sonarr does not have yet.
+
+Sonarr 3 and 4 serve /api/v3. Sonarr 5 adds /api/v5, where a show can also be found by its TMDB id. The connection
+test saves which one answers (curator.arr_versions) and every call uses it. A v5 call that answers 404 is tried again
+on /api/v3, so a Sonarr 5 that drops or renames an endpoint keeps working.
+"""
 import logging
 
+from curator.arr_client import NotFound as _NotFound  # Sonarr answered 404 for the whole endpoint
 from resonance.errors import AppError
 
 logger = logging.getLogger(__name__)
+
+V3 = "/api/v3"
+V5 = "/api/v5"
+
+
+def _api_prefix(url):
+    from curator import arr_versions
+
+    return V5 if arr_versions.sonarr_entry(url).get("api") == "v5" else V3
+
+
+def tmdb_ok(url=None):
+    """True when Sonarr at this address (the saved one by default) can find a show by TMDB id: Sonarr 5 or newer."""
+    from curator import arr_versions
+
+    return arr_versions.sonarr_supports_tmdb(url)
 
 MONITORS = ("all", "future", "missing", "existing", "firstSeason", "latestSeason", "pilot", "none")
 
@@ -42,49 +64,23 @@ def _settings():
     return url, key
 
 
-def _api(method, path, url, key, payload=None, params=None, timeout=30):
-    import requests
-
-    from resonance.connections import clear, note
-
-    if not url or not key:
-        message = "Sonarr is not set up. Add its address and API key under Settings, Integrations."
-        note("sonarr", message)
-        raise AppError(message, 400)
+def _api(method, path, url, key, payload=None, params=None, timeout=30, api=None):
+    prefix = api or _api_prefix(url)
     try:
-        response = requests.request(method, f"{url}/api/v3{path}", headers={"X-Api-Key": key},
-                                    json=payload, params=params, timeout=timeout)
-    except requests.Timeout as exc:
-        message = f"Sonarr did not answer in time: {exc}"
-        note("sonarr", message)
-        raise AppError(message, 502) from exc
-    except requests.RequestException as exc:
-        message = f"Sonarr could not be reached: {exc}"
-        note("sonarr", message)
-        raise AppError(message, 502) from exc
-    if response.status_code in (401, 403):
-        note("sonarr", "Sonarr refused the API key")
-        raise AppError("Sonarr refused the API key", 502)
-    if response.status_code >= 400:
-        detail = ""
-        try:
-            body = response.json()
-            if isinstance(body, list) and body:
-                detail = body[0].get("errorMessage") or ""
-            elif isinstance(body, dict):
-                detail = body.get("message") or body.get("title") or ""
-        except ValueError:
-            detail = response.text[:200]
-        message = f"Sonarr answered {response.status_code}{': ' + detail if detail else ''}"
-        note("sonarr", message)
-        raise AppError(message, 502)
-    clear("sonarr")
-    if not response.content:
-        return None
-    try:
-        return response.json()
-    except ValueError:
-        return None
+        return _call(method, prefix, path, url, key, payload, params, timeout)
+    except _NotFound:
+        if api or prefix != V5:
+            raise
+        logger.info("Sonarr /api/v5%s answered 404, trying /api/v3", path)
+        return _call(method, V3, path, url, key, payload, params, timeout)
+
+
+def _call(method, prefix, path, url, key, payload, params, timeout):
+    from curator import arr_client
+
+    # A 404 on /api/v5 is retried on /api/v3, so it does not mark the connection as failing.
+    return arr_client.request("sonarr", method, url, key, f"{prefix}{path}", payload, params, timeout,
+                              quiet_404=prefix == V5)
 
 
 def options(url=None, key=None):
@@ -100,9 +96,28 @@ def options(url=None, key=None):
 
 
 def test(url=None, key=None):
+    """Check the address and key, then save the version and which API answers (v5 from Sonarr 5 on, else v3)."""
+    from curator import arr_versions
+
     saved_url, saved_key = _settings()
-    status = _api("GET", "/system/status", (url or saved_url).rstrip("/"), key or saved_key)
-    return f"Connected to Sonarr {(status or {}).get('version') or ''}".strip()
+    address, key = (url or saved_url).rstrip("/"), key or saved_key
+    status, api = None, "v3"
+    try:
+        status = _api("GET", "/system/status", address, key, api=V3)
+    except _NotFound:
+        status = None            # a Sonarr that only serves /api/v5
+    version = (status or {}).get("version") or ""
+    if status is None or arr_versions.major_of(version) >= 5:
+        try:
+            newer = _api("GET", "/system/status", address, key, api=V5)
+            version = (newer or {}).get("version") or version
+            api = "v5"
+        except AppError:
+            if status is None:
+                raise
+    entry = arr_versions.record("sonarr", version, address, api)
+    text = f"Connected to Sonarr {version}".strip() + f" (API {api})."
+    return text + (" Shows with only a TMDB id can be looked up." if entry.get("major", 0) >= 5 else "")
 
 
 def series_by_tvdb(tvdb_id, url=None, key=None):
@@ -110,6 +125,35 @@ def series_by_tvdb(tvdb_id, url=None, key=None):
     url, key = (url or saved_url).rstrip("/"), key or saved_key
     found = _api("GET", "/series", url, key, params={"tvdbId": tvdb_id}) or []
     return found[0] if isinstance(found, list) and found else None
+
+
+def series_by_tmdb(tmdb_id, url=None, key=None):
+    """The Sonarr series with this TMDB id. Sonarr 5 and newer only; None on older versions or when it is not there."""
+    saved_url, saved_key = _settings()
+    url, key = (url or saved_url).rstrip("/"), key or saved_key
+    if not str(tmdb_id or "").strip() or not tmdb_ok(url):
+        return None
+    rows = _api("GET", "/series/lookup", url, key, params={"term": f"tmdb:{tmdb_id}"}, timeout=40) or []
+    for row in rows if isinstance(rows, list) else []:
+        if row.get("id") and str(row.get("tmdbId") or tmdb_id) == str(tmdb_id):
+            return _api("GET", f"/series/{int(row['id'])}", url, key) or row
+    listing = _api("GET", "/series", url, key) or []
+    return next((row for row in listing if isinstance(row, dict) and str(row.get("tmdbId") or "") == str(tmdb_id)), None)
+
+
+def find_series(tvdb_id=None, tmdb_id=None, url=None, key=None):
+    """A show in Sonarr by TVDB id, or by TMDB id on Sonarr 5 and newer."""
+    series = series_by_tvdb(tvdb_id, url, key) if str(tvdb_id or "").strip() else None
+    return series or series_by_tmdb(tmdb_id, url, key)
+
+
+def _show_term(tvdb_id=None, tmdb_id=None, url=None):
+    """The lookup term for adding a show: tvdb:<id>, or tmdb:<id> on Sonarr 5 and newer."""
+    if str(tvdb_id or "").strip():
+        return f"tvdb:{tvdb_id}", f"TVDB id {tvdb_id}"
+    if str(tmdb_id or "").strip() and tmdb_ok(url):
+        return f"tmdb:{tmdb_id}", f"TMDB id {tmdb_id}"
+    raise AppError("This show has no TVDB id. Scrape it first. Sonarr 5 and newer can also use the TMDB id.", 400)
 
 
 def tvdb_for_tmdb(tmdb_id):
@@ -131,17 +175,18 @@ def tvdb_for_tmdb(tmdb_id):
     return ""
 
 
-def ensure_series(tvdb_id, search=None):
+def ensure_series(tvdb_id, search=None, tmdb_id=None):
     """Add a show Sonarr lacks. A show already there is monitored and searched, not posted again.
 
-    search is True or False for this call, or None to follow Start a search right away in Settings."""
+    search is True or False for this call, or None to follow Start a search right away in Settings.
+    Without a TVDB id, Sonarr 5 and newer find the show by tmdb_id."""
     from curator.automation import require_integration
 
     require_integration("sonarr")
     url, key = _settings()
     cfg = _config()
     want = bool(cfg.get("search", True)) if search is None else bool(search)
-    series = series_by_tvdb(tvdb_id, url, key)
+    series = find_series(tvdb_id, tmdb_id, url, key)
     if series:
         try:
             if not series.get("monitored"):
@@ -152,12 +197,20 @@ def ensure_series(tvdb_id, search=None):
                 _api("POST", "/command", url, key, payload={"name": "SeriesSearch", "seriesId": series["id"]}, timeout=60)
         except AppError as exc:
             want = False
-            logger.warning("Sonarr already has TVDB %s; search was not started: %s", tvdb_id, exc)
-        return {"ok": True, "action": "present", "title": series.get("title") or "", "search": want}
-    series = _add_series(url, key, tvdb_id, {**cfg, "search": want}, season=None)
+            logger.warning("Sonarr already has TVDB %s / TMDB %s; search was not started: %s", tvdb_id, tmdb_id, exc)
+        return {"ok": True, "action": "present", "title": series.get("title") or "", "search": want,
+                "tvdb_id": _known_tvdb(series)}
+    series = _add_series(url, key, tvdb_id, {**cfg, "search": want}, season=None, tmdb_id=tmdb_id)
     if not series.get("id"):
         raise AppError("Sonarr did not accept the show.", 502)
-    return {"ok": True, "action": "added", "title": series.get("title") or "", "search": want}
+    return {"ok": True, "action": "added", "title": series.get("title") or "", "search": want,
+            "tvdb_id": _known_tvdb(series)}
+
+
+def _known_tvdb(series):
+    """The TVDB id Sonarr has for a series, or "" (Sonarr 5 can hold a show that has none: tvdbId 0)."""
+    value = (series or {}).get("tvdbId")
+    return str(value) if value and str(value) != "0" else ""
 
 
 def missing_episode_ids(episodes, season=None, episode_number=None):
@@ -197,10 +250,11 @@ def _defaults(url, key, cfg):
     return root, profile
 
 
-def _add_series(url, key, tvdb_id, cfg, season=None):
-    lookup = _api("GET", "/series/lookup", url, key, params={"term": f"tvdb:{tvdb_id}"}, timeout=40) or []
+def _add_series(url, key, tvdb_id, cfg, season=None, tmdb_id=None):
+    term, named = _show_term(tvdb_id, tmdb_id, url)
+    lookup = _api("GET", "/series/lookup", url, key, params={"term": term}, timeout=40) or []
     if not isinstance(lookup, list) or not lookup:
-        raise AppError("Sonarr could not find this TVDB id", 404)
+        raise AppError(f"Sonarr could not find {named}", 404)
     root, profile = _defaults(url, key, cfg)
     body = {
         **lookup[0],
@@ -226,17 +280,18 @@ def _add_series(url, key, tvdb_id, cfg, season=None):
     return added or {}
 
 
-def search_missing(tvdb_id, season=None, episode_number=None):
-    """Search missing monitored episodes. A show Sonarr does not have is added first."""
+def search_missing(tvdb_id, season=None, episode_number=None, tmdb_id=None):
+    """Search missing monitored episodes. A show Sonarr does not have is added first.
+    Without a TVDB id, Sonarr 5 and newer find the show by tmdb_id."""
     from curator.automation import require_integration
 
     require_integration("sonarr")
     url, key = _settings()
-    series = series_by_tvdb(tvdb_id, url, key)
+    series = find_series(tvdb_id, tmdb_id, url, key)
     added = False
     if not series:
         cfg = _config()
-        series = _add_series(url, key, tvdb_id, cfg, season)
+        series = _add_series(url, key, tvdb_id, cfg, season, tmdb_id=tmdb_id)
         added = True
         if not series.get("id"):
             raise AppError("Sonarr did not accept the show.", 502)
@@ -278,7 +333,7 @@ def search_episodes(rows):
     found = []
     missing = []
     for row in rows or []:
-        series = series_by_tvdb(row["tvdb_id"], url, key)
+        series = find_series(row.get("tvdb_id"), row.get("tmdb_id"), url, key)
         if not series:
             missing.append(row.get("title") or "an episode")
             continue
@@ -297,11 +352,11 @@ def search_episodes(rows):
     return {"searched": len(found), "missing": missing}
 
 
-def rescan_series(tvdb_id=None, series_id=None):
-    """Tell Sonarr to rescan the series folder, updating episode file paths to any surviving copy."""
+def rescan_series_command(tvdb_id=None, series_id=None):
+    """Tell Sonarr to rescan the series folder. Returns the id of Sonarr's command, 0 when it cannot be tracked, None on failure."""
     url, key = _settings()
     if not url or not key:
-        return False
+        return None
     try:
         target_id = series_id
         if not target_id and tvdb_id:
@@ -309,10 +364,127 @@ def rescan_series(tvdb_id=None, series_id=None):
             if series and series.get("id"):
                 target_id = series["id"]
         if not target_id:
-            return False
-        _api("POST", "/command", url, key, payload={"name": "RescanSeries", "seriesId": int(target_id)})
-        return True
+            return None
+        reply = _api("POST", "/command", url, key, payload={"name": "RescanSeries", "seriesId": int(target_id)})
+        return int((reply or {}).get("id") or 0)
     except Exception as exc:
         logger.warning("Sonarr RescanSeries failed for tvdb=%s id=%s: %s", tvdb_id, series_id, exc)
-        return False
+        return None
 
+
+def rescan_series(tvdb_id=None, series_id=None):
+    """Tell Sonarr to rescan the series folder, updating episode file paths to any surviving copy."""
+    return rescan_series_command(tvdb_id, series_id) is not None
+
+
+def wait_for_command(command_id, timeout=180, step=3):
+    """Wait until Sonarr has finished a command. True when it completed, False on failure or timeout."""
+    import time
+
+    url, key = _settings()
+    if not url or not key or not command_id:
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            status = (_api("GET", f"/command/{int(command_id)}", url, key) or {}).get("status")
+        except Exception:
+            return False
+        if status == "completed":
+            return True
+        if status in ("failed", "aborted", "cancelled", "orphaned"):
+            return False
+        time.sleep(step)
+    return False
+
+
+# ---- Sonarr's own season and episode numbers ---------------------------------------------------------------
+# A file can be named S04E01 while Sonarr and TheTVDB number it S03E01 (Lupin, for one). Sonarr is the one that
+# knows, so a scan asks it which episodes each file holds and uses those numbers.
+
+_NUMBER_TTL = 60
+_numbers = {}          # series key -> (fetched at, {local path: [(season, episode), ...]})
+_series_list = [0.0, []]
+
+
+def _same_place(left, right):
+    from curator.automation import clean_path
+
+    return clean_path(left).rstrip("/").lower() == clean_path(right).rstrip("/").lower()
+
+
+def _find_series(show_path, tvdb_id, url, key, mappings):
+    import time
+    from curator.automation import map_path
+
+    if time.monotonic() - _series_list[0] > _NUMBER_TTL:
+        listing = _api("GET", "/series", url, key) or []
+        _series_list[:] = [time.monotonic(), listing if isinstance(listing, list) else []]
+    for series in _series_list[1]:
+        if tvdb_id and str(series.get("tvdbId") or "") == str(tvdb_id):
+            return series
+    for series in _series_list[1]:
+        if show_path and _same_place(map_path(series.get("path") or "", mappings, "sonarr"), show_path):
+            return series
+    return None
+
+
+def episode_numbers(show_path, tvdb_id=None):
+    """{local file path: [(season, episode), ...]} as Sonarr numbers them. Empty when Sonarr is off or unsure."""
+    import time
+    from curator import automation
+    from curator.automation import map_path
+
+    try:
+        url, key = _settings()
+        if not url or not key:
+            return {}
+        url = url.rstrip("/")
+        mappings = (automation.current()[0] or {}).get("path_mappings") or []
+        series = _find_series(show_path, tvdb_id, url, key, mappings)
+        if not series or not series.get("id"):
+            return {}
+        cached = _numbers.get(series["id"])
+        if cached and time.monotonic() - cached[0] < _NUMBER_TTL:
+            return cached[1]
+        files = _api("GET", "/episodefile", url, key, params={"seriesId": series["id"]}) or []
+        episodes = _api("GET", "/episode", url, key, params={"seriesId": series["id"]}) or []
+        paths = {}
+        for item in files if isinstance(files, list) else []:
+            if item.get("id") and item.get("path"):
+                paths[item["id"]] = map_path(item["path"], mappings, "sonarr")
+        found = {}
+        for episode in episodes if isinstance(episodes, list) else []:
+            path = paths.get(episode.get("episodeFileId"))
+            if not path or episode.get("seasonNumber") is None or episode.get("episodeNumber") is None:
+                continue
+            found.setdefault(path, []).append((int(episode["seasonNumber"]), int(episode["episodeNumber"])))
+        for pairs in found.values():
+            pairs.sort()
+        _numbers[series["id"]] = (time.monotonic(), found)
+        return found
+    except Exception as exc:
+        logger.info("Sonarr episode numbers were not used for %s: %s", show_path, exc)
+        return {}
+
+
+def known_seasons(show_path, tvdb_id=None):
+    """Season numbers Sonarr lists for the show, or None when Sonarr is off or does not know the show."""
+    from curator import automation
+
+    try:
+        url, key = _settings()
+        if not url or not key:
+            return None
+        mappings = (automation.current()[0] or {}).get("path_mappings") or []
+        series = _find_series(show_path, tvdb_id, url.rstrip("/"), key, mappings)
+        numbers = {int(item["seasonNumber"]) for item in (series or {}).get("seasons") or [] if item.get("seasonNumber") is not None}
+        return numbers or None
+    except Exception as exc:
+        logger.info("Sonarr seasons were not read for %s: %s", show_path, exc)
+        return None
+
+
+def clear_numbers():
+    _numbers.clear()
+    _series_list[:] = [0.0, []]

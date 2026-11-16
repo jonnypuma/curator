@@ -27,7 +27,8 @@ RUN set -eux; \
 
 FROM python:3.11-slim-trixie
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV UMASK=0002 \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HOME=/tmp \
@@ -44,6 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xz-utils \
         flac \
         ffmpeg \
+        libvulkan1 \
+        mesa-vulkan-drivers \
         libbluray2 \
         libdvdread8 \
         mkvtoolnix \
@@ -105,7 +108,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # --chmod keeps files readable and directories searchable in this layer.
 # A later "chmod -R /app" would copy every file into a new layer and is what made rebuilds slow.
 COPY --chmod=755 . .
-RUN sed -i 's/\r$//' /app/entrypoint.sh \
+# The badge images (studio, network and label logos and the rest) come as one file, media.zip; the media/ folder
+# stays out of the image (.dockerignore). Build the file with `python scripts/pack-media.py` from the repository root.
+RUN test -f /app/media.zip || { echo "app/media.zip is missing: run  python scripts/pack-media.py  first" >&2; exit 1; } \
+    && sed -i 's/\r$//' /app/entrypoint.sh \
     && mkdir -p /config /cache /data /music /movies /tv
 
 EXPOSE 4455

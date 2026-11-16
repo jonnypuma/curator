@@ -84,124 +84,74 @@ function tvView(node) {
     return { _kind: "loading", id: node.id, title: "Loading…", _showId: String(node.id).split(":")[1] || "" };
 }
 
+// A show or season matches an episode-based filter when one of its episodes does. An opened show is checked
+// episode by episode; one that is not loaded yet uses the totals the server sends with the show list.
+// Episodes that are not on disk (missing) never count.
+function tvGap(row, countKey, test) {
+    if (row._kind === "episode") return !row.missing && test(row);
+    if (row._kind !== "season" && row._kind !== "show") return false;
+    const detail = row._kind === "show" ? state.video.showDetails.get(row.id) : (state.video.showDetails.get(row._showId) || state.video.showDetails.get(row.show_id));
+    if (detail && detail.episodes) {
+        const eps = row._kind === "season" ? detail.episodes.filter((e) => e.season_id === row.id) : detail.episodes;
+        return eps.some((e) => !e.missing && test(e));
+    }
+    return Number(row[countKey]) > 0;
+}
+
+// No NFO: a show whose tvshow.nfo or any episode .nfo is missing, so the show is listed for its episodes too (the
+// page has not loaded the episodes of every show; no_nfo_count comes from the server). A missing-episode placeholder
+// has no file, and a season holding only those needs no season .nfo, so neither counts.
+function tvNoNfo(row) {
+    const episodeLacks = (row2) => row2.has_nfo === false;
+    if (row._kind === "episode") return !row.missing && episodeLacks(row);
+    if (row._kind === "season") {
+        const onDisk = Number(row.episode_count || 0) - Number(row.missing_count || 0);
+        return (row.has_nfo === false && onDisk > 0) || tvGap(row, "no_nfo_count", episodeLacks);
+    }
+    if (row._kind === "show") return row.has_nfo === false || tvGap(row, "no_nfo_count", episodeLacks);
+    return false;
+}
+
 const TV_RIBBONS = [
-    ["new", "New", (row) => row.status === "NEW" || !!row.new_count],
+    ["new", "New", (row) => row.status === "NEW" || !!row.new_count, "new_count"],
     ["latest", "Latest added", (row) => recentAdded(row)],
     ["upgrade", "Upgrade available", (row) => !!row.upgrade],
-    ["uhd", "4K", (row) => row.resolution === "4K" || row.resolution === "8K"],
-    ["fhd", "1080p", (row) => row.resolution === "1080p"],
-    ["fel", "P7 FEL", (row) => String(row.dovi_profile || "").startsWith("7") && row.dovi_el_type === "FEL"],
-    ["dv", "DV", (row) => row.hdr_format === "dovi"],
-    ["hdr10plus", "HDR10+", (row) => row.hdr_format === "hdr10plus" || row.hdr_secondary === "HDR10+"],
-    ["hdr10", "HDR10", (row) => row.hdr_format === "hdr10" || row.hdr_secondary === "HDR10"],
-    ["hlg", "HLG", (row) => row.hdr_format === "hlg" || row.hdr_secondary === "HLG"],
-    ["sdr", "SDR", (row) => row.hdr_format === "sdr"],
+    ["uhd", "4K", (row) => tvGap(row, "uhd_count", (e) => e.resolution === "4K" || e.resolution === "8K"), "uhd_count"],
+    ["fhd", "1080p", (row) => tvGap(row, "fhd_count", (e) => e.resolution === "1080p"), "fhd_count"],
+    ["fel", "P7 FEL", (row) => tvGap(row, "fel_count", (e) => String(e.dovi_profile || "").startsWith("7") && e.dovi_el_type === "FEL"), "fel_count"],
+    ["dv", "DV", (row) => tvGap(row, "dv_count", (e) => e.hdr_format === "dovi"), "dv_count"],
+    ["hdr10plus", "HDR10+", (row) => tvGap(row, "hdr10plus_count", (e) => e.hdr_format === "hdr10plus" || e.hdr_secondary === "HDR10+"), "hdr10plus_count"],
+    ["hdr10", "HDR10", (row) => tvGap(row, "hdr10_count", (e) => e.hdr_format === "hdr10" || e.hdr_secondary === "HDR10"), "hdr10_count"],
+    ["hlg", "HLG", (row) => tvGap(row, "hlg_count", (e) => e.hdr_format === "hlg" || e.hdr_secondary === "HLG"), "hlg_count"],
+    ["sdr", "SDR", (row) => tvGap(row, "sdr_count", (e) => e.hdr_format === "sdr"), "sdr_count"],
     ["missing", "Missing episodes", (row) => row._kind === "missing" || !!row.missing || Number(row.missing_count) > 0 || ((row.missing_episodes || []).length > 0)],
     ["health", "Health warnings", (row) => healthWords(row).length > 0],
-    ["nonfo", "No NFO", (row) => row.has_nfo === false],
+    ["nonfo", "No NFO", (row) => tvNoNfo(row), "no_nfo_count"],
     ["nfo", "NFO changes", (row) => !!row.nfo_stale || !!row.nfo_family_stale],
     ["noposter", "No poster", (row) => {
-        if (row._kind && row._kind !== "show") return false;
+        if (row._kind && row._kind !== "show" && row._kind !== "season") return false;
         const art = row.artwork;
         if (Array.isArray(art)) return !art.includes("poster");
         return !(art && art.poster);
     }],
-    ["noimdb", "No IMDb rating", (row) => {
-        if (row._kind === "episode") return !(Number(row.rating_imdb) > 0);
-        if (row._kind === "season" || row._kind === "show") {
-            const detail = row._kind === "show" ? state.video.showDetails.get(row.id) : (state.video.showDetails.get(row._showId) || state.video.showDetails.get(row.show_id));
-            if (detail && detail.episodes && detail.episodes.length) {
-                const eps = row._kind === "season" ? detail.episodes.filter((e) => e.season_id === row.id) : detail.episodes;
-                return eps.some((e) => !(Number(e.rating_imdb) > 0));
-            }
-            return true;
-        }
-        return false;
-    }],
+    ["noimdb", "No IMDb rating", (row) => tvGap(row, "no_imdb_count", (e) => !(Number(e.rating_imdb) > 0)), "no_imdb_count"],
     ["probefail", "Probe failed", (row) => !!row.probe_error],
+    ["corrupt", "Corrupt", (row) => tvGap(row, "corrupt_count", (e) => (e.health || []).includes("corrupt")), "corrupt_count"],
     ["scrapefail", "Scrape failed", (row) => !!row.scrape_error],
     ["unscraped", "Not scraped", (row) => row._kind === "season" ? false : !row.scraped_at],
-    ["unmatched", "Unmatched", (row) => !row.tmdb_id && !row.imdb_id && !row.tvdb_id],
+    ["unmatched", "Unmatched", (row) => (!row._kind || row._kind === "show") && !row.tmdb_id && !row.imdb_id && !row.tvdb_id],
     ["duplicate", "Duplicate", (row) => !!row.duplicate_release],
     ["held", "Not found", (row) => !!row.prune_held],
     ["locked", "Locked", (row) => !!row.locked],
     ["ignored", "Ignored", (row) => row.status === "IGNORED"],
-    ["multi", "Multi-episode", (row) => isMultiRow(row)],
-    ["nosubs", "No subtitles", (row) => {
-        if (row._kind === "episode") return !(row.sub_langs && row.sub_langs.length);
-        if (row._kind === "season" || row._kind === "show") {
-            const detail = row._kind === "show" ? state.video.showDetails.get(row.id) : (state.video.showDetails.get(row._showId) || state.video.showDetails.get(row.show_id));
-            if (detail && detail.episodes && detail.episodes.length) {
-                const eps = row._kind === "season" ? detail.episodes.filter((e) => e.season_id === row.id) : detail.episodes;
-                return eps.some((e) => !(e.sub_langs && e.sub_langs.length));
-            }
-            return true;
-        }
-        return false;
-    }],
-    ["noen_subs", "Missing English subtitles", (row) => {
-        if (row._kind === "episode") return !(row.sub_langs || []).some((l) => /^en/i.test(String(l)));
-        if (row._kind === "season" || row._kind === "show") {
-            const detail = row._kind === "show" ? state.video.showDetails.get(row.id) : (state.video.showDetails.get(row._showId) || state.video.showDetails.get(row.show_id));
-            if (detail && detail.episodes && detail.episodes.length) {
-                const eps = row._kind === "season" ? detail.episodes.filter((e) => e.season_id === row.id) : detail.episodes;
-                return eps.some((e) => !(row.sub_langs || []).some((l) => /^en/i.test(String(l))));
-            }
-            return true;
-        }
-        return false;
-    }],
-    ["multi_audio", "Multi-audio", (row) => {
-        if (row._kind === "episode") return (row.audio_langs || []).length > 1;
-        if (row._kind === "season" || row._kind === "show") {
-            const detail = row._kind === "show" ? state.video.showDetails.get(row.id) : (state.video.showDetails.get(row._showId) || state.video.showDetails.get(row.show_id));
-            if (detail && detail.episodes && detail.episodes.length) {
-                const eps = row._kind === "season" ? detail.episodes.filter((e) => e.season_id === row.id) : detail.episodes;
-                return eps.some((e) => (e.audio_langs || []).length > 1);
-            }
-            return true;
-        }
-        return false;
-    }],
-    ["unknown_audio", "Unknown audio language", (row) => {
-        if (row._kind === "episode") return Number(row.audio_unknown) > 0;
-        if (row._kind === "season" || row._kind === "show") {
-            const detail = row._kind === "show" ? state.video.showDetails.get(row.id) : (state.video.showDetails.get(row._showId) || state.video.showDetails.get(row.show_id));
-            if (detail && detail.episodes && detail.episodes.length) {
-                const eps = row._kind === "season" ? detail.episodes.filter((e) => e.season_id === row.id) : detail.episodes;
-                return eps.some((e) => Number(e.audio_unknown) > 0);
-            }
-            return true;
-        }
-        return false;
-    }],
-    ["unknown_subs", "Unknown subtitle language", (row) => {
-        if (row._kind === "episode") return Number(row.sub_unknown) > 0;
-        if (row._kind === "season" || row._kind === "show") {
-            const detail = row._kind === "show" ? state.video.showDetails.get(row.id) : (state.video.showDetails.get(row._showId) || state.video.showDetails.get(row.show_id));
-            if (detail && detail.episodes && detail.episodes.length) {
-                const eps = row._kind === "season" ? detail.episodes.filter((e) => e.season_id === row.id) : detail.episodes;
-                return eps.some((e) => Number(e.sub_unknown) > 0);
-            }
-            return true;
-        }
-        return false;
-    }],
-    ["nothumb", "No episode thumb", (row) => {
-        if (row._kind === "episode") return !(Array.isArray(row.artwork) ? row.artwork.includes("thumb") : (row.artwork && row.artwork.thumb));
-        if (row._kind === "season" || row._kind === "show") {
-            const detail = row._kind === "show" ? state.video.showDetails.get(row.id) : (state.video.showDetails.get(row._showId) || state.video.showDetails.get(row.show_id));
-            if (detail && detail.episodes && detail.episodes.length) {
-                const eps = row._kind === "season" ? detail.episodes.filter((e) => e.season_id === row.id) : detail.episodes;
-                return eps.some((e) => !(Array.isArray(e.artwork) ? e.artwork.includes("thumb") : (e.artwork && e.artwork.thumb)));
-            }
-            return true;
-        }
-        return false;
-    }],
+    ["multi", "Multi-episode", (row) => isMultiRow(row), "multi_count"],
+    ["nosubs", "No subtitles", (row) => tvGap(row, "no_subs_count", (e) => !(e.sub_langs && e.sub_langs.length)), "no_subs_count"],
+    ["noen_subs", "Missing English subtitles", (row) => tvGap(row, "no_en_subs_count", (e) => !(e.sub_langs || []).some((l) => /^en/i.test(String(l)))), "no_en_subs_count"],
+    ["multi_audio", "Multi-audio", (row) => tvGap(row, "multi_audio_count", (e) => (e.audio_langs || []).length > 1), "multi_audio_count"],
+    ["unknown_audio", "Unknown audio language", (row) => tvGap(row, "unknown_audio_count", (e) => Number(e.audio_unknown) > 0), "unknown_audio_count"],
+    ["unknown_subs", "Unknown subtitle language", (row) => tvGap(row, "unknown_subs_count", (e) => Number(e.sub_unknown) > 0), "unknown_subs_count"],
+    ["nothumb", "No episode thumb", (row) => tvGap(row, "no_thumb_count", (e) => !(Array.isArray(e.artwork) ? e.artwork.includes("thumb") : (e.artwork && e.artwork.thumb))), "no_thumb_count"],
     ["notrailer", "No trailer", (row) => (row._kind === "show" || row._kind === "season") && !row.has_trailer && !row.trailer && !row.trailer_file],
-    // Seasons carry the file found when their show was opened; a show carries the stored check.
-    ["missing_trailer", "Missing trailer", (row) => (row._kind === "show" && row.has_local_trailer === false) || (row._kind === "season" && row.trailer_file === null)],
     ["missing_theme", "Missing theme song", (row) => row._kind === "show" && row.has_local_theme === false],
 ];
 
@@ -243,9 +193,48 @@ function visibleTvRows(exceptKey) {
     const rows = [];
     shows.forEach((show) => {
         rows.push(show);
-        (children.get(show.id) || []).forEach((child) => rows.push(child));
+        (children.get(show.id) || []).forEach((child) => {
+            if (child._kind === "episode" && Array.isArray(child.copies) && child.copies.length && videoCfg().collapse_versions) {
+                // The row stands for all of its files, so it shows the pill of any of them.
+                child.upgrade = !!child.upgrade || child.copies.some((copy) => copy.upgrade);
+            }
+            rows.push(child);
+            if (child._kind === "episode") episodeVersionRows(child).forEach((version) => rows.push(version));
+        });
     });
     return rows;
+}
+
+function episodeVersionKey(episode) {
+    return `episode:${episode.id}`;
+}
+
+// A second file of one episode. With "Collapse versions" on it sits under the episode row until that row is
+// opened. With it off, each file is its own row.
+function episodeVersionRows(episode) {
+    const copies = Array.isArray(episode.copies) ? episode.copies : [];
+    if (!copies.length) return [];
+    const collapse = !!(typeof videoCfg === "function" && videoCfg().collapse_versions);
+    if (collapse && !(state.video.openVersions || new Set()).has(episodeVersionKey(episode))) return [];
+    const { copies: ignored, ...base } = episode;
+    // Every file of the episode gets a row, best first: the episode's own file and each extra one.
+    const own = { ...base, _own: true, upgrade: !!episode.upgrade, duplicate_release: !!episode.duplicate_release, upgrade_path: episode.upgrade_path || "" };
+    const files = [own, ...copies.map((copy) => ({ ...base, ...copy, upgrade: !!copy.upgrade, duplicate_release: false, upgrade_path: "" }))]
+        .map((item, index) => ({ item, index }))
+        .sort((left, right) => (Number(right.item.copy_score) || 0) - (Number(left.item.copy_score) || 0) || left.index - right.index);
+    // With versions not collapsed the episode row is its own file, so only the other files get a row.
+    return files.filter(({ item }) => collapse || !item._own).map(({ item }, index) => ({
+        ...item,
+        _kind: "episode",
+        _version: true,
+        _versionIndex: index + 1,
+        _versionOf: episode.id,
+        id: episode.id,
+        status: "",
+        created_at: episode.created_at,
+        date_added: episode.date_added,
+        playcount: episode.playcount,
+    }));
 }
 
 function fileSpanList(span) {
@@ -344,7 +333,18 @@ function tvTitleCell(row) {
     const extra = row.extra || (row._kind === "season" && (row.extra_episodes || []).length) ? alertMark(row._kind === "season" ? "This season has episodes that are not in the TMDB season" : "This episode is not in the TMDB season") : "";
     const missing = (row.missing || row._kind === "missing") ? chip("Missing", "is-muted") : "";
     const span = fileSpanNote(row.file_span);
-    return `<span class="vl-title${pad}" title="${escapeHtml(labelText)}">${caret}${headingHtml} ${missing}${extra}${span}</span>${titleFacts(row)}`;
+    if (row._version) {
+        const file = String(row.copy_path || "").split(/[\\/]/).pop();
+        return `<span class="vl-title${pad}" title="${escapeHtml(row.copy_path || labelText)}">↳ ${headingHtml} <span class="muted">${escapeHtml(file || "another version")}</span></span>`;
+    }
+    const copies = row._kind === "episode" && Array.isArray(row.copies) ? row.copies.length : 0;
+    const collapse = !!(typeof videoCfg === "function" && videoCfg().collapse_versions);
+    const versionKey = copies ? episodeVersionKey(row) : "";
+    const versionCaret = copies && collapse
+        ? `<button type="button" class="vl-caret" data-action="video-versions" data-key="${escapeHtml(versionKey)}" aria-label="Show versions">${(state.video.openVersions || new Set()).has(versionKey) ? "▾" : "▸"}</button>`
+        : "";
+    const versionNote = copies && collapse ? ` <span class="muted">${copies + 1} versions available</span>` : "";
+    return `<span class="vl-title${pad}" title="${escapeHtml(labelText)}">${versionCaret || caret}${headingHtml} ${missing}${extra}${span}${versionNote}</span>${titleFacts(row)}`;
 }
 
 function setTvChecked(kind, id, on) {
@@ -352,6 +352,34 @@ function setTvChecked(kind, id, on) {
     const key = `${kind}:${id}`;
     if (on) state.video.tvChecked.add(key);
     else state.video.tvChecked.delete(key);
+    // Un-ticking a show also drops the seasons and episodes that were ticked for it in one go (see tvBulkChildren).
+    if (!on && kind === "show" && state.video.tvKids && state.video.tvKids.has(String(id))) {
+        state.video.tvKids.get(String(id)).forEach((child) => state.video.tvChecked.delete(child));
+        state.video.tvKids.delete(String(id));
+    }
+}
+
+// The list filters that are on: the quick/more filters and the column filters.
+function tvRibbonKeys() {
+    return TV_RIBBONS.map(([key]) => key).filter((key) => libraryRibbons().has(key));
+}
+
+function tvColumnFiltersOn() {
+    return Object.values(state.video.tvFilters || {}).some((query) => typeof columnFilterActive === "function" ? columnFilterActive(query) : !!query);
+}
+
+function tvFiltersOn() {
+    return tvRibbonKeys().length > 0 || tvColumnFiltersOn();
+}
+
+// Would this episode be listed under the filters that are on? An episode that is not on disk never is.
+function tvEpisodeKept(detail, season, episode) {
+    if (!episode || episode.missing) return false;
+    if (!tvFiltersOn()) return true;
+    const view = tvView({ type: "episode", id: episode.id, episode, season, show: detail });
+    const ribbons = TV_RIBBONS.filter(([key]) => libraryRibbons().has(key));
+    if (!ribbons.every(([, , test]) => test(view))) return false;
+    return rowMatchesFilters(view, state.video.tvFilters || {});
 }
 
 function tvShowIdFor(kind, id) {
@@ -372,11 +400,17 @@ function applyTvChildChecks(kind, id, on) {
     const seasons = kind === "season"
         ? (detail.seasons || []).filter((season) => String(season.id) === String(id))
         : (detail.seasons || []);
+    // Ticking picks only the episodes that are on disk and pass the filters that are on; a season is picked
+    // when it has one (or when nothing is filtered). Un-ticking clears everything.
+    const filtered = on && tvFiltersOn();
     seasons.forEach((season) => {
-        if (kind === "show") setTvChecked("season", season.id, on);
+        let any = false;
         (detail.episodes || []).filter((episode) => String(episode.season_id) === String(season.id)).forEach((episode) => {
-            setTvChecked("episode", episode.id, on);
+            const keep = !on || tvEpisodeKept(detail, season, episode);
+            setTvChecked("episode", episode.id, on ? keep : false);
+            if (keep) any = true;
         });
+        if (kind === "show") setTvChecked("season", season.id, on ? (!filtered || any) : false);
     });
 }
 
@@ -395,9 +429,21 @@ async function ensureTvChildChecks(kind, id, on) {
     applyTvChildChecks(kind, id, on);
 }
 
+// Which kinds the footer actions work on. All three by default; the footer has a box for each.
+function tvScope() {
+    if (!state.video.tvScope) state.video.tvScope = { show: true, season: true, episode: true };
+    return state.video.tvScope;
+}
+
+// The ticked keys ("show:id", "season:id", "episode:id") that fall inside that scope.
+function tvScopedKeys() {
+    const scope = tvScope();
+    return [...selectionChecked("tv")].filter((key) => scope[String(key).slice(0, String(key).indexOf(":"))] !== false);
+}
+
 function tvCheckedShows() {
     const shows = new Set();
-    selectionChecked("tv").forEach((key) => {
+    tvScopedKeys().forEach((key) => {
         const split = key.indexOf(":");
         const kind = key.slice(0, split);
         const id = key.slice(split + 1);
@@ -425,14 +471,23 @@ function ensureExpandedTvShows() {
     });
 }
 
+// What the filter counts are taken over: every show, plus the seasons and episodes of the shows that are loaded.
+// Each row carries its kind so the same tests work on a show, a season or an episode.
+function tvRibbonRows() {
+    const rows = (state.video.shows || []).map((show) => ({ ...show, _kind: "show", _showId: show.id }));
+    [...(state.video.showDetails || new Map()).values()].forEach((detail) => {
+        (detail.seasons || []).forEach((season) => rows.push({ ...season, _kind: "season", _showId: detail.id }));
+        (detail.episodes || []).forEach((episode) => rows.push({ ...episode, _kind: "episode", _showId: detail.id }));
+    });
+    return rows;
+}
+
 function renderTvTree() {
     ensureExpandedTvShows();
     const host = document.getElementById("video-list");
     const scroll = typeof pinnedListScroll === "function" ? pinnedListScroll(host) : (host ? host.scrollTop : 0);
     if (host) state.videoScrollPin = true;
-    document.getElementById("video-ribbons").innerHTML = ribbonBarHtml(TV_RIBBONS, (state.video.shows || []).concat(
-        [...(state.video.showDetails || new Map()).values()].flatMap((detail) => (detail.episodes || []).map((episode) => ({ ...episode, _kind: "episode" })))
-    ));
+    document.getElementById("video-ribbons").innerHTML = ribbonBarHtml(TV_RIBBONS, tvRibbonRows(), null, true, true);
     const shows = state.video.shows || [];
     const episodes = shows.reduce((sum, show) => sum + (show.episode_count || 0), 0);
     if (!shows.length) {
@@ -464,15 +519,17 @@ function renderTvTree() {
 }
 
 function tvMatrixRowHtml(row, index) {
-    const action = { show: "video-open-show", season: "video-open-season", episode: "video-open-episode" }[row._kind] || "";
+    const action = { show: "video-open-show", season: "video-open-season", episode: "video-open-episode", missing: "video-pick-missing" }[row._kind] || "";
     const sel = state.video.tvSel;
-    const selected = sel && sel.type === row._kind && sel.id === row.id ? " is-selected" : "";
+    const selected = row._kind === "missing"
+        ? (state.video.missingSel === row.id ? " is-selected" : "")
+        : (!row._version && sel && sel.type === row._kind && sel.id === row.id ? " is-selected" : "");
     const cells = movieColumns().map((column) => matrixCell(column, row)).join("");
-    const box = row._kind === "loading" || row._kind === "missing" ? `<span class="vm-cell vm-check"></span>`
+    const box = row._kind === "loading" || row._kind === "missing" || row._version ? `<span class="vm-cell vm-check"></span>`
         : `<span class="vm-cell vm-check"><input type="checkbox" data-action="video-check" data-kind="${row._kind}" data-id="${escapeHtml(row.id)}" ${matrixChecked(row) ? "checked" : ""} aria-label="Select"></span>`;
     const marked = row.status === "NEW" || ((row._kind === "show" || row._kind === "season") && row.new_count);
     const missingAttrs = row._kind === "missing"
-        ? ` data-kind="missing" data-season="${Number(row.season_number)}" data-episode="${Number(row.episode_number)}"`
+        ? ` data-kind="missing" data-season="${Number(row.season_number)}" data-season-id="${escapeHtml(row.season_id || "")}" data-episode="${Number(row.episode_number)}"`
         : "";
     return `<div class="vm-row${selected}${marked ? " is-new" : ""}" style="top:${index * VIDEO_ROW}px" ${action ? `data-action="${action}"` : ""} data-id="${escapeHtml(row.id)}" data-show="${escapeHtml(row._showId || "")}"${missingAttrs} role="row">${box}${cells}</div>`;
 }
@@ -549,7 +606,8 @@ function renderShowInfo(show) {
         <div class="vchips vchips-art">${artMarks(show.artwork, INFO_ART.show)}${nfoChip("tvshow.nfo", show.nfo_path, "show", show.id, show.nfo_stale)}</div>
         <div class="vchips vchips-media">${chip(`${(show.seasons || []).length} seasons`)}${chip(`${onDisk} episodes`)}${missingCount ? chip(`${missingCount} missing`, "is-muted") : ""}${extraCount ? alertMark(`${extraCount} episode${extraCount === 1 ? "" : "s"} are not in the TMDB season`) : ""}${fresh ? chip(fresh === 1 ? "1 new episode" : `${fresh.toLocaleString()} new episodes`, "is-new") : ""}${show.episode_order && show.episode_order !== "aired" ? chip(`${show.episode_order} order`) : ""}</div>
         ${isWanted(show) ? `<p class="muted">Waiting for the files.</p>` : ""}
-        ${videoItemActions("show", show)}`;
+        ${videoItemActions("show", show)}
+        ${providerIdsRow(show)}`;
     const seasons = (show.seasons || []).map((season) => {
         const poster = (season.artwork || {}).poster || "";
         const sHave = Math.max(0, (season.episode_count || 0) - (season.missing_count || 0));
@@ -725,7 +783,7 @@ function episodeById(id) {
 function selectedSplitEpisodeIds() {
     if (state.media !== "tv") return [];
     const ids = [];
-    for (const key of selectionChecked("tv")) {
+    for (const key of tvScopedKeys()) {
         const text = String(key);
         const cut = text.indexOf(":");
         if (cut < 0 || text.slice(0, cut) !== "episode") continue;
@@ -1106,6 +1164,11 @@ function pollEpisodeSplit() {
 
 async function restoreEpisodeSplit(id) {
     const data = await api(`/api/v1/episodes/${encodeURIComponent(id)}/split/restore`, { method: "POST", body: {} });
+    if (data.queued) {
+        notify(data.message, "info");
+        document.getElementById("episode-split-modal").classList.add("hidden");
+        return;
+    }
     notify(data.message || "The original file is restored.", "success");
     document.getElementById("episode-split-modal").classList.add("hidden");
     stopSplitPoll();
@@ -1117,6 +1180,11 @@ async function restoreEpisodeSplit(id) {
 
 async function deleteSplitSource(id) {
     const data = await api(`/api/v1/episodes/${encodeURIComponent(id)}/split/source`, { method: "POST", body: {} });
+    if (data.queued) {
+        notify(data.message, "info");
+        document.getElementById("episode-split-modal").classList.add("hidden");
+        return;
+    }
     notify(data.message || "The source file was deleted.", "success");
     document.getElementById("episode-split-modal").classList.add("hidden");
     stopSplitPoll();
@@ -1169,6 +1237,7 @@ function renderEpisodeInfo(episode) {
         <div class="vchips vchips-art">${artMarks(episode.artwork, INFO_ART.episode)}${nfoChip("episode.nfo", episode.nfo_path, "episode", episode.id, episode.nfo_stale)}</div>
         <div class="vchips vchips-media">${fileChips(episode.file ? { ...episode.file, audio_main: briefAudio(episode.file) } : null)}${videoStatus(episode, true)}</div>
         ${videoItemActions("episode", episode)}
+        ${providerIdsRow(episode)}
         ${storyCopy(episode)}
         ${splitButtons(episode)}`;
     document.getElementById("video-center").innerHTML = `<article class="vinfo">
@@ -1256,6 +1325,10 @@ async function expandAllVideoRows() {
         (detail && detail.seasons || []).forEach((season) => {
             state.video.expanded.add(`season:${season.id}`);
         });
+        if (!state.video.openVersions) state.video.openVersions = new Set();
+        (detail && detail.episodes || []).forEach((episode) => {
+            if (Array.isArray(episode.copies) && episode.copies.length) state.video.openVersions.add(episodeVersionKey(episode));
+        });
     });
     renderTvTree();
 }
@@ -1274,5 +1347,6 @@ function collapseAllVideoRows() {
     }
     if (state.media !== "tv") return;
     state.video.expanded.clear();
+    if (state.video.openVersions) state.video.openVersions.clear();
     renderTvTree();
 }

@@ -6,27 +6,36 @@ import subprocess
 from resonance import db
 from resonance.errors import AppError
 from resonance.paths import assert_library_writable, inside, music_roots, path_role
-from resonance.quality import album_score, format_summary, higher_copy, release_kind, same_release_kind, similar_copies, upgrade_source
+from resonance.quality import album_score, copy_kind, format_summary, higher_copy, release_kind, same_release_kind, similar_copies, upgrade_source
 
 logger = logging.getLogger(__name__)
 
 
-def refresh_stored():
+def refresh_stored(album_ids=None):
     """Record upgrades, shared-release duplicates, and original years. Runs at the end of a scan, not when the library is opened.
 
     Listing albums under the artist stored in their tags is separate catalogue
     maintenance. Doing it here made the scan sit on this step for the whole library.
+
+    album_ids limits the work to those albums and every copy that shares their artist and title or MusicBrainz release:
+    only those albums are read, not the library. An incremental scan passes the albums it added or read again. None
+    checks the whole library. A mark left behind elsewhere (its copy was removed) is cleared by clear_orphan_flags.
     """
     from resonance.fields import norm_name
 
+    candidates = None if album_ids is None else _copy_candidates(album_ids)
+    if candidates is not None and not candidates:
+        return 0
     rows = db.fetchall(
         """
         SELECT albums.id, albums.title, albums.type, albums.edition, albums.path, albums.path_role,
-               albums.quality_rank, albums.musicbrainz_release_id, albums.upgrade_source_id,
-               artists.name AS artist_name
+               albums.quality_rank, albums.musicbrainz_release_id, albums.upgrade_source_id, albums.duplicate_release,
+               artists.name AS artist_name,
+               (SELECT count(*)::int FROM tracks t WHERE t.album_id = albums.id) AS track_count
         FROM albums
         JOIN artists ON artists.id = albums.artist_id
-        """
+        """ + ("" if candidates is None else "WHERE albums.id = ANY(%s::uuid[])"),
+        () if candidates is None else (db.uuid_array(candidates),),
     )
     peers = [
         {
@@ -39,6 +48,7 @@ def refresh_stored():
             "quality_rank": row.get("quality_rank") or 0,
             "artist_name": row.get("artist_name") or "",
             "upgrade_source_id": str(row.get("upgrade_source_id") or ""),
+            "track_count": row.get("track_count"),
         }
         for row in rows
     ]
@@ -49,9 +59,10 @@ def refresh_stored():
             SELECT DISTINCT ON (album_id)
                    album_id::text AS album_id, tags->>'releasetype' AS release_type
             FROM tracks
-            WHERE COALESCE(tags->>'releasetype', '') <> ''
+            WHERE COALESCE(tags->>'releasetype', '') <> ''""" + ("" if candidates is None else " AND album_id = ANY(%s::uuid[])") + """
             ORDER BY album_id, disc_number, track_number
-            """
+            """,
+            () if candidates is None else (db.uuid_array(candidates),),
         )
     }
     for peer in peers:
@@ -65,9 +76,18 @@ def refresh_stored():
             continue
         by_title.setdefault(key, []).append(peer)
     alive = {str(peer["id"]) for peer in peers}
+    scope = None
+    if album_ids is not None:
+        scope = _scope_ids(rows, by_title, album_ids)
+        if not scope:
+            return 0
     same_quality = _same_quality_copies(by_title)
+    if scope is not None:
+        same_quality &= scope
     chosen = {}
     for peer in peers:
+        if scope is not None and str(peer["id"]) not in scope:
+            continue
         key = (norm_name(peer.get("artist_name")), norm_name(peer.get("title")))
         source = higher_copy(peer, by_title.get(key, []))
         if source:
@@ -75,10 +95,12 @@ def refresh_stored():
             continue
         stored = peer.get("upgrade_source_id") or ""
         match = peer_by_id.get(stored)
-        if stored and stored in alive and stored != str(peer["id"]) and match and same_release_kind(peer, match):
+        if stored and stored in alive and stored != str(peer["id"]) and match and same_release_kind(peer, match, "upgrade"):
             chosen[str(peer["id"])] = stored
+    limit = "" if scope is None else " AND id = ANY(%(scope)s::uuid[])"
+    named = {} if scope is None else {"scope": db.uuid_array(sorted(scope))}
     with db.transaction() as conn:
-        conn.execute("UPDATE albums SET upgrade_source_id = NULL WHERE upgrade_source_id IS NOT NULL")
+        conn.execute("UPDATE albums SET upgrade_source_id = NULL WHERE upgrade_source_id IS NOT NULL" + limit, named or None)
         if chosen:
             conn.execute(
                 """
@@ -89,12 +111,12 @@ def refresh_stored():
                 """,
                 (db.uuid_array(list(chosen)), db.uuid_array(list(chosen.values()))),
             )
-        conn.execute("UPDATE albums SET duplicate_release = FALSE WHERE duplicate_release IS TRUE")
+        conn.execute("UPDATE albums SET duplicate_release = FALSE WHERE duplicate_release IS TRUE" + limit, named or None)
         conn.execute(
             """
             UPDATE albums
             SET duplicate_release = TRUE
-            WHERE id IN (
+            WHERE TRUE""" + limit + """ AND id IN (
                 SELECT id
                 FROM (
                     SELECT id,
@@ -113,16 +135,65 @@ def refresh_stored():
                 ) AS grouped
                 WHERE copies > 1
             )
-            """
+            """,
+            named or None,
         )
         if same_quality:
             conn.execute(
                 "UPDATE albums SET duplicate_release = TRUE WHERE id = ANY(%s::uuid[])",
                 (db.uuid_array(list(same_quality)),),
             )
-        store_original_years(conn)
-        silence_dismissed_albums(conn)
+        store_original_years(conn, None if scope is None else sorted(scope))
+        silence_dismissed_albums(conn, None if scope is None else sorted(scope))
     return len(chosen)
+
+
+def _copy_candidates(album_ids):
+    """The given albums and every album that can be one of their copies: by an artist of the same name (capitals and
+    punctuation ignored, as by_title compares them) or of the same MusicBrainz release. The ids, as text."""
+    from resonance.fields import norm_name
+
+    ids = [str(item) for item in album_ids or [] if item]
+    if not ids:
+        return []
+    given = db.fetchall(
+        "SELECT al.musicbrainz_release_id::text AS mbid, ar.name AS artist_name "
+        "FROM albums al JOIN artists ar ON ar.id = al.artist_id WHERE al.id = ANY(%s::uuid[])",
+        (db.uuid_array(ids),),
+    )
+    names = {norm_name(row.get("artist_name")) for row in given} - {""}
+    artists = [str(row["id"]) for row in db.fetchall("SELECT id, name FROM artists") if norm_name(row.get("name")) in names]
+    releases = sorted({row["mbid"] for row in given if row.get("mbid")})
+    rows = db.fetchall(
+        "SELECT id::text AS id FROM albums WHERE id = ANY(%s::uuid[]) OR artist_id = ANY(%s::uuid[]) "
+        "OR musicbrainz_release_id = ANY(%s::uuid[])",
+        (db.uuid_array(ids), db.uuid_array(artists), db.uuid_array(releases)),
+    )
+    return [row["id"] for row in rows]
+
+
+def _scope_ids(rows, by_title, album_ids):
+    """The albums a scoped refresh looks at: the given ones, their copies, and every album that carries a mark."""
+    from resonance.fields import norm_name
+
+    wanted = {str(item) for item in album_ids or []}
+    for row in rows:
+        if row.get("upgrade_source_id") or row.get("duplicate_release"):
+            wanted.add(str(row["id"]))
+    by_release = {}
+    for row in rows:
+        if row.get("musicbrainz_release_id"):
+            by_release.setdefault(str(row["musicbrainz_release_id"]), set()).add(str(row["id"]))
+    scope = set(wanted)
+    for row in rows:
+        if str(row["id"]) not in wanted:
+            continue
+        key = (norm_name(row.get("artist_name")), norm_name(row.get("title")))
+        scope.update(str(peer["id"]) for peer in by_title.get(key, []))
+        if row.get("musicbrainz_release_id"):
+            scope.update(by_release.get(str(row["musicbrainz_release_id"]), ()))
+    known = {str(row["id"]) for row in rows}
+    return scope & known
 
 
 def clear_orphan_flags():
@@ -225,6 +296,7 @@ def _album_peer(row, release_types):
         "artist_name": row.get("artist_name") or "",
         "upgrade_source_id": str(row.get("upgrade_source_id") or ""),
         "musicbrainz_release_id": str(row.get("musicbrainz_release_id") or ""),
+        "track_count": row.get("track_count"),
     }
     peer["release_type"] = release_types.get(str(row["id"]), "")
     return peer
@@ -272,7 +344,8 @@ def _same_quality_album(album_id):
         """
         SELECT albums.id, albums.title, albums.type, albums.edition, albums.path, albums.path_role,
                albums.quality_rank, albums.musicbrainz_release_id, albums.upgrade_source_id,
-               artists.name AS artist_name
+               artists.name AS artist_name,
+               (SELECT count(*)::int FROM tracks t WHERE t.album_id = albums.id) AS track_count
         FROM albums JOIN artists ON artists.id = albums.artist_id
         WHERE albums.artist_id = %s OR lower(btrim(artists.name)) = lower(btrim(%s))
         """,
@@ -295,17 +368,19 @@ def refresh_album_peers(album):
     mbid = str(album.get("musicbrainz_release_id") or "").strip()
     if not artist_id and not mbid:
         return []
+    # A NULL, not '': Postgres converts the parameter to uuid even when the guard in front of it is false.
     rows = db.fetchall(
         """
         SELECT albums.id, albums.title, albums.type, albums.edition, albums.path, albums.path_role,
                albums.quality_rank, albums.musicbrainz_release_id, albums.upgrade_source_id,
-               artists.name AS artist_name
+               artists.name AS artist_name,
+               (SELECT count(*)::int FROM tracks t WHERE t.album_id = albums.id) AS track_count
         FROM albums JOIN artists ON artists.id = albums.artist_id
         WHERE albums.artist_id = %s
            OR lower(btrim(artists.name)) = lower(btrim(%s))
-           OR (%s <> '' AND albums.musicbrainz_release_id = %s)
+           OR albums.musicbrainz_release_id = %s::uuid
         """,
-        (artist_id, artist_name, mbid, mbid),
+        (artist_id, artist_name, mbid or None),
     )
     title_rows, mbid_rows = album_groups_after_delete(album, rows)
     if not title_rows and not mbid_rows:
@@ -324,7 +399,7 @@ def refresh_album_peers(album):
             continue
         stored = str(peer.get("upgrade_source_id") or "")
         match = peer_by_id.get(stored)
-        if stored and stored in alive and stored != str(peer["id"]) and match and same_release_kind(peer, match):
+        if stored and stored in alive and stored != str(peer["id"]) and match and same_release_kind(peer, match, "upgrade"):
             chosen[str(peer["id"])] = stored
     title_ids = [str(peer["id"]) for peer in peers]
     title_set = set(title_ids)
@@ -585,7 +660,7 @@ def _duplicate_groups(rows, release_types=None):
     for group in by_title.values():
         by_kind = {}
         for peer in group:
-            by_kind.setdefault(release_kind(peer), []).append(peer)
+            by_kind.setdefault(copy_kind(peer, "duplicate"), []).append(peer)
         for kind_group in by_kind.values():
             if len(kind_group) < 2:
                 continue
@@ -606,7 +681,7 @@ def _same_quality_copies(by_title):
     for group in by_title.values():
         by_kind = {}
         for peer in group:
-            by_kind.setdefault(release_kind(peer), []).append(peer)
+            by_kind.setdefault(copy_kind(peer, "duplicate"), []).append(peer)
         for kind_group in by_kind.values():
             if len(kind_group) < 2:
                 continue
@@ -618,9 +693,51 @@ def _same_quality_copies(by_title):
     return marked
 
 
-def store_original_years(conn=None):
-    """Copy the first track originaldate or originalyear onto the album."""
+def store_original_years(conn=None, album_ids=None):
+    """Copy the first track originaldate or originalyear onto the album. album_ids limits it to those albums."""
     execute = conn.execute if conn is not None else db.execute
+    if album_ids is not None:
+        if not album_ids:
+            return
+        ids = db.uuid_array(list(album_ids))
+        execute(
+            """
+            /* curator-original-year */
+            UPDATE albums AS album
+            SET original_year = src.original_year
+            FROM (
+                SELECT DISTINCT ON (album_id)
+                       album_id,
+                       substring(
+                           COALESCE(NULLIF(tags->>'originaldate', ''), NULLIF(tags->>'originalyear', ''))
+                           from '^[0-9]{4}'
+                       )::int AS original_year
+                FROM tracks
+                WHERE album_id = ANY(%s::uuid[])
+                  AND COALESCE(NULLIF(tags->>'originaldate', ''), NULLIF(tags->>'originalyear', '')) ~ '^[0-9]{4}'
+                ORDER BY album_id, disc_number, track_number
+            ) AS src
+            WHERE album.id = src.album_id
+              AND album.original_year IS DISTINCT FROM src.original_year
+            """,
+            (ids,),
+        )
+        execute(
+            """
+            /* curator-original-year */
+            UPDATE albums
+            SET original_year = NULL
+            WHERE id = ANY(%s::uuid[])
+              AND original_year IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM tracks
+                  WHERE tracks.album_id = albums.id
+                    AND COALESCE(NULLIF(tags->>'originaldate', ''), NULLIF(tags->>'originalyear', '')) ~ '^[0-9]{4}'
+              )
+            """,
+            (ids,),
+        )
+        return
     execute(
         """
         /* curator-original-year */
@@ -669,7 +786,7 @@ def comparison_source(album, peers):
     if not source_id or source_id == str(album.get("id")):
         return None
     for peer in peers or []:
-        if str(peer.get("id")) == source_id and same_release_kind(album, peer):
+        if str(peer.get("id")) == source_id and same_release_kind(album, peer, "upgrade"):
             return peer
     return None
 
@@ -713,12 +830,67 @@ def compare(album_id):
     from curator import arr_ids
 
     arr_ids.albums(copies)
+    anchor = next((index for index, peer in enumerate(ordered) if str(peer["id"]) == str(album["id"])), 0)
     return {
         "upgrade": _upgrade_payload(source),
         "same_edition": edition["same_edition"],
         "notice": edition["notice"],
         "copies": copies,
+        "track_rows": track_rows([grouped.get(str(peer["id"]), []) for peer in ordered], anchor),
     }
+
+
+def _track_order(track):
+    return int(track.get("disc_number") or 1), int(track.get("track_number") or 0), str(track.get("title") or "")
+
+
+def track_rows(copies_tracks, anchor=0):
+    """The tracks of every copy side by side, one row per song, lined up on the copy at anchor (the open album).
+
+    A track of another copy goes on the row of the anchor track that has the same AcoustID recording, else the same
+    fingerprint, else the same disc, number and title, else the same title anywhere, else the same disc and number.
+    A track no anchor track takes gets a row of its own, so a missing or extra song shows as an empty cell."""
+    from resonance.duplicates import _track_public
+    from resonance.fields import norm_name
+
+    count = len(copies_tracks)
+    if not count:
+        return []
+    rows = []
+    for track in sorted(copies_tracks[anchor] or [], key=_track_order):
+        row = [None] * count
+        row[anchor] = track
+        rows.append(row)
+
+    def position(track):
+        return int(track.get("disc_number") or 1), int(track.get("track_number") or 0)
+
+    tests = (
+        lambda a, b: bool(a.get("acoustid_recording_id")) and a.get("acoustid_recording_id") == b.get("acoustid_recording_id"),
+        lambda a, b: bool(a.get("fingerprint_hash")) and a.get("fingerprint_hash") == b.get("fingerprint_hash"),
+        lambda a, b: position(a) == position(b) and norm_name(a.get("title")) == norm_name(b.get("title")),
+        lambda a, b: bool(norm_name(a.get("title"))) and norm_name(a.get("title")) == norm_name(b.get("title")),
+        lambda a, b: position(a) == position(b),
+    )
+    for index, tracks in enumerate(copies_tracks):
+        if index == anchor:
+            continue
+        free = sorted(tracks or [], key=_track_order)
+        taken = set()
+        for test in tests:
+            for row in rows:
+                if row[anchor] is None or row[index] is not None:
+                    continue
+                match = next((track for track in free if id(track) not in taken and test(row[anchor], track)), None)
+                if match is not None:
+                    row[index] = match
+                    taken.add(id(match))
+        for track in free:
+            if id(track) not in taken:
+                row = [None] * count
+                row[index] = track
+                rows.append(row)
+    return [{"cells": [_track_public(track) if track else None for track in row]} for row in rows]
 
 
 def replace(album_id, source_id, purge=False):
@@ -844,7 +1016,7 @@ def shared_folder_block(target, others):
 
 
 def discard(album_id):
-    """Permanently delete one album folder and drop it from the index."""
+    """Delete one album folder (into the recycle bin when it is on) and drop it from the index."""
     album = db.fetchone(
         """
         SELECT albums.*, artists.name AS artist_name, artists.musicbrainz_artist_id
@@ -871,10 +1043,11 @@ def discard(album_id):
     track_ids = [
         row["id"] for row in db.fetchall("SELECT id::text AS id FROM tracks WHERE album_id = %s", (album_id,))
     ]
-    if os.path.isdir(real_path):
-        shutil.rmtree(real_path)
-    elif os.path.isfile(real_path):
-        os.remove(real_path)
+    from resonance import trash
+
+    if os.path.isdir(real_path) or os.path.isfile(real_path):
+        label = " \u2014 ".join(part for part in (album.get("artist_name"), album.get("title")) if part)
+        trash.discard(real_path, label=label, kind="album")
     db.execute("DELETE FROM albums WHERE id = %s", (album_id,))
     peers = refresh_album_peers(album)
     _rescan_lidarr_after_discard(album)
@@ -888,6 +1061,14 @@ def discard(album_id):
 
 
 def _rescan_lidarr_after_discard(album):
+    """Tell Lidarr to read the artist folder again, in the background: finding the artist and sending the command
+    are calls to Lidarr, and the delete does not wait for them."""
+    import threading
+
+    threading.Thread(target=_rescan_lidarr_now, args=(dict(album),), name="lidarr-after-delete", daemon=True).start()
+
+
+def _rescan_lidarr_now(album):
     """Trigger Lidarr rescan and clear cache if artist still has surviving albums."""
     try:
         from curator import arr_ids
@@ -1130,7 +1311,7 @@ def _drop_other_kind(album, peers):
     if not stored or stored == str(album.get("id")):
         return
     match = next((peer for peer in peers or [] if str(peer.get("id")) == stored), None)
-    if not match or same_release_kind(album, match):
+    if not match or same_release_kind(album, match, "upgrade"):
         return
     db.execute(
         "UPDATE albums SET upgrade_source_id = NULL WHERE id = %s AND upgrade_source_id = %s",
@@ -1140,9 +1321,13 @@ def _drop_other_kind(album, peers):
 
 
 def _subject(album_id):
+    """The album, its tracks, and the albums that can be its copies (same artist name or MusicBrainz release).
+
+    Only those are read: the window opened slowly when every album in the library was loaded as a possible peer."""
     album = db.fetchone(
         """
-        SELECT albums.*, artists.name AS artist_name
+        SELECT albums.*, artists.name AS artist_name,
+               (SELECT count(*)::int FROM tracks t WHERE t.album_id = albums.id) AS track_count
         FROM albums JOIN artists ON artists.id = albums.artist_id
         WHERE albums.id = %s
         """,
@@ -1153,9 +1338,12 @@ def _subject(album_id):
     tracks = db.fetchall("SELECT * FROM tracks WHERE album_id = %s", (album_id,))
     peers = db.fetchall(
         """
-        SELECT albums.*, artists.name AS artist_name
+        SELECT albums.*, artists.name AS artist_name,
+               (SELECT count(*)::int FROM tracks t WHERE t.album_id = albums.id) AS track_count
         FROM albums JOIN artists ON artists.id = albums.artist_id
-        """
+        WHERE albums.id = ANY(%s::uuid[])
+        """,
+        (db.uuid_array(_copy_candidates([album_id])),),
     )
     return album, tracks, peers
 
@@ -1207,7 +1395,9 @@ def _retire(path, album, root, purge):
     if not path or not os.path.isfile(path):
         return
     if purge:
-        os.remove(path)
+        from resonance import trash
+
+        trash.discard(path, kind="track")
         return
     folder = os.path.join(root, "_archive", _safe(album.get("artist_name")), _safe(album.get("title")))
     os.makedirs(folder, exist_ok=True)

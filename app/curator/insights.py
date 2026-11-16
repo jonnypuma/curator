@@ -604,7 +604,7 @@ _ART_LABELS = {
     "poster": "Poster", "fanart": "Fanart", "clearlogo": "Clearlogo", "clearart": "Clearart",
     "discart": "Disc", "banner": "Banner", "landscape": "Landscape", "keyart": "Keyart",
     "characterart": "Character art", "squareart": "Square", "thumb": "Thumb",
-    "extrafanart": "Extra fanart", "extrathumbs": "Extra thumbs", "music": "Music",
+    "extrafanart": "Extra fanart", "extrathumbs": "Extra thumbs (legacy)", "music": "Music",
 }
 
 
@@ -1338,6 +1338,8 @@ SET_COLUMNS = ["name", "tmdb_collection_id", "movie_count", "part_count", "missi
 MUSIC_COLUMNS = ["artist_name", "artist_mbid", "album_title", "album_mbid", "release_year", "original_year", "type",
                  "edition", "label", "country", "catalog", "barcode", "genres", "match_tier", "match_ratio",
                  "total_discs", "total_tracks", "duration_seconds", "status", "has_nfo", "has_artwork", "path"]
+MUSICVIDEO_COLUMNS = ["artist", "title", "album", "year", "genres", "director", "resolution", "video_codec", "hdr_format",
+                      "container", "duration_seconds", "size_bytes", "integrity", "locked", "playcount", "has_nfo", "path"]
 _FILE_SELECT = ", ".join(f"f.{column}" for column in FILE_COLUMNS if column != "file_edition")
 
 
@@ -1430,8 +1432,22 @@ def export_rows(media, ids, roots=None):
             (ids, ids),
         )
         columns = MUSIC_COLUMNS
+    elif media == "musicvideos":
+        rows = db.fetchall(
+            """
+            SELECT mv.artist, mv.title, mv.album, mv.year, mv.genres, mv.director, f.resolution, f.video_codec, f.hdr_format,
+                   f.container, f.duration_seconds, f.size_bytes, f.integrity, mv.locked, mv.playcount,
+                   mv.nfo_path IS NOT NULL AS has_nfo, mv.path
+            FROM music_videos mv
+            LEFT JOIN video_files f ON f.id = mv.file_id
+            WHERE mv.id = ANY(%s::uuid[])
+            ORDER BY array_position(%s::uuid[], mv.id)
+            """,
+            (ids, ids),
+        )
+        columns = MUSICVIDEO_COLUMNS
     else:
-        raise AppError("Export works for movies, TV shows, movie sets, and music", 400)
+        raise AppError("Export works for movies, TV shows, movie sets, music and music videos", 400)
     found = []
     for row in rows:
         item = _tracks(dict(row)) if media in ("movies", "tv") else dict(row)
@@ -1473,7 +1489,7 @@ def _clean_xml(val):
 def to_xml(media, columns, rows):
     root = ET.Element("curator_export", {"media": media, "exported": datetime.now().isoformat(timespec="seconds"),
                                          "count": str(len(rows))})
-    tag = {"movies": "movie", "tv": "episode", "sets": "set", "music": "album"}.get(media, "item")
+    tag = {"movies": "movie", "tv": "episode", "sets": "set", "music": "album", "musicvideos": "musicvideo"}.get(media, "item")
     for row in rows:
         item = ET.SubElement(root, tag)
         for column in columns:

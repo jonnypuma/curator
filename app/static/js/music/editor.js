@@ -827,7 +827,7 @@ async function confirmArtistMerge() {
         state.artistId = keepId;
         state.artistDetail = data;
     }
-    await loadLibrary();
+    await refreshLibraryItems([], [keepId, dropId]);
     await selectArtist(keepId);
     const warnings = (data.merge_warnings || []).filter(Boolean);
     if (warnings.length) notify(`Artists merged. ${warnings[0]}`, "warning");

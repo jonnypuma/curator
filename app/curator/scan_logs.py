@@ -14,8 +14,15 @@ _NAME = re.compile(
     r"(?:scan|(?:movies|tv|music|sets)-scan)-\d{4}-\d{2}-\d{2}-\d{6}(?:-\d+)?"
     r")\.log$"
 )
+_SCRAPE_NAME = re.compile(
+    r"^\d{4}-\d{2}-\d{2}-\d{6}(?:-\d+)?_(?:movies|tv|sets|episodes|seasons)_scrape\.log$"
+)
 _STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})")
 _MAX = 2_000_000
+
+
+def is_scrape(name: str) -> bool:
+    return bool(_SCRAPE_NAME.fullmatch(name))
 
 
 def _matches_media(name: str, media: str | None) -> bool:
@@ -25,7 +32,8 @@ def _matches_media(name: str, media: str | None) -> bool:
     return _media(name) == target
 
 
-def list_logs(media: str | None = None):
+def list_logs(media: str | None = None, kind: str = "scan"):
+    """kind is "scan" (scan reports) or "scrape" (scrape logs)."""
     folder = os.path.join(config_dir(), "logs")
     found = []
     try:
@@ -33,7 +41,10 @@ def list_logs(media: str | None = None):
     except OSError:
         return []
     for name in names:
-        if not _NAME.fullmatch(name):
+        if kind == "scrape":
+            if not is_scrape(name):
+                continue
+        elif not _NAME.fullmatch(name):
             continue
         if media and not _matches_media(name, media):
             continue
@@ -53,8 +64,8 @@ def list_logs(media: str | None = None):
     return found
 
 
-def latest_log(media: str) -> dict | None:
-    logs = list_logs(media=media)
+def latest_log(media: str, kind: str = "scan") -> dict | None:
+    logs = list_logs(media=media, kind=kind)
     if not logs:
         return None
     try:
@@ -65,7 +76,7 @@ def latest_log(media: str) -> dict | None:
 
 def read_log(name):
     safe = os.path.basename(str(name or ""))
-    if not _NAME.fullmatch(safe):
+    if not (_NAME.fullmatch(safe) or is_scrape(safe)):
         raise AppError("That scan report is not available", 404)
     path = os.path.join(config_dir(), "logs", safe)
     if not os.path.isfile(path):
@@ -79,6 +90,8 @@ def read_log(name):
 
 
 def _media(name):
+    if is_scrape(name):
+        return name.split("_")[1]
     if name.startswith("movies-") or "_movies_scan" in name:
         return "movies"
     if name.startswith("tv-") or "_tv_scan" in name:
@@ -90,6 +103,9 @@ def _media(name):
 
 def _label(name):
     media = _media(name)
+    if is_scrape(name):
+        noun = {"movies": "Movie", "tv": "TV", "sets": "Movie set", "episodes": "Episode", "seasons": "Season"}[media]
+        return f"{noun} scrape"
     if media == "movies":
         return "Movies"
     if media == "tv":
@@ -105,3 +121,29 @@ def _when(name):
         return ""
     year, month, day, hour, minute, second = match.groups()
     return f"{year}-{month}-{day} {hour}:{minute}:{second}"
+
+
+def write_scrape_log(media, lines, keep=30):
+    """Save one finished scrape under config/logs and drop the oldest beyond keep for that media."""
+    from datetime import datetime
+
+    folder = os.path.join(config_dir(), "logs")
+    os.makedirs(folder, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    name = f"{stamp}_{media}_scrape.log"
+    suffix = 2
+    while os.path.exists(os.path.join(folder, name)):
+        name = f"{stamp}-{suffix}_{media}_scrape.log"
+        suffix += 1
+    with open(os.path.join(folder, name), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(lines) + "\n")
+    old = sorted(
+        (item["name"] for item in list_logs(media=media, kind="scrape")),
+        key=lambda item: ((_STAMP.search(item).group(0) if _STAMP.search(item) else ""), item),
+    )
+    for item in old[:-max(1, int(keep or 30))]:
+        try:
+            os.remove(os.path.join(folder, item))
+        except OSError:
+            pass
+    return name

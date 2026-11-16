@@ -1,6 +1,7 @@
 from resonance.sources.client import get_json
 
-API = "https://www.theaudiodb.com/api/v1/json/2"
+# The free public key. TheAudioDB retired the old free key 2 (it answers 404 Not found); 123 is the current one.
+API = "https://www.theaudiodb.com/api/v1/json/123"
 
 
 def artist_by_mbid(mbid):

@@ -15,6 +15,12 @@ SONARR_EVENTS = {"Download", "Rename", "EpisodeFileDelete", "SeriesDelete"}
 LIDARR_EVENTS = {"Download", "Rename", "Retag", "TrackRetag", "AlbumDownload", "AlbumDelete", "ArtistDelete", "TrackFileDelete"}
 LIDARR_NOTES = {"Grab", "DownloadFailure", "ImportFailure"}
 DELETES = {"MovieFileDelete", "MovieDelete", "EpisodeFileDelete", "SeriesDelete"}
+# Event types only Lidarr sends: a call carrying one is Lidarr's even when the instance has another name.
+LIDARR_ONLY_EVENTS = {"DownloadFailure", "ImportFailure", "AlbumDownload", "TrackRetag", "Retag", "AlbumDelete",
+                      "ArtistDelete", "TrackFileDelete"}
+# Lidarr's own deletes. An album or artist delete names the artist folder, not files; the album folder is looked up
+# in the library when the webhook is queued (resonance.lidarr.locate_removed).
+LIDARR_DELETES = {"AlbumDelete", "ArtistDelete", "TrackFileDelete"}
 
 # Bazarr through Apprise's json:// sends only a message such as
 # "Breaking Bad (2008) - S01E02 - Cat's in the Bag... : English subtitles downloaded from opensubtitles ..."
@@ -34,12 +40,18 @@ def detect(payload):
     if isinstance(payload.get("subtitle"), dict) or payload.get("subtitles_path") or (
             payload.get("message") and not payload.get("eventType")):
         return "bazarr"
-    if str(payload.get("eventType") or "") == "Test":
+    event = str(payload.get("eventType") or "")
+    if event:
+        # Calls without a movie, series or artist block: Lidarr's DownloadFailure and ImportFailure, and Health,
+        # HealthRestored and ApplicationUpdate from any of them. The instance name says which app sent it.
         instance = str(payload.get("instanceName") or "").lower()
         for name in ("radarr", "sonarr", "lidarr"):
             if name in instance:
                 return name
-        return "arr"
+        if event in LIDARR_ONLY_EVENTS:
+            return "lidarr"
+        if event == "Test":
+            return "arr"
     return None
 
 
@@ -62,9 +74,9 @@ def _upgraded(payload, event):
 
 
 def _replaced(payload, event):
-    """The extra field that marks an upgrade. It is left out otherwise, so a later normal import of the same
-    folder cannot overwrite it when queue rows merge."""
-    return {"replaced": True} if _upgraded(payload, event) else {}
+    """The extra field that marks an upgrade or a rename: the player keeps the old entry until it is cleaned. It is left
+    out otherwise, so a later normal import of the same folder cannot overwrite it when queue rows merge."""
+    return {"replaced": True} if _upgraded(payload, event) or event == "Rename" else {}
 
 
 def _year_title(title, year):
@@ -179,6 +191,15 @@ def _sonarr(payload, mappings, result, _find):
     return result
 
 
+def _import_retag(payload):
+    """True for a Retag Lidarr sends while it imports: it writes the tags into each new file before saving the file, so
+    the file id is still 0. Lidarr's Download call for the album follows and covers it. A retag of a file Lidarr
+    already had carries that file's id."""
+    files = [payload.get("trackFile")] + list(payload.get("trackFiles") or [])
+    ids = [item.get("id") for item in files if isinstance(item, dict) and "id" in item]
+    return bool(ids) and all(str(value).strip() in ("0", "") for value in ids)
+
+
 def _lidarr(payload, mappings, result, _find):
     event = result["event"]
     if event in LIDARR_NOTES:
@@ -187,7 +208,35 @@ def _lidarr(payload, mappings, result, _find):
     if event not in LIDARR_EVENTS:
         result["note"] = f"Lidarr {event or 'event'} needs no scan"
         return result
+    artist = (payload.get("artist") or {}).get("name") or ""
+    album = (payload.get("album") or {}).get("title") or ""
+    if artist or album:
+        result["label"] = " — ".join(part for part in (artist, album) if part)
+    if event in ("Retag", "TrackRetag") and _import_retag(payload):
+        result["note"] = ("Lidarr tagged this file while importing it (On Track Retag). "
+                          "The Download call for the album covers it, so no scan is queued")
+        return result
+    if event in ("AlbumDelete", "ArtistDelete"):
+        artist_path = str((payload.get("artist") or {}).get("path") or "").strip()
+        if not artist_path:
+            result["note"] = f"Lidarr {event} did not include the artist folder"
+            return result
+        artist_folder = map_path(artist_path, mappings, "lidarr")
+        scope = "artist" if event == "ArtistDelete" else "album"
+        title = artist if scope == "artist" else " — ".join(part for part in (artist, album) if part)
+        result["items"].append(_item(
+            "music", "lidarr", event, title or posixpath.basename(artist_folder.rstrip("/")), artist_folder, (),
+            removed=True, artist=artist_folder, scope=scope, album_title=album,
+            release_group=str((payload.get("album") or {}).get("foreignAlbumId") or ""),
+            deleted_files=bool(payload.get("deletedFiles")),
+        ))
+        return result
     files = []
+    # Download and Rename send trackFiles. Retag sends one trackFile: the file whose tags Lidarr rewrote.
+    single = payload.get("trackFile")
+    for item in [single] if isinstance(single, dict) else []:
+        if item.get("path"):
+            files.append(item["path"])
     for key in ("trackFiles", "tracks"):
         for item in payload.get(key) or []:
             path = item if isinstance(item, str) else (item.get("path") if isinstance(item, dict) else "")
@@ -196,20 +245,22 @@ def _lidarr(payload, mappings, result, _find):
     if not files:
         result["note"] = "Lidarr did not include any imported file paths"
         return result
-    artist = (payload.get("artist") or {}).get("name") or ""
-    album = (payload.get("album") or {}).get("title") or ""
-    title = " — ".join(part for part in (artist, album) if part)
     mapped = _paths(files, mappings, "lidarr")
     try:
         folder = posixpath.commonpath([posixpath.dirname(path) for path in mapped])
     except ValueError:
         folder = posixpath.dirname(mapped[0])
+    if not album:
+        # Retag does not name the album: its folder does.
+        album = posixpath.basename(folder.rstrip("/"))
+    title = " — ".join(part for part in (artist, album) if part)
     artist_path = (payload.get("artist") or {}).get("path") or ""
     if artist_path:
         artist_folder = map_path(artist_path, mappings, "lidarr")
     else:
         artist_folder = posixpath.dirname(folder)
-    result["items"].append(_item("music", "lidarr", event, title, folder, mapped, artist=artist_folder))
+    result["items"].append(_item("music", "lidarr", event, title, folder, mapped,
+                                 removed=event in LIDARR_DELETES, artist=artist_folder))
     return result
 
 

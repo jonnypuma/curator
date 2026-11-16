@@ -27,7 +27,7 @@ async function groupCompilation() {
     const ids = albumActionIds();
     await api("/api/albums/group-compilation", { method: "POST", body: { album_ids: ids } });
     selectionReplace("album", []);
-    await loadLibrary();
+    await refreshLibraryItems(ids);
     notify("Selected albums now share one compilation row. Files stayed where they are.", "info");
 }
 
@@ -59,11 +59,12 @@ async function showUpgrade() {
     if (!data.upgrade) {
         notify("No higher-quality copy is indexed.", "info");
         if (data.cleared) clearUpgradePill(state.album.album.id);
-        await loadLibrary();
+        await refreshLibraryItems([state.album.album.id]);
         return;
     }
     state.videoUpgrade = null;
     state.upgradeCopies = data.copies || [];
+    state.upgradeTrackRows = data.track_rows || [];
     state.upgradeNotice = data.notice || "";
     state.upgradeSource = data.upgrade.album_id;
     document.getElementById("upgrade-purge").checked = false;
@@ -130,7 +131,7 @@ async function confirmUpgrade(purge) {
     document.getElementById("upgrade-modal").classList.add("hidden");
     document.getElementById("delete-copy-modal").classList.add("hidden");
     await selectAlbum(state.album.album.id, true);
-    await loadLibrary();
+    await refreshLibraryItems([state.album.album.id, state.upgradeSource]);
     if (data.warning) notify(data.warning, "warning");
     else if (purge && data.removed_source) notify("The higher-quality files replaced the old copy, and the other copy was removed from the library.", "info");
     else notify(purge ? "The higher-quality files replaced the old copy." : "The higher-quality files are in place and the old files were archived.", "info");
@@ -175,21 +176,67 @@ function duplicateScope(focus) {
 async function openDuplicates(focus) {
     const scope = duplicateScope(focus);
     state.duplicateFocus = scope;
+    const focusQuery = scope.id ? `focus=${encodeURIComponent(scope.id)}` : "";
+    // The pairs come from the database alone; which copy Lidarr uses is asked afterwards, so the window opens at once.
     const data = scope.media === "music"
-        ? await api(`/api/duplicates${scope.id ? `?focus=${encodeURIComponent(scope.id)}` : ""}`)
+        ? await api(`/api/duplicates?lidarr=0${focusQuery ? `&${focusQuery}` : ""}`)
         : { pairs: [] };
     // Marks the server found stale (the other copy is gone, or this window turned up empty) lose their pill.
     if (data.cleared && data.cleared.length) clearDuplicatePills(data.cleared);
     let video = { movies: [], episodes: [] };
-    if (scope.media === "movies" || scope.media === "tv") {
+    // Only this library, and only the copies of the item when a pill opened it. Radarr and Sonarr are asked afterwards.
+    const videoQuery = (scope.media === "movies" || scope.media === "tv")
+        ? `media=${scope.media}${scope.id ? `&${focusQuery}` : ""}`
+        : "";
+    if (videoQuery) {
         try {
-            video = await api("/api/v1/video-duplicates");
+            video = await api(`/api/v1/video-duplicates?arr=0&${videoQuery}`);
         } catch (error) {
             video = { movies: [], episodes: [] };
         }
     }
     renderDuplicateList(data, video);
     document.getElementById("duplicates-modal").classList.remove("hidden");
+    if (scope.media === "music" && (data.pairs || []).length) addDuplicateLidarrLabels(scope, focusQuery);
+    if (videoQuery && ((video.movies || []).length || (video.episodes || []).length)) addVideoDuplicateArrLabels(scope, videoQuery);
+}
+
+async function addVideoDuplicateArrLabels(scope, videoQuery) {
+    const token = (state.duplicateLabelToken || 0) + 1;
+    state.duplicateLabelToken = token;
+    let labels = {};
+    try {
+        labels = (await api(`/api/v1/video-duplicates/arr?${videoQuery}`)).labels || {};
+    } catch (error) {
+        return;     // Radarr or Sonarr did not answer: the window simply has no lines for them
+    }
+    const modal = document.getElementById("duplicates-modal");
+    if (token !== state.duplicateLabelToken || state.duplicateFocus !== scope || !modal || modal.classList.contains("hidden")) return;
+    const items = (state.videoDuplicateGroups || []).flatMap((group) => group.items || []);
+    fillArrLines(document.getElementById("duplicates-list"), items, labels);
+}
+
+async function addDuplicateLidarrLabels(scope, focusQuery) {
+    const token = (state.duplicateLabelToken || 0) + 1;
+    state.duplicateLabelToken = token;
+    let labels = {};
+    try {
+        labels = (await api(`/api/duplicates/lidarr${focusQuery ? `?${focusQuery}` : ""}`)).labels || {};
+    } catch (error) {
+        return;     // Lidarr did not answer: the window simply has no Lidarr lines
+    }
+    const modal = document.getElementById("duplicates-modal");
+    if (token !== state.duplicateLabelToken || state.duplicateFocus !== scope || !modal || modal.classList.contains("hidden")) return;
+    let changed = false;
+    for (const pair of state.duplicatePairs || []) {
+        for (const side of [pair.left, pair.right]) {
+            if (side && side.id && labels[side.id]) {
+                side.arr = labels[side.id];
+                changed = true;
+            }
+        }
+    }
+    if (changed) renderDuplicateList({ pairs: state.duplicatePairs }, null);
 }
 
 function renderDuplicateList(data, video) {
@@ -219,6 +266,14 @@ function renderDuplicateList(data, video) {
         }).join("");
         return;
     }
+    if (scope.media === "musicvideos") {
+        const { focus, copies } = musicVideoCopies(scope.id);
+        if (title) title.textContent = focus ? `${focus.artist || ""} — ${focus.title || ""}` : "Music video copies";
+        if (note) note.textContent = "Delete removes that copy from disk (to the recycle bin). Remove from library leaves the file.";
+        state.videoDuplicateGroups = [];
+        host.innerHTML = undo + (copies.length > 1 ? musicVideoCompareHtml(copies) : `<p class="muted">No other copy of this music video is in the library now.</p>`);
+        return;
+    }
     if (scope.media === "movies" || scope.media === "tv") {
         const kind = scope.media === "tv" ? "episode" : "movie";
         const groups = ((video || {})[scope.media === "tv" ? "episodes" : "movies"] || []).filter((group) => {
@@ -235,429 +290,8 @@ function renderDuplicateList(data, video) {
         return;
     }
     if (title) title.textContent = "Duplicates";
-    if (note) note.textContent = "Movie sets do not have a duplicate list. Open Movies, TV Shows, or Music.";
+    if (note) note.textContent = "Movie sets do not have a duplicate list. Open Movies, TV shows, or Music.";
     host.innerHTML = `<p class="muted">None.</p>`;
-}
-
-function videoDuplicateEdition(item) {
-    const edition = String((item && item.edition) || "").trim();
-    if (!edition || edition.toLowerCase() === "none") return "";
-    return edition;
-}
-
-function videoDuplicateSource(item) {
-    const format = String((item && item.source_format) || "").replace(/_/g, "-").trim();
-    const group = String((item && item.video_source) || "").replace(/_/g, "-").trim();
-    if (!format) return group;
-    if (!group) return format;
-    const formatKey = typeof sourceKey === "function" ? sourceKey(format) : format.toLowerCase();
-    const groupKey = typeof sourceKey === "function" ? sourceKey(group) : group.toLowerCase();
-    if (!groupKey || formatKey.includes(groupKey) || groupKey.includes(formatKey)) return format;
-    return `${group} ${format}`;
-}
-
-const VIDEO_DUPLICATE_FACTS = [
-    ["Resolution", (item) => item.resolution || ""],
-    ["Source", videoDuplicateSource],
-    ["Codec", (item) => videoCodecName(item.video_codec || item.codec)],
-    ["Container", containerLabel],
-    ["HDR", (item) => (typeof hdrLabel === "function" ? hdrLabel(item) : "") || item.hdr_format || ""],
-    ["Audio", (item) => item.audio || ""],
-    ["Release group", (item) => item.release_group || ""],
-    ["Bitrate", (item) => {
-        const value = Number(item.bitrate_mbps);
-        return value ? `${value} Mb/s` : "";
-    }],
-    ["Edition", videoDuplicateEdition],
-    ["Runtime", (item) => {
-        const minutes = item.duration_seconds ? Math.round(Number(item.duration_seconds) / 60) : 0;
-        return minutes ? fmtRuntime(minutes) : "";
-    }],
-    ["Size", (item) => (item.size_bytes ? fmtSize(item.size_bytes) : "")],
-    ["Date added", (item) => (typeof fmtDate === "function" ? fmtDate(item.date_added || item.created_at) : "")],
-];
-
-function videoCodecName(value) {
-    const raw = String(value || "").trim();
-    const key = raw.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const names = {
-        h264: "AVC", avc: "AVC",
-        h265: "HEVC", hevc: "HEVC",
-        vc1: "VC-1",
-        mpeg2: "MPEG-2", mpeg2video: "MPEG-2",
-        mpeg1: "MPEG-1", mpeg1video: "MPEG-1",
-        mpeg4: "MPEG-4",
-        av1: "AV1",
-        vp9: "VP9", vp8: "VP8",
-        vvc: "VVC", h266: "VVC",
-        wmv3: "WMV3",
-    };
-    return names[key] || raw;
-}
-
-function containerLabel(item) {
-    const path = String((item && (item.filepath || item.path)) || "").split("\n")[0];
-    const ext = (path.match(/\.([a-z0-9]{2,5})$/i) || [])[1];
-    if (ext && ext.toLowerCase() === "mkv") return "MKV";
-    if (ext) return ext.toLowerCase();
-    const stored = String((item && item.container) || "").toLowerCase();
-    if (stored === "matroska" || stored === "mkv") return "MKV";
-    if (stored === "mpegts") return "ts";
-    if (stored === "mov") return "mp4";
-    return stored;
-}
-
-function videoDuplicateFactRows(items) {
-    return VIDEO_DUPLICATE_FACTS.filter(([, read]) => (items || []).some((item) => read(item)));
-}
-
-function videoDuplicateFactsHtml(item, rows) {
-    const body = rows.map(([label, read]) => {
-        const value = read(item);
-        return `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value || "—")}</dd>`;
-    }).join("");
-    return body ? `<dl class="dup-facts">${body}</dl>` : "";
-}
-
-function arrCopyLine(item) {
-    const arr = item && item.arr;
-    if (!arr || !arr.app) return "";
-    const icon = typeof providerIcon === "function"
-        ? providerIcon(arr.app)
-        : `<img class="provider-icon" src="/media/providers/${encodeURIComponent(arr.app.toLowerCase())}.png" alt="${escapeHtml(arr.app)}" title="${escapeHtml(arr.app)}">`;
-    if (arr.id) {
-        return `<p class="dup-arr">${icon}<span class="dup-arr-id">${escapeHtml(String(arr.id))}</span></p>`;
-    }
-    return `<p class="dup-arr is-absent"><span class="dup-arr-notin">Not in</span>${icon}</p>`;
-}
-
-function videoDuplicateCard(item, kind, rows, suggested) {
-    const poster = item.poster
-        ? `<img class="upgrade-cover video-dup-poster" src="${artUrl(item.poster, 342)}" alt="">`
-        : `<div class="art-fallback upgrade-cover video-dup-poster">No poster</div>`;
-    const file = String(item.path || "").split(/[\\/]/).pop();
-    const keep = suggested ? `<p class="dup-keep">Suggested to keep</p>` : "";
-    const failed = typeof failPill === "function" ? failPill("probe", item.probe_error) : "";
-    const probe = failed ? `<p class="dup-probe">${failed}</p>` : "";
-    return `<th class="video-dup-card${suggested ? " is-keep" : ""}${failed ? " is-probe-failed" : ""}" data-id="${escapeHtml(item.id)}">
-        <button type="button" class="upgrade-delete" data-action="delete-video-duplicate" data-kind="${escapeHtml(kind)}" data-id="${escapeHtml(item.id)}" title="Delete this copy from disk" aria-label="Delete this copy from disk">${trashSvg()}</button>
-        ${keep}
-        ${probe}
-        ${poster}
-        <div class="dup-name">${escapeHtml(file || item.title || "Copy")}</div>
-        ${videoDuplicateFactsHtml(item, rows || videoDuplicateFactRows([item]))}
-        ${arrCopyLine(item)}
-        <span class="upgrade-path">${escapeHtml(item.filepath || item.path || "")}</span>
-        <p class="video-dup-actions"><button type="button" class="btn-ghost btn-remove" data-action="remove-video-duplicate" data-kind="${escapeHtml(kind)}" data-id="${escapeHtml(item.id)}">Remove from library</button></p>
-    </th>`;
-}
-
-function videoDuplicateSection(title, groups, kind, focused) {
-    const items = groups || [];
-    if (!items.length) return `<p class="muted">None.</p>`;
-    return items.map((group) => {
-        const rows = videoDuplicateFactRows(group.items || []);
-        const cards = (group.items || []).map((item) => videoDuplicateCard(item, kind, rows)).join("");
-        const heading = focused ? "" : `<h3>${escapeHtml(group.label || title)}</h3>`;
-        const pair = group.items || [];
-        const dismiss = pair.length >= 2
-            ? `<p><button type="button" class="btn-ghost" data-action="dismiss-video-duplicate" data-kind="${escapeHtml(kind)}" data-left="${escapeHtml(pair[0].id)}" data-right="${escapeHtml(pair[1].id)}">Not duplicates</button></p>`
-            : "";
-        return `<section class="duplicate-pair">${heading}
-            <div class="upgrade-scroll"><table class="upgrade-table"><thead><tr>${cards}</tr></thead></table></div>
-            ${dismiss}
-        </section>`;
-    }).join("");
-}
-
-function findVideoDuplicate(id) {
-    for (const group of state.videoDuplicateGroups || []) {
-        const item = (group.items || []).find((copy) => copy.id === id);
-        if (item) return item;
-    }
-    const copies = (state.videoUpgrade && state.videoUpgrade.copies) || [];
-    return copies.find((copy) => copy.id === id) || null;
-}
-
-function copySiblings(id) {
-    const ids = new Set();
-    for (const group of state.videoDuplicateGroups || []) {
-        const items = group.items || [];
-        if (!items.some((item) => item.id === id)) continue;
-        items.forEach((item) => { if (item.id !== id) ids.add(item.id); });
-    }
-    ((state.videoUpgrade && state.videoUpgrade.copies) || []).forEach((item) => {
-        if (item.id && item.id !== id) ids.add(item.id);
-    });
-    return [...ids];
-}
-
-function paintCopyDeleting(id, label) {
-    document.querySelectorAll(".video-dup-card").forEach((card) => {
-        if (card.dataset.id !== id) return;
-        card.classList.add("is-deleting");
-        if (card.querySelector(".dup-deleting")) return;
-        const veil = document.createElement("div");
-        veil.className = "dup-deleting";
-        veil.innerHTML = `<span class="activity-spin" aria-hidden="true"></span><span>${escapeHtml(label)}</span>`;
-        card.appendChild(veil);
-    });
-}
-
-function clearCopyDeleting(id) {
-    document.querySelectorAll(".video-dup-card").forEach((card) => {
-        if (card.dataset.id !== id) return;
-        card.classList.remove("is-deleting");
-        const veil = card.querySelector(".dup-deleting");
-        if (veil) veil.remove();
-    });
-}
-
-function closeCopyModals() {
-    const duplicates = document.getElementById("duplicates-modal");
-    const upgrade = document.getElementById("upgrade-modal");
-    if (duplicates) duplicates.classList.add("hidden");
-    if (upgrade) upgrade.classList.add("hidden");
-    state.videoUpgrade = null;
-}
-
-function askVideoDuplicate(action, disk) {
-    const kind = action.dataset.kind;
-    const id = action.dataset.id;
-    const item = findVideoDuplicate(id) || {};
-    const name = item.title || "this copy";
-    if (disk) {
-        askDanger(
-            `Delete ${name} from disk?`,
-            "This removes the video file and the .nfo, artwork and subtitles named after it. The other copies stay.",
-            "Delete from disk",
-            () => finishVideoDuplicate("delete", kind, id),
-            true,
-            () => finishVideoDuplicate("remove", kind, id),
-        );
-        return;
-    }
-    askDanger(
-        `Remove ${name} from the library?`,
-        "The file stays on disk. The next scan can add it again.",
-        "Remove from library",
-        () => finishVideoDuplicate("remove", kind, id),
-        false,
-    );
-}
-
-async function finishVideoDuplicate(mode, kind, id) {
-    const label = mode === "delete" ? "Deleting duplicate…" : "Removing from library…";
-    paintCopyDeleting(id, label);
-    let peers = [];
-    try {
-        if (mode === "delete") {
-            const data = await api("/api/v1/delete", { method: "POST", body: { kind, ids: [id] } });
-            const deleted = data.deleted || [];
-            const errors = data.errors || [];
-            if (!deleted.length) {
-                clearCopyDeleting(id);
-                notify(errors[0] || "That copy was not deleted.", "error");
-                return;
-            }
-            peers = data.peers || [];
-            notify(errors.length ? `Deleted ${deleted[0]}. ${errors[0]}` : `${deleted[0]} was deleted from disk.`, errors.length ? "warning" : "success");
-        } else {
-            const data = await api("/api/v1/remove", { method: "POST", body: { kind, ids: [id] } });
-            if (!data.removed) {
-                clearCopyDeleting(id);
-                notify("That copy is no longer in the library.", "info");
-                return;
-            }
-            peers = data.peers || [];
-            notify("Removed from the library. The file is still on disk.", "info");
-        }
-    } catch (error) {
-        clearCopyDeleting(id);
-        throw error;
-    }
-    dropVideoDuplicate(kind, id);
-    applyPeerFlags(peers);
-    forgetDuplicateUndo([id]);
-    if (copyVersionsLeft() < 2) closeCopyModals();
-    else refreshUpgradeCompare(kind);
-}
-
-function copyVersionsLeft() {
-    const upgrade = document.getElementById("upgrade-modal");
-    if (upgrade && !upgrade.classList.contains("hidden") && state.videoUpgrade) {
-        return (state.videoUpgrade.copies || []).length;
-    }
-    const groups = state.videoDuplicateGroups || [];
-    const focus = state.duplicateFocus && state.duplicateFocus.id;
-    if (focus) {
-        const group = groups.find((item) => (item.items || []).some((copy) => copy.id === focus));
-        return group ? (group.items || []).length : 0;
-    }
-    return groups.length ? 2 : 0;
-}
-
-function refreshUpgradeCompare(kind) {
-    const upgrade = document.getElementById("upgrade-modal");
-    if (!upgrade || upgrade.classList.contains("hidden") || !state.videoUpgrade) return;
-    const host = document.getElementById("upgrade-compare");
-    if (!host) return;
-    host.innerHTML = upgradeCompareHtml(state.videoUpgrade.copies || [], state.videoUpgrade.kind || kind);
-}
-
-function dropVideoDuplicate(kind, id) {
-    let siblings = copySiblings(id);
-    if (state.videoUpgrade && state.videoUpgrade.copies) {
-        state.videoUpgrade.copies = state.videoUpgrade.copies.filter((item) => item.id !== id);
-    }
-    state.videoDuplicateGroups = (state.videoDuplicateGroups || []).flatMap((group) => {
-        const items = group.items || [];
-        if (!items.some((item) => item.id === id)) return [group];
-        const left = items.filter((item) => item.id !== id);
-        return left.length >= 2 ? [{ ...group, items: left }] : [];
-    });
-    if (state.duplicateFocus && state.duplicateFocus.id === id) {
-        const still = (state.videoDuplicateGroups || []).find((group) => (group.items || []).length >= 2);
-        const next = still && still.items && still.items[0];
-        if (next) state.duplicateFocus = { ...state.duplicateFocus, id: next.id };
-    }
-    if (kind === "episode") dropEpisodeRow(id, siblings);
-    else dropMovieRow(id, siblings);
-    const video = { movies: [], episodes: [] };
-    video[kind === "episode" ? "episodes" : "movies"] = state.videoDuplicateGroups || [];
-    renderDuplicateList({ pairs: [] }, video);
-    if (typeof loadMediaTotals === "function") loadMediaTotals();
-}
-
-function clearCopyMarks(item) {
-    if (!item) return;
-    item.duplicate_release = false;
-    item.upgrade = false;
-    item.upgrade_path = "";
-}
-
-function applyPeerFlags(peers) {
-    const rows = peers || [];
-    if (!rows.length) return;
-    const byId = new Map(rows.map((row) => [String(row.id), row]));
-    let video = false;
-    let music = false;
-    const paint = (item) => {
-        const flag = byId.get(String(item && item.id));
-        if (!flag) return false;
-        item.duplicate_release = !!flag.duplicate_release;
-        item.upgrade = !!flag.upgrade;
-        item.upgrade_path = flag.upgrade_path || "";
-        return true;
-    };
-    if (state.video) {
-        (state.video.movies || []).forEach((movie) => { if (paint(movie)) video = true; });
-        if (state.video.detail && paint(state.video.detail)) video = true;
-        (state.video.showDetails || new Map()).forEach((detail) => {
-            (detail.episodes || []).forEach((episode) => { if (paint(episode)) video = true; });
-        });
-    }
-    (state.artists || []).forEach((artist) => {
-        (artist.albums || []).forEach((album) => { if (paint(album)) music = true; });
-    });
-    if (state.album && state.album.album && paint(state.album.album)) music = true;
-    if (video && typeof paintCurrentVideoList === "function") paintCurrentVideoList();
-    if (video && state.video.detail && typeof renderVideoCenter === "function") renderVideoCenter();
-    if (music && typeof renderTree === "function") renderTree();
-}
-
-function forgetDuplicateUndo(ids, trackIds) {
-    const undo = state.duplicateUndo;
-    if (!undo) return;
-    const gone = new Set((ids || []).map((id) => String(id)));
-    const tracks = new Set((trackIds || []).map((id) => String(id)));
-    if (undo.media === "music") {
-        const hit = (undo.pairs || []).some((pair) => tracks.has(String(pair.left_id)) || tracks.has(String(pair.right_id)));
-        if (hit) state.duplicateUndo = null;
-        return;
-    }
-    if (gone.has(String(undo.left_id)) || gone.has(String(undo.right_id))) state.duplicateUndo = null;
-}
-
-function dropMovieRow(id, siblingIds) {
-    const movies = state.video.movies || [];
-    const gone = movies.find((movie) => movie.id === id);
-    state.video.movies = movies.filter((movie) => movie.id !== id);
-    const alone = siblingIds.length < 2;
-    state.video.movies.forEach((movie) => {
-        if (alone && siblingIds.includes(movie.id)) clearCopyMarks(movie);
-        else if (gone && gone.path && movie.upgrade_path === gone.path) clearCopyMarks(movie);
-    });
-    selectionSet("movie", id, false);
-    const open = state.video.detail && state.video.detail.id === id;
-    if (state.video.movieId === id) {
-        state.video.movieId = null;
-        state.video.detail = null;
-    } else if (alone && state.video.detail && siblingIds.includes(state.video.detail.id)) {
-        clearCopyMarks(state.video.detail);
-        if (state.media === "movies") renderMovieInfo(state.video.detail);
-    }
-    if (state.media !== "movies") return;
-    const host = document.getElementById("video-list");
-    const scroll = host ? host.scrollTop : 0;
-    renderMovieRibbons();
-    if (!host || !host.querySelector(".vwin-rows")) renderMovieMatrix();
-    else {
-        state.video.rows = visibleMovies();
-        state.video.paintToken += 1;
-        paintMovieRows();
-        renderVideoCounts(`${state.video.rows.length} of ${(state.video.movies || []).length} movies`);
-        paintVideoSelection();
-        host.scrollTop = scroll;
-    }
-    if (open) renderVideoCenter();
-}
-
-function dropEpisodeRow(id, siblingIds) {
-    const alone = siblingIds.length < 2;
-    let showId = "";
-    (state.video.showDetails || new Map()).forEach((detail, key) => {
-        const episodes = detail.episodes || [];
-        const index = episodes.findIndex((episode) => episode.id === id);
-        if (index < 0) return;
-        const gone = episodes[index];
-        showId = key;
-        detail.episodes = episodes.filter((episode) => episode.id !== id);
-        episodes.forEach((episode) => {
-            if (alone && siblingIds.includes(episode.id)) clearCopyMarks(episode);
-            else if (gone.path && episode.upgrade_path === gone.path) clearCopyMarks(episode);
-        });
-        const seasonId = gone.season_id;
-        if (seasonId && !detail.episodes.some((episode) => episode.season_id === seasonId)) {
-            detail.seasons = (detail.seasons || []).filter((season) => season.id !== seasonId);
-        }
-        if (typeof recountTvNew === "function") recountTvNew(key);
-    });
-    const show = showId && (state.video.shows || []).find((item) => item.id === showId);
-    if (show) show.episode_count = Math.max(0, (show.episode_count || 0) - 1);
-    selectionSet("episode", id, false);
-    const open = state.video.tvSel && state.video.tvSel.type === "episode" && state.video.tvSel.id === id;
-    if (open) state.video.tvSel = null;
-    if (state.media !== "tv") return;
-    if (typeof paintTvAfterStatus === "function") paintTvAfterStatus();
-    else if (typeof renderTvTree === "function") renderTvTree();
-    const shows = state.video.shows || [];
-    const episodes = shows.reduce((sum, item) => sum + (item.episode_count || 0), 0);
-    if (typeof renderVideoCounts === "function") {
-        renderVideoCounts(shows.length ? `${shows.length} shows · ${episodes} episodes` : "No shows yet");
-    }
-    if (open && typeof renderVideoCenter === "function") {
-        renderVideoCenter();
-        return;
-    }
-    const sel = state.video.tvSel;
-    const detail = showId && state.video.showDetails.get(showId);
-    if (!sel || !detail) return;
-    if (sel.type === "show" && sel.id === showId) renderShowInfo(detail);
-    if (sel.type === "season" && sel.show === showId) {
-        const season = (detail.seasons || []).find((item) => item.id === sel.id);
-        if (season) renderSeasonInfo(detail, season);
-    }
 }
 
 function duplicatePair(pair, index) {
@@ -667,32 +301,34 @@ function duplicatePair(pair, index) {
     if (pair.acoustid_matches) parts.push(`${pair.acoustid_matches} AcoustID match${pair.acoustid_matches === 1 ? "" : "es"}`);
     if (pair.fingerprint_matches) parts.push(`${pair.fingerprint_matches} identical fingerprint${pair.fingerprint_matches === 1 ? "" : "s"}`);
     if (!parts.length && pair.reason) parts.push(pair.reason);
-    const summary = `${parts.join(", ")}. The albums have ${leftCount} and ${rightCount} tracks.`;
-    const dismiss = pair.acoustid_matches || pair.fingerprint_matches
-        ? `<p><button type="button" class="btn-ghost" data-action="dismiss-duplicate" data-index="${index}">Not duplicates</button></p>`
-        : "";
-    const head = [pair.left, pair.right].map((album) => duplicateHead(album)).join("");
-    const body = (pair.rows || []).map((row) => {
-        return `<tr>${duplicateTrackCell(row.left, row.match)}${duplicateTrackCell(row.right, row.match)}</tr>`;
-    }).join("");
-    return `<section class="duplicate-pair">
-        <p class="muted">${escapeHtml(summary)}</p>
-        <div class="upgrade-scroll"><table class="upgrade-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
-        ${dismiss}
-    </section>`;
+    const reason = `${parts.join(", ")}. The albums have ${leftCount} and ${rightCount} tracks.`;
+    // Any pair whose songs line up (by AcoustID, fingerprint, title or position) can be marked Not duplicates.
+    const lined = (pair.rows || []).some((row) => row.left && row.right);
+    const dismiss = lined ? `<button type="button" class="btn-ghost" data-action="dismiss-duplicate" data-index="${index}">Not duplicates</button>` : "";
+    const cards = [pair.left, pair.right].map((album) => duplicateHead(album)).join("");
+    const body = (pair.rows || []).map((row) => `<tr>${duplicateTrackCell(row.left, row.match)}${duplicateTrackCell(row.right, row.match)}</tr>`).join("");
+    return compareGroupHtml({ reason, cards, body, actions: dismiss });
 }
 
 function duplicateHead(album) {
     const item = album || {};
     const id = item.id || "";
     const cover = `<img class="upgrade-cover" src="/api/albums/${encodeURIComponent(id)}/cover?w=160" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'), {className:'art-fallback upgrade-cover', textContent:'No art'}))">`;
-    const remove = `<button type="button" class="upgrade-delete" data-action="delete-duplicate" data-id="${escapeHtml(id)}" title="Delete this album" aria-label="Delete this album">${trashSvg()}</button>`;
-    const name = [item.artist, item.title].filter(Boolean).join(" — ") || "Album";
     const original = item.original_year ? `Original year ${item.original_year}` : "Original year —";
     const release = item.year ? `Release year ${item.year}` : "Release year —";
     const meta = [item.version || "", release, item.track_count ? `${item.track_count} tracks` : ""].filter(Boolean).join(" · ");
     const audio = audioLine(item.audio || {});
-    return `<th>${remove}${cover}<div class="upgrade-label">${escapeHtml(name)}</div><div class="upgrade-label">${escapeHtml(original)}</div><div class="upgrade-label">${escapeHtml(meta)}</div>${audio ? `<div class="upgrade-label">${escapeHtml(audio)}</div>` : ""}${arrCopyLine(item)}<span class="upgrade-path">${escapeHtml(item.path || "")}</span></th>`;
+    return compareCardHtml({
+        id,
+        picture: cover,
+        name: [item.artist, item.title].filter(Boolean).join(" — ") || "Album",
+        lines: [escapeHtml(original), escapeHtml(meta), audio ? escapeHtml(audio) : ""],
+        arr: arrCopyLine(item),
+        path: item.path || "",
+        del: `data-action="delete-duplicate" data-id="${escapeHtml(id)}"`,
+        delTitle: "Delete this album from disk",
+        remove: `data-action="remove-duplicate" data-id="${escapeHtml(id)}"`,
+    });
 }
 
 function duplicateTrackCell(track, match) {
@@ -737,7 +373,7 @@ async function scanDuplicates() {
 async function dismissDuplicatePair(index) {
     const pair = (state.duplicatePairs || [])[Number(index)];
     if (!pair) return;
-    const pairs = (pair.rows || []).filter((row) => row.match && row.left && row.right).map((row) => ({
+    const pairs = (pair.rows || []).filter((row) => row.left && row.right).map((row) => ({
         left_id: row.left.id,
         right_id: row.right.id,
     }));
@@ -746,6 +382,16 @@ async function dismissDuplicatePair(index) {
     clearDuplicatePills(data.cleared);
     state.duplicateUndo = { media: "music", pairs: data.pairs || pairs };
     await openDuplicates(state.duplicateFocus);
+}
+
+// Remove from library for one album of a pair: the files stay, and the next scan adds it back.
+function askRemoveDuplicate(id) {
+    const album = findDuplicateAlbum(id) || {};
+    const label = [album.artist, album.title].filter(Boolean).join(" — ") || "this album";
+    askDanger(`Remove ${label} from the library?`, "The files stay on disk, and the next scan adds the album back.", "Remove from library", async () => {
+        await forgetLibrary({ album_ids: [id] }, label);
+        await openDuplicates(state.duplicateFocus);
+    }, false);
 }
 
 async function undoDuplicateDismiss() {
@@ -932,7 +578,34 @@ function upgradeTable(copies, selectedId) {
         }).join("");
         return `<tr><th>${escapeHtml(label)}</th>${cells}</tr>`;
     }).join("");
-    return `<div class="upgrade-scroll"><table class="upgrade-table"><thead><tr><th></th>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    const tracks = upgradeTrackRows(copies, selectedId, state.upgradeTrackRows || []);
+    return `<div class="upgrade-scroll"><table class="upgrade-table"><thead><tr><th></th>${head}</tr></thead><tbody>${body}${tracks}</tbody></table></div>`;
+}
+
+// The songs of each copy side by side, lined up by the server on the open album. A title that differs from the open
+// album's, or a song one copy lacks, is marked like any other difference.
+function upgradeTrackRows(copies, selectedId, rows) {
+    if (!rows.length) return "";
+    const anchor = Math.max(0, copies.findIndex((copy) => copy.current));
+    const discs = new Set(rows.flatMap((row) => row.cells.filter(Boolean).map((cell) => cell.disc)));
+    const plain = (text) => String(text || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+    const header = `<tr class="upgrade-tracks-head"><th>Tracks</th>${copies.map(() => "<td></td>").join("")}</tr>`;
+    const body = rows.map((row) => {
+        const own = row.cells[anchor] || row.cells.find(Boolean) || {};
+        const number = `${discs.size > 1 ? `${own.disc}.` : ""}${String(own.number || 0).padStart(2, "0")}`;
+        const cells = copies.map((copy, index) => {
+            const cell = row.cells[index];
+            const picked = copy.album.id === selectedId ? " picked" : "";
+            if (!cell) return `<td class="upgrade-track missing${index === anchor ? "" : " diff"}${picked}">—</td>`;
+            const base = row.cells[anchor];
+            const differs = index !== anchor && (!base || plain(base.title) !== plain(cell.title));
+            const quality = audioLine({ format: String(cell.format || "").toUpperCase(), bit_depth: cell.bit_depth, sample_rate: cell.sample_rate, bitrate: cell.bitrate });
+            return `<td class="upgrade-track${differs ? " diff" : ""}${picked}">${escapeHtml(cell.title || "")}`
+                + `${quality ? `<small>${escapeHtml(quality)}</small>` : ""}</td>`;
+        }).join("");
+        return `<tr><th class="upgrade-track-number">${escapeHtml(number)}</th>${cells}</tr>`;
+    }).join("");
+    return header + body;
 }
 
 function countryLabel(code) {

@@ -890,3 +890,211 @@ ALTER TABLE movies ADD COLUMN IF NOT EXISTS has_local_trailer BOOLEAN;
 ALTER TABLE movies ADD COLUMN IF NOT EXISTS has_local_theme BOOLEAN;
 ALTER TABLE tv_shows ADD COLUMN IF NOT EXISTS has_local_trailer BOOLEAN;
 ALTER TABLE tv_shows ADD COLUMN IF NOT EXISTS has_local_theme BOOLEAN;
+
+-- What the library list shows for an album: the formats on disk, the bit depth and sample rate of the weakest
+-- track, the mean bitrate and whether every track is lossless. The scanner keeps them next to quality_rank. NULL
+-- means not worked out yet; albums scanned before these columns existed are filled in after start.
+ALTER TABLE albums ADD COLUMN IF NOT EXISTS audio_format TEXT;
+ALTER TABLE albums ADD COLUMN IF NOT EXISTS audio_lossless BOOLEAN;
+ALTER TABLE albums ADD COLUMN IF NOT EXISTS audio_bit_depth INT;
+ALTER TABLE albums ADD COLUMN IF NOT EXISTS audio_sample_rate INT;
+ALTER TABLE albums ADD COLUMN IF NOT EXISTS audio_bitrate INT;
+
+-- Quality badges for library queue history rows: resolution, codecs and HDR for video, format and bit depth for music.
+ALTER TABLE work_events ADD COLUMN IF NOT EXISTS quality JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+-- The file size when the default audio and subtitle tracks were last set by hand. The automatic switch to the
+-- original language leaves the file alone while its size still matches, so a replaced file is handled again.
+ALTER TABLE video_files ADD COLUMN IF NOT EXISTS user_default_size BIGINT;
+
+-- The recycle bin: files and folders deleted from disk wait in .curator-trash inside their library folder.
+CREATE TABLE IF NOT EXISTS trash_items (
+    id UUID PRIMARY KEY,
+    original_path TEXT NOT NULL,
+    trash_path TEXT NOT NULL,
+    root TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    kind VARCHAR(20) NOT NULL DEFAULT '',
+    is_dir BOOLEAN NOT NULL DEFAULT FALSE,
+    size_bytes BIGINT NOT NULL DEFAULT 0,
+    deleted_at TIMESTAMP NOT NULL DEFAULT LOCALTIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_trash_items_deleted ON trash_items (deleted_at);
+
+-- Video integrity check (ffmpeg decode): the result and the file size and mtime it was taken for.
+ALTER TABLE video_files ADD COLUMN IF NOT EXISTS integrity VARCHAR(10);
+ALTER TABLE video_files ADD COLUMN IF NOT EXISTS integrity_errors JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE video_files ADD COLUMN IF NOT EXISTS integrity_mode VARCHAR(8);
+ALTER TABLE video_files ADD COLUMN IF NOT EXISTS integrity_checked_at TIMESTAMP;
+ALTER TABLE video_files ADD COLUMN IF NOT EXISTS integrity_size BIGINT;
+ALTER TABLE video_files ADD COLUMN IF NOT EXISTS integrity_mtime DOUBLE PRECISION;
+
+-- A saved movie or TV filter can also be written as a Kodi smart playlist.
+ALTER TABLE saved_filters ADD COLUMN IF NOT EXISTS playlist BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Disk space per library folder, one row per day, for the growth chart in the disk space dashboard.
+CREATE TABLE IF NOT EXISTS disk_usage_history (
+    day DATE NOT NULL,
+    root TEXT NOT NULL,
+    kind VARCHAR(20) NOT NULL DEFAULT '',
+    total_bytes BIGINT NOT NULL DEFAULT 0,
+    free_bytes BIGINT NOT NULL DEFAULT 0,
+    library_bytes BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, root)
+);
+
+-- Resume points for movies, kept in sync with the players (episodes already have these columns).
+ALTER TABLE movies ADD COLUMN IF NOT EXISTS resume_position DOUBLE PRECISION;
+ALTER TABLE movies ADD COLUMN IF NOT EXISTS resume_total DOUBLE PRECISION;
+
+-- Collections Curator made (or took over) in Jellyfin, Emby or Plex, so it only ever changes those.
+CREATE TABLE IF NOT EXISTS player_collections (
+    player VARCHAR(10) NOT NULL,
+    name TEXT NOT NULL,
+    remote_id TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (player, name)
+);
+
+-- Music videos (Kodi's music video library). Each row is one video file.
+CREATE TABLE IF NOT EXISTS music_videos (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    path TEXT NOT NULL UNIQUE,
+    root TEXT NOT NULL,
+    folder TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    year INT,
+    genres TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    plot TEXT NOT NULL DEFAULT '',
+    director TEXT NOT NULL DEFAULT '',
+    file_id UUID REFERENCES video_files(id) ON DELETE SET NULL,
+    nfo_path TEXT,
+    playcount INT NOT NULL DEFAULT 0,
+    last_played TEXT,
+    locked BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS music_videos_root_idx ON music_videos (root);
+
+-- Activity history: what Curator deleted, restored, renamed, moved or changed, and why.
+CREATE TABLE IF NOT EXISTS activity_history (
+    id BIGSERIAL PRIMARY KEY,
+    at TIMESTAMP NOT NULL DEFAULT LOCALTIMESTAMP,
+    action VARCHAR(40) NOT NULL,
+    kind VARCHAR(20) NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_activity_history_action ON activity_history (action);
+
+ALTER TABLE music_videos ADD COLUMN IF NOT EXISTS thumb_path TEXT;
+ALTER TABLE music_videos ADD COLUMN IF NOT EXISTS resume_position DOUBLE PRECISION;
+ALTER TABLE music_videos ADD COLUMN IF NOT EXISTS resume_total DOUBLE PRECISION;
+
+-- "musicvideos" is 11 characters: a database that created disk_usage_history with VARCHAR(10) is widened.
+ALTER TABLE disk_usage_history ALTER COLUMN kind TYPE VARCHAR(20);
+
+-- Music tracks keep a play count and a last played time, for the player watched sync.
+ALTER TABLE tracks ADD COLUMN IF NOT EXISTS playcount INT NOT NULL DEFAULT 0;
+ALTER TABLE tracks ADD COLUMN IF NOT EXISTS last_played TEXT;
+-- What the library and a player (or one of a player's users) agreed on at the last watched sync: a count that has
+-- fallen since is an unwatch.
+CREATE TABLE IF NOT EXISTS player_sync_state (
+    player TEXT NOT NULL,
+    path_key TEXT NOT NULL,
+    plays INT NOT NULL DEFAULT 0,
+    last_played TEXT,
+    PRIMARY KEY (player, path_key)
+);
+
+-- Two artist folders marked "not the same artist": the Duplicate pill leaves that pair out.
+CREATE TABLE IF NOT EXISTS dismissed_artist_twins (
+    artist_a UUID NOT NULL,
+    artist_b UUID NOT NULL,
+    PRIMARY KEY (artist_a, artist_b)
+);
+
+-- The path of one imported item, from the webhook to each player's library update (curator/journey.py).
+CREATE TABLE IF NOT EXISTS ingest_journeys (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    key TEXT NOT NULL,
+    media VARCHAR(10) NOT NULL DEFAULT '',
+    source VARCHAR(20) NOT NULL DEFAULT '',
+    event_type TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    events INT NOT NULL DEFAULT 1,
+    stages JSONB NOT NULL DEFAULT '[]'::jsonb,
+    status VARCHAR(12) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP NOT NULL DEFAULT LOCALTIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT LOCALTIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ingest_journeys_key ON ingest_journeys (key, status);
+CREATE INDEX IF NOT EXISTS ingest_journeys_updated ON ingest_journeys (updated_at DESC);
+
+-- One album's Duplicate window looks up the albums that share a recording or a fingerprint with it, and deleting an
+-- album clears the upgrade marks that point at it: without these, both read every track or album in the library.
+CREATE INDEX IF NOT EXISTS idx_tracks_acoustid_recording ON tracks (acoustid_recording_id) WHERE acoustid_recording_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tracks_fingerprint_hash ON tracks (fingerprint_hash) WHERE fingerprint_hash IS NOT NULL AND fingerprint_hash <> '';
+CREATE INDEX IF NOT EXISTS idx_albums_upgrade_source ON albums (upgrade_source_id) WHERE upgrade_source_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_dismissed_duplicates_b ON dismissed_duplicates (track_b);
+-- v3.6.6: the music Corrupt pill and filter look up tracks Audit audio found corrupt.
+CREATE INDEX IF NOT EXISTS idx_tracks_corrupt ON tracks (album_id) WHERE audio_flag = 'corrupt';
+-- v3.6.7: lookups by provider id (webhooks, wanted rows, the Movie sets list's missing parts, Radarr) and the
+-- "changed since" reads a scan's list refresh makes on the two large tables.
+CREATE INDEX IF NOT EXISTS movies_tmdb_idx ON movies (tmdb_id) WHERE tmdb_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS movies_imdb_idx ON movies (imdb_id) WHERE imdb_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS tv_shows_tvdb_idx ON tv_shows (tvdb_id) WHERE tvdb_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS tv_shows_tmdb_idx ON tv_shows (tmdb_id) WHERE tmdb_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS albums_updated_idx ON albums (updated_at);
+CREATE INDEX IF NOT EXISTS tv_episodes_updated_idx ON tv_episodes (updated_at);
+-- The copy windows and duplicate marks compare trimmed ids (copies._movie_peer_where, _episode_peer_where).
+CREATE INDEX IF NOT EXISTS movies_tmdb_trim_idx ON movies (btrim(tmdb_id));
+CREATE INDEX IF NOT EXISTS tv_shows_tvdb_trim_idx ON tv_shows (btrim(tvdb_id));
+-- v3.7.2: Undo Fix Match. One snapshot per movie or show, taken just before Fix Match writes the new ids: the rows as
+-- JSON (to_jsonb) and the folder of copied artwork and .nfo files (curator/video/match_undo.py). Kept 7 days.
+CREATE TABLE IF NOT EXISTS match_undo (
+    item_id UUID PRIMARY KEY,
+    kind VARCHAR(10) NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    taken_at TIMESTAMP NOT NULL DEFAULT LOCALTIMESTAMP,
+    data JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+-- v3.7.3: a saved movie or TV filter can run an action on a schedule (curator/video/filter_actions.py).
+ALTER TABLE saved_filters ADD COLUMN IF NOT EXISTS action TEXT;
+ALTER TABLE saved_filters ADD COLUMN IF NOT EXISTS action_every TEXT NOT NULL DEFAULT 'off';
+ALTER TABLE saved_filters ADD COLUMN IF NOT EXISTS action_hour INT NOT NULL DEFAULT 3;
+ALTER TABLE saved_filters ADD COLUMN IF NOT EXISTS action_weekday INT NOT NULL DEFAULT 0;
+ALTER TABLE saved_filters ADD COLUMN IF NOT EXISTS action_last_day TEXT;
+ALTER TABLE saved_filters ADD COLUMN IF NOT EXISTS action_last_result TEXT;
+
+-- The call a webhook made, kept with its row in Recent webhooks (Show call) so an unknown or ignored one can be read.
+ALTER TABLE ingest_events ADD COLUMN IF NOT EXISTS payload JSONB;
+
+-- Finished file jobs (rename, subtitles, Clean artwork and the rest) with their log, for the Jobs panel's Recent list.
+CREATE TABLE IF NOT EXISTS job_history (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    lane VARCHAR(20) NOT NULL DEFAULT 'Files',
+    kind VARCHAR(60) NOT NULL DEFAULT '',
+    label VARCHAR(200) NOT NULL DEFAULT '',
+    status VARCHAR(20) NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    result JSONB NOT NULL DEFAULT '{}'::jsonb,
+    log TEXT NOT NULL DEFAULT '',
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP NOT NULL DEFAULT LOCALTIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS job_history_finished ON job_history (finished_at DESC);
+
+-- Online artwork the user banned in the artwork window: never suggested, never picked by Clean artwork or a scrape.
+CREATE TABLE IF NOT EXISTS art_bans (
+    url TEXT PRIMARY KEY,
+    item_kind VARCHAR(10) NOT NULL DEFAULT '',
+    item_id UUID,
+    art_kind VARCHAR(20) NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT LOCALTIMESTAMP
+);
