@@ -99,6 +99,28 @@ def _size(path):
     return total
 
 
+def in_bin(held, root):
+    """True only for a path strictly inside a recycle bin folder: <library folder>/<bin>/<item>/... and, when the row
+    names its library folder, inside that folder's bin. Deleting for good checks this first, so a wrong or damaged
+    row can never point the delete at a library folder, a drive or anything else outside the bin."""
+    text = str(held or "").strip()
+    if not text:
+        return False
+    # The item itself may be a link; where it lives is what counts, so only its folder is resolved.
+    text = text.rstrip("/\\")
+    if not text or not os.path.basename(text):
+        return False                    # a drive or the file system root
+    real = os.path.join(os.path.realpath(os.path.dirname(text)), os.path.basename(text))
+    parts = [part for part in real.replace("\\", "/").split("/") if part]
+    if FOLDER not in parts or len(parts) - parts.index(FOLDER) < 2:
+        return False                    # not in a bin, or the bin folder itself
+    if root:
+        bin_folder = os.path.realpath(os.path.join(root, FOLDER))
+        if not real.startswith(bin_folder + os.sep):
+            return False
+    return True
+
+
 def _remove_now(path):
     if os.path.isdir(path) and not os.path.islink(path):
         shutil.rmtree(path)
@@ -239,6 +261,9 @@ def delete(ids=None):
     gone = 0
     for row in rows:
         held = row["trash_path"]
+        if not in_bin(held, row.get("root")):
+            logger.error("recycle bin: %r is not inside a recycle bin folder, so it was not deleted", held)
+            continue
         try:
             if os.path.lexists(held):
                 _remove_now(held)

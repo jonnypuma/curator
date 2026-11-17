@@ -109,17 +109,28 @@ function journeyCard(item) {
     const when = String(item.created_at || "").replace("T", " ").slice(0, 16);
     const events = Number(item.events) > 1 ? ` · ${Number(item.events)} webhooks` : "";
     const finished = item.status === "done" || item.status === "failed";
-    const chips = steps.map((step) => {
-        // A finished import never reaches a step it did not need: that step is skipped, not still to come.
-        const status = finished && (step.status || "pending") === "pending" ? "skipped" : (step.status || "pending");
-        const time = journeyTime(step);
-        const tip = [JOURNEY_STATES[status] || status, step.detail || ""].filter(Boolean).join(": ");
-        return `<li class="jr-step is-${escapeHtml(status)}" title="${escapeHtml(tip)}">
-            <span class="jr-dot" aria-hidden="true"></span>
+    // A finished import never reaches a step it did not need: that step is skipped, not still to come.
+    const shown = (step) => (finished && (step.status || "pending") === "pending" ? "skipped" : (step.status || "pending"));
+    const inner = (step, status) => `<span class="jr-dot" aria-hidden="true"></span>
             <span class="jr-name">${escapeHtml(journeyStepLabel(step.stage, item))}</span>
-            <span class="jr-time">${escapeHtml(time || JOURNEY_STATES[status] || "")}</span>
+            <span class="jr-time">${escapeHtml(journeyTime(step) || JOURNEY_STATES[status] || "")}</span>`;
+    const tipOf = (step, status) => escapeHtml([JOURNEY_STATES[status] || status, step.detail || ""].filter(Boolean).join(": "));
+    // The players update at the same time, each on its own, so two or more are one step with a branch per player
+    // and not one after the other on the line.
+    const players = steps.filter((step) => String(step.stage).startsWith("library:"));
+    const single = players.length > 1 ? steps.filter((step) => !players.includes(step)) : steps;
+    let chips = single.map((step) => {
+        const status = shown(step);
+        return `<li class="jr-step is-${escapeHtml(status)}" title="${tipOf(step, status)}">
+            ${inner(step, status)}
         </li>`;
     }).join("");
+    if (players.length > 1) {
+        chips += `<li class="jr-step jr-fork" title="The players update at the same time">${players.map((step) => {
+            const status = shown(step);
+            return `<span class="jr-branch is-${escapeHtml(status)}" title="${tipOf(step, status)}">${inner(step, status)}</span>`;
+        }).join("")}</li>`;
+    }
     // A finished import says why a step was skipped (no player set up, nothing to scrape), so a grey dot is explained.
     const reason = focus || (finished ? steps.find((step) => step.status === "skipped" && step.detail) : null);
     const detail = reason && reason.detail

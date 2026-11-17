@@ -21,6 +21,10 @@ PLAYERS = ("kodi", "emby", "jellyfin", "plex", "navidrome")
 _LABELS = {"kodi": "Kodi", "emby": "Emby", "jellyfin": "Jellyfin", "plex": "Plex", "navidrome": "Navidrome"}
 _MEDIA = {"movies": "Movies", "tv": "TV", "music": "Music", "video": "Video", "library": "Library"}
 
+class _Quiet(Exception):
+    """A finished job that has nothing worth a row in Recent library updates."""
+
+
 class Cancelled(Exception):
     """A library job was removed while its player was still being watched."""
 
@@ -867,6 +871,11 @@ def _finish_row(player, row):
             from curator import work_log
 
             text = str(failed) if failed else detail
+            quiet = bool((row.get("payload") or {}).get("refresh")) and not failed and not stopped and not text
+            if quiet:
+                # An artwork refresh that found nothing to do on the player (the item is not there yet) leaves no row.
+                journey.stage(trips, f"library:{player}", "skipped", "Nothing to refresh on the player yet")
+                raise _Quiet()
             if not failed and not stopped and not text:
                 label = {"kodi": "Kodi", "jellyfin": "Jellyfin", "emby": "Emby", "plex": "Plex", "navidrome": "Navidrome"}.get(player, str(player or "").title())
                 payload = row.get("payload") or {}
@@ -897,6 +906,8 @@ def _finish_row(player, row):
                 quality=history_quality(row),
             )
             journey.stage(trips, f"library:{player}", "failed" if failed else "skipped" if stopped else "done", text)
+        except _Quiet:
+            pass
         except Exception:
             logger.exception("could not record the library update")
         try:

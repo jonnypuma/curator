@@ -1840,9 +1840,15 @@ def _same_name(left, right):
     return str(left or "").strip().casefold() == str(right or "").strip().casefold()
 
 
+def _not_in_kodi(cache, item):
+    """Remember an item Kodi does not have, so the alert can say that and not "refreshed 0 items"."""
+    cache.setdefault("_missing", []).append(str(item.get("label") or item.get("title") or "").strip())
+    return 0
+
+
 def _kodi_art_only(target, mappings, item, cache):
     """New artwork of a movie set, an album or an artist: found in Kodi by its name. Returns 1 when Kodi took it, 0
-    when Kodi has no such item."""
+    when Kodi has no such item (noted in cache["_missing"])."""
     kind, title = item.get("kind"), str(item.get("title") or item.get("label") or "").strip()
     if not title or not item.get("art"):
         return 0
@@ -1850,12 +1856,12 @@ def _kodi_art_only(target, mappings, item, cache):
         if "sets" not in cache:
             cache["sets"] = (kodi_call(*target, "VideoLibrary.GetMovieSets", {"properties": ["title"]}) or {}).get("sets") or []
         row = next((found for found in cache["sets"] if _same_name(found.get("title") or found.get("label"), title)), None)
-        return _kodi_new_art(target, mappings, "set", int(row["setid"]), item["art"]) if row else 0
+        return _kodi_new_art(target, mappings, "set", int(row["setid"]), item["art"]) if row else _not_in_kodi(cache, item)
     if kind == "artist":
         found = (kodi_call(*target, "AudioLibrary.GetArtists", {
             "filter": {"field": "artist", "operator": "is", "value": title}}) or {}).get("artists") or []
         row = next((one for one in found if _same_name(one.get("artist") or one.get("label"), title)), None)
-        return _kodi_new_art(target, mappings, "artist", int(row["artistid"]), item["art"]) if row else 0
+        return _kodi_new_art(target, mappings, "artist", int(row["artistid"]), item["art"]) if row else _not_in_kodi(cache, item)
     if kind == "album":
         found = (kodi_call(*target, "AudioLibrary.GetAlbums", {
             "filter": {"field": "album", "operator": "is", "value": title},
@@ -1864,8 +1870,11 @@ def _kodi_art_only(target, mappings, item, cache):
         rows = [one for one in found if _same_name(one.get("title") or one.get("label"), title)]
         named = [one for one in rows if not artist or _same_name(one.get("displayartist"), artist)
                  or any(_same_name(name, artist) for name in one.get("artist") or [])]
+        chosen = named or (rows if len(rows) == 1 else [])
+        if not chosen:
+            return _not_in_kodi(cache, item)
         done = 0
-        for row in named or (rows if len(rows) == 1 else []):
+        for row in chosen:
             done = _kodi_new_art(target, mappings, "album", int(row["albumid"]), item["art"]) or done
         return done
     return 0
@@ -1990,6 +1999,20 @@ def _kodi_refresh(cfg, media, items):
     if art_done:
         text = (text if refreshed else "") + f" Kodi shows the new artwork of {art_done} item{'s' if art_done != 1 else ''}."
         text = text.strip()
+    absent = [name for name in named.get("_missing") or [] if name]
+    if absent:
+        # An album, artist or set that was just imported: Kodi gets it, with its artwork, from the library scan.
+        from curator import job_history
+
+        count = len(absent)
+        waits = (f"Kodi does not have {job_history.names_text(absent, shown=3)} yet, so there was no artwork to update "
+                 f"there. {'They arrive' if count != 1 else 'It arrives'} with the library scan of the import.")
+        if not (refreshed or art_done or new_folders or unmapped):
+            # Nothing happened and nothing is wrong: Kodi had to be asked to find that out, but it is not news. No
+            # alert and no row in Recent library updates; only the container log keeps it.
+            logger.info("%s", waits)
+            return ""
+        text = f"{text} {waits}"
     if keep:
         from curator.video import config
 

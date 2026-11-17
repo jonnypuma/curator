@@ -560,13 +560,21 @@ async function toggleRecentJobLog(key) {
     if (state.recentJobOpen === key) paintRecentJobs();
 }
 
+// Runs straight from the click, not through the action queue: over plain http the browser only lets a page copy
+// while it is still handling the click, and a copy that waited behind another action was refused without a word.
 async function copyRecentJobLog() {
     const text = state.recentJobLog || "";
+    if (!text) return notify("The log is still loading. Try again in a moment.", "info");
     try {
         if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
         else copyPlainText(text);
         notify("Job log copied.", "info");
     } catch (error) {
-        notify("Could not copy the job log.", "warning");
+        try {
+            copyPlainText(text);
+            notify("Job log copied.", "info");
+        } catch (fallbackError) {
+            notify("The browser refused to copy. Select the log text and press Ctrl+C.", "warning");
+        }
     }
 }

@@ -5686,3 +5686,17 @@ button.tag-pill.is-busy .activity-spin {
 .vtrailer-poster:hover .vtrailer-play, .vtrailer-poster:focus-visible .vtrailer-play { background: #f00; }
 .mv-youtube-plan { flex: 1 1 100%; margin: 2px 0 0; overflow-wrap: anywhere; }
 .mv-youtube-plan.is-linked { color: var(--success); }
+/* Follow imports: players that update at the same time are branches of one step. */
+.jr-fork { flex: 2 1 184px; flex-direction: row; justify-content: center; align-items: flex-start; gap: 6px; padding-top: 0; }
+.jr-fork::before { width: 50%; }
+.jr-branch { position: relative; display: flex; flex-direction: column; align-items: center; min-width: 76px; flex: 1 1 76px; text-align: center; }
+.jr-branch:first-child::before { content: ""; position: absolute; top: 7px; right: 50%; width: 50%; height: 2px; z-index: 0; background: var(--border); }
+.jr-step.is-done + .jr-fork .jr-branch:first-child::before, .jr-step.is-skipped + .jr-fork .jr-branch:first-child::before { background: var(--success); }
+.jr-branch + .jr-branch::before { content: ""; position: absolute; top: 7px; left: -50%; width: 100%; height: 2px; z-index: 0; border-top: 2px dotted var(--border); }
+.jr-branch.is-done .jr-dot { background: var(--success); border-color: var(--success); }
+.jr-branch.is-running .jr-dot { background: var(--accent); border-color: var(--accent); animation: jr-pulse 1.2s ease-in-out infinite; }
+.jr-branch.is-waiting .jr-dot { background: var(--warning); border-color: var(--warning); }
+.jr-branch.is-failed .jr-dot { background: var(--danger); border-color: var(--danger); }
+.jr-branch.is-skipped .jr-dot { background: var(--bg-surface); border-color: var(--text-muted); border-style: dashed; }
+.jr-branch.is-pending .jr-name, .jr-branch.is-skipped .jr-name { color: var(--text-muted); }
+@media (prefers-reduced-motion: reduce) { .jr-branch.is-running .jr-dot { animation: none; } }

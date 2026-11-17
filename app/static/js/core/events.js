@@ -586,7 +586,7 @@ async function onClick(event) {
         return;
     }
     if (name === "recent-job-log") return runAction(() => toggleRecentJobLog(action.dataset.key));
-    if (name === "recent-job-copy") return runAction(copyRecentJobLog);
+    if (name === "recent-job-copy") return copyRecentJobLog();    // straight from the click: a queued copy loses the click the browser asks for
     if (name === "page-reload") {
         window.location.reload();
         return;
