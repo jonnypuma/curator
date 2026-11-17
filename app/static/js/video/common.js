@@ -167,6 +167,72 @@ function fmtDate(value) {
     return text.length >= 10 ? text.slice(0, 10) : text;
 }
 
+// Health score: how complete a movie or a show is, from what the list already knows about it. Each check that is
+// switched on (Settings, Movies or TV shows, List options) counts the same. Subtitles and the lesser file warnings
+// (such as an unknown audio language) are off until the user turns them on. A missing trailer, theme song or extra
+// artwork type never counts. Seasons and episodes have no score of their own.
+const HEALTH_CHECKS = [
+    ["matched", "Matched to a database", true],
+    ["scraped", "Scraped", true],
+    ["nfo", ".nfo present", true],
+    ["poster", "Poster", true],
+    ["fanart", "Fanart", true],
+    ["file", "No corrupt file and no failed probe", true],
+    ["subs", "Subtitles", false],
+    ["warnings", "No other file warnings (unknown audio language, no audio, shorter than expected)", false],
+];
+
+function healthCheckOn(media, key) {
+    const cfg = typeof videoCfg === "function" ? (videoCfg() || {}) : {};
+    const value = cfg[`ui_${media}_health_${key}`];
+    if (value === true || value === false) return value;
+    return (HEALTH_CHECKS.find((check) => check[0] === key) || [])[2] === true;
+}
+
+function videoHasArt(row, type) {
+    const art = row && row.artwork;
+    if (Array.isArray(art)) return art.includes(type);
+    return !!(art && art[type]);
+}
+
+function videoHealthScore(row) {
+    if (!row || row._version || row.missing) return null;
+    const kind = row._kind || "movie";
+    if (kind !== "movie" && kind !== "show") return null;
+    const show = kind === "show";
+    const gap = (key, test) => (typeof tvGap === "function" ? tvGap(row, key, test) : Number(row[key]) > 0);
+    const corrupt = (item) => (item.health || []).includes("corrupt");
+    const lesser = healthWords(row).filter((word) => word !== HEALTH_LABELS.corrupt);
+    const all = {
+        matched: ["Not matched to a database", !!(row.tmdb_id || row.imdb_id || row.tvdb_id)],
+        scraped: ["Not scraped", !!row.scraped_at],
+        nfo: show ? ["An .nfo is missing (the show's or an episode's)", !(typeof tvNoNfo === "function" ? tvNoNfo(row) : row.has_nfo === false)]
+            : ["No .nfo", !!row.has_nfo],
+        poster: ["No poster", videoHasArt(row, "poster")],
+        fanart: ["No fanart", videoHasArt(row, "fanart")],
+        file: show ? ["Corrupt episodes or a failed probe", !row.probe_error && !gap("corrupt_count", corrupt)]
+            : [row.probe_error ? "The file could not be probed" : "Corrupt file", !row.probe_error && !corrupt(row)],
+        subs: show ? ["Episodes without subtitles", !gap("no_subs_count", (e) => !(e.sub_langs && e.sub_langs.length))]
+            : ["No subtitles", !!(row.sub_langs && row.sub_langs.length)],
+        warnings: [`File warning (${lesser.join(", ")})`, !lesser.length],
+    };
+    const media = show ? "tv" : "movie";
+    const checks = HEALTH_CHECKS.filter((check) => healthCheckOn(media, check[0])).map((check) => all[check[0]]);
+    if (!checks.length) return null;
+    const missing = checks.filter((check) => !check[1]).map((check) => check[0]);
+    return { score: Math.round(((checks.length - missing.length) / checks.length) * 100), missing, total: checks.length };
+}
+
+function healthScoreBadge(row) {
+    const health = videoHealthScore(row);
+    if (!health) return "";
+    const level = health.score === 100 ? "good" : health.score >= 70 ? "fair" : "poor";
+    const title = health.missing.length
+        ? `Health ${health.score}%. To fix: ${health.missing.join("; ")}.`
+        : `Health 100%: all ${health.total} checks pass. Choose what counts under Settings, List options.`;
+    return `<span class="health-score ${level}" title="${escapeHtml(title)}">${health.score}</span>`;
+}
+
 function titleFacts(row) {
     if (!row || row._kind === "loading" || row._kind === "missing" || row._version) return "";
     const kind = row._kind || "movie";
@@ -196,6 +262,8 @@ function titleFacts(row) {
             ? `<span class="process-mark ok" title="Processed">✓</span>`
             : `<span class="process-mark bad" title="Not processed">✕</span>`);
     }
+    const showHealth = kind === "movie" ? cfg.ui_movie_health !== false : kind === "show" ? cfg.ui_tv_health !== false : false;
+    if (showHealth) bits.push(healthScoreBadge(row));
     const noMatch = (kind === "movie" || kind === "show") && !row.tmdb_id && !row.imdb_id && !row.tvdb_id;
     if (noMatch) bits.push(`<span class="process-mark unmatched" title="Not matched to any database">⚠️</span>`);
     return bits.length ? `<span class="vl-facts">${bits.join("")}</span>` : "";
@@ -1111,6 +1179,29 @@ function youtubeId(value) {
     return /^[A-Za-z0-9_-]{11}$/.test(text) ? text : "";
 }
 
+// The YouTube trailer is a picture with a play button until it is clicked. A YouTube player that loads with the page
+// can take the keyboard focus (some videos do, such as ones that open on a notice), and the browser then scrolls the
+// info pane down to it. Loading it on a click also keeps YouTube out of every item that is only looked at.
+function trailerPoster(youtube, title) {
+    const id = escapeHtml(youtube);
+    return `<button type="button" class="vtrailer vtrailer-poster" data-action="video-trailer-play" data-youtube="${id}" aria-label="Play the trailer of ${escapeHtml(title || "this item")}" title="Play the trailer">
+        <img src="https://i.ytimg.com/vi/${id}/hqdefault.jpg" alt="" loading="lazy" referrerpolicy="no-referrer">
+        <span class="vtrailer-play" aria-hidden="true">▶</span></button>`;
+}
+
+function trailerFrame(youtube) {
+    return `<iframe class="vtrailer" title="Trailer" src="https://www.youtube.com/embed/${escapeHtml(youtube)}?autoplay=1" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>`;
+}
+
+function playInlineTrailer(button) {
+    const id = youtubeId(button && button.dataset.youtube);
+    if (!id) return;
+    const host = document.getElementById("video-center");
+    const top = host ? host.scrollTop : 0;
+    button.outerHTML = trailerFrame(id);
+    if (host) host.scrollTop = top;
+}
+
 function trailerSection(item, owner) {
     const file = item && item.trailer_file;
     const youtube = youtubeId(item && item.trailer);
@@ -1118,7 +1209,7 @@ function trailerSection(item, owner) {
     const player = file
         ? `<video class="vtrailer" controls preload="metadata" src="/api/v1/media?path=${encodeURIComponent(file)}"></video>`
         : youtube
-            ? `<iframe class="vtrailer" title="Trailer" src="https://www.youtube.com/embed/${youtube}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>`
+            ? trailerPoster(youtube, title)
             : `<p class="muted">No trailer yet. Scrape this item so the YouTube link is saved, then download it.</p>`;
     const local = file ? `<p class="muted mono vpath">${escapeHtml(String(file).split("/").slice(-2).join("/"))}</p>` : "";
     const buttons = [];

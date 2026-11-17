@@ -294,6 +294,7 @@ function jobLabel(kind) {
         "album-bulk": "Album batch",
         "missing-artist-art": "Artist artwork",
         "lidarr-search": "Lidarr search",
+        "mv-download": "Music video download",
         "radarr-add": "Add to Radarr",
         "sonarr-add": "Add to Sonarr",
         "kodi-video": "Kodi video",

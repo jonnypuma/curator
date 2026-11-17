@@ -25,7 +25,8 @@ def fire(event, folders=(), items=()):
         from curator import notify
 
         notify.announce("music", _MUSIC_LINES.get(event) or "Updated music")
-        notify.request("music", folders=tuple(folders or ()), items=tuple(items or ()))
+        notify.request("music", folders=tuple(folders or ()), items=tuple(items or ()),
+                       trigger=f"Music change ({str(event).replace('_', ' ')})")
     except Exception:
         logger.info("music update request failed for %s", event, exc_info=True)
 

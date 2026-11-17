@@ -98,6 +98,9 @@ def nfo_text(row):
         if row.get(key):
             lines.append(f"    <{tag}>{escape(str(row[key]))}</{tag}>")
     if row.get("year"):
+        # Kodi reads <premiered> for a music video and keeps <year> only for older versions. Only the year is known,
+        # so the date is the first of January, which is what Kodi itself exports for a year without a date.
+        lines.append(f"    <premiered>{int(row['year']):04d}-01-01</premiered>")
         lines.append(f"    <year>{int(row['year'])}</year>")
     for genre in row.get("genres") or []:
         lines.append(f"    <genre>{escape(str(genre))}</genre>")
@@ -214,7 +217,7 @@ def scan(mode="incremental", roots=None, write_nfos=True):
             from curator import notify
 
             notify.request("video", folders=sorted({os.path.dirname(path) for _root, path in files if path in seen})
-                           if mode == "incremental" else chosen, clean=bool(gone))
+                           if mode == "incremental" else chosen, clean=bool(gone), trigger=f"Music videos scan ({mode})")
         except Exception:
             logger.info("music video library update was not sent", exc_info=True)
     return {"added": added, "changed": changed, "removed": len(gone), "nfo": written, "files": len(files)}
@@ -410,7 +413,7 @@ def delete(ids):
         except (AppError, OSError) as exc:
             errors.append(f"{item_id}: {exc}")
     if folders_changed:
-        notify.request("video", folders=sorted(folders_changed), clean=True)
+        notify.request("video", folders=sorted(folders_changed), clean=True, trigger="Music videos deleted")
     return {"deleted": deleted, "errors": errors}
 
 
@@ -488,3 +491,87 @@ def start_fill():
         _state.update({"status": "running", "message": "Starting", "processed": 0, "total": 0, "result": {}})
     threading.Thread(target=_run_fill, name="musicvideo-lookup", daemon=True).start()
     return True
+
+
+def set_locked(ids, locked):
+    """Lock or unlock several music videos (scans, lookups and the cleanup keep a locked one's values)."""
+    wanted = [str(item) for item in ids or []]
+    if not wanted:
+        return {"changed": 0}
+    rows = db.fetchall("UPDATE music_videos SET locked = %s, updated_at = NOW() WHERE id = ANY(%s::uuid[]) RETURNING id",
+                       (bool(locked), wanted))
+    return {"changed": len(rows), "locked": bool(locked)}
+
+
+def wanted_name(row):
+    """"Artist - Title (Year)" for the file, as parse_name reads it back. "" when artist or title is missing."""
+    from curator.video import renamer
+
+    artist, title = renamer.sanitize(row.get("artist") or ""), renamer.sanitize(row.get("title") or "")
+    if not artist or not title:
+        return ""
+    return f"{artist} - {title}" + (f" ({int(row['year'])})" if row.get("year") else "")
+
+
+def rename_plan(ids):
+    """What Rename would do: [{"id", "from", "to", "error"}]. A file already named right is left out."""
+    plan = []
+    for item_id in ids or []:
+        try:
+            row = _row(item_id)
+        except AppError:
+            continue
+        folder, base = os.path.split(row["path"])
+        stem, extension = os.path.splitext(base)
+        name = wanted_name(row)
+        entry = {"id": row["id"], "from": row["path"], "to": "", "error": ""}
+        if not name:
+            entry["error"] = "It needs an artist and a title first"
+        elif name == stem:
+            continue
+        else:
+            entry["to"] = os.path.join(folder, name + extension)
+            if not os.path.isfile(row["path"]):
+                entry["error"] = "The video file is not on disk"
+            elif os.path.exists(entry["to"]) and os.path.normcase(entry["to"]) != os.path.normcase(row["path"]):
+                entry["error"] = "A file with that name is already there"
+        plan.append(entry)
+    return plan
+
+
+def rename(ids):
+    """Rename the video to "Artist - Title (Year)" in its own folder, with its .nfo, media info file and pictures, and
+    point the library at the new names. Nothing is overwritten: a taken name is reported and that video is left."""
+    from curator import notify
+    from resonance import history
+
+    renamed, errors, folders = [], [], set()
+    for entry in rename_plan(ids):
+        if entry["error"]:
+            errors.append(f"{os.path.basename(entry['from'])}: {entry['error']}")
+            continue
+        old, new = entry["from"], entry["to"]
+        old_stem, new_stem = os.path.splitext(old)[0], os.path.splitext(new)[0]
+        try:
+            moved = []
+            for suffix in (".nfo", ".cmm_mediainfo.xml", *THUMB_SUFFIXES):
+                if os.path.isfile(old_stem + suffix) and not os.path.exists(new_stem + suffix):
+                    os.rename(old_stem + suffix, new_stem + suffix)
+                    moved.append(suffix)
+            os.rename(old, new)
+        except OSError as exc:
+            errors.append(f"{os.path.basename(old)}: {exc.strerror or exc}")
+            continue
+        row = db.fetchone("SELECT file_id, nfo_path, thumb_path FROM music_videos WHERE id = %s", (entry["id"],)) or {}
+        swap = lambda path: (new_stem + path[len(old_stem):]) if path and str(path).startswith(old_stem) else path  # noqa: E731
+        db.execute("UPDATE music_videos SET path = %s, nfo_path = %s, thumb_path = %s, updated_at = NOW() WHERE id = %s",
+                   (new, swap(row.get("nfo_path")), swap(row.get("thumb_path")), entry["id"]))
+        if row.get("file_id"):
+            db.execute("UPDATE video_files SET path = %s WHERE id = %s", (new, row["file_id"]))
+        history.record("renamed", os.path.basename(new), "musicvideo", new, f"Renamed from {os.path.basename(old)}")
+        renamed.append(os.path.basename(new))
+        folders.add(os.path.dirname(new))
+    if folders:
+        notify.request("video", folders=sorted(folders), clean=True, trigger="Music videos renamed")
+    return {"renamed": renamed, "errors": errors}
+

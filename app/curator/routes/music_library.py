@@ -184,7 +184,7 @@ async def delete_library_files(body: dict | None = JsonBody):
             try:
                 from curator import notify
 
-                notify.request("music", folders=sorted(folders), clean=True)
+                notify.request("music", folders=sorted(folders), clean=True, trigger="Music removed from the library")
             except Exception:
                 logging.getLogger(__name__).info("the library clean after a music delete was not sent", exc_info=True)
         return cleaned(result)

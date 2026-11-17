@@ -164,8 +164,10 @@ def library_arr_rescan(body: LibraryUpdate):
         else:
             where = " It is first in Lidarr's queue."
         where += " Lidarr then fetches fresh artist data before it rescans the folder."
-    after = " Curator scans it too when Sonarr is done, and that scan shows in the queue." if app == "Sonarr" else ""
-    return {"sent": sent, "message": f"{app} was asked to rescan {sent} {noun}{plural}.{skipped}{where}{after}"}
+    after = (" Curator scans it too when Sonarr is done, because Sonarr only reports files it adds or removes."
+             if app == "Sonarr" else "")
+    players = " No player was asked to update: use Update player library for Kodi, Emby, Jellyfin or Plex."
+    return {"sent": sent, "message": f"{app} was asked to rescan {sent} {noun}{plural}.{skipped}{where}{after}{players}"}
 
 
 def _scan_after_sonarr(followups):

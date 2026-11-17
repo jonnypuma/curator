@@ -647,6 +647,18 @@ def ban_artwork(kind: str, item_id: str, body: BanBody):
     return art_bans.ban_many(picks[:60], kind, _uuid(item_id))
 
 
+class UndoBody(BaseModel):
+    players: list[str] | None = None
+
+
+@router.post("/artwork/undo/{kind}/{item_id}")
+def undo_artwork(kind: str, item_id: str, body: UndoBody):
+    """Put back the artwork that was replaced last on this item."""
+    if kind not in {"movie", "show", "season", "episode", "set"}:
+        raise AppError("Artwork works on a movie, show, season, episode or set", 400)
+    return art_pick.undo(kind, _uuid(item_id), body.players)
+
+
 @router.post("/artwork/unban")
 def unban_artwork(body: BanBody):
     from curator.video import art_bans

@@ -159,6 +159,8 @@ const MOVIE_RIBBONS = [
     ["hdr10", "HDR10", (m) => m.hdr_format === "hdr10" || m.hdr_secondary === "HDR10"],
     ["hlg", "HLG", (m) => m.hdr_format === "hlg" || m.hdr_secondary === "HLG"],
     ["sdr", "SDR", (m) => m.hdr_format === "sdr"],
+    ["needswork", "Needs work", (m) => { const health = videoHealthScore(m); return !!health && health.score < 100; }],
+    ["complete", "Complete", (m) => { const health = videoHealthScore(m); return !!health && health.score === 100; }],
     ["nonfo", "No NFO", (m) => !m.has_nfo],
     ["nfo", "NFO changes", (m) => !!m.nfo_stale],
     ["noposter", "No poster", (m) => !(m.artwork || []).includes("poster")],
@@ -559,7 +561,7 @@ async function confirmSavedFilter() {
     }
     const tag = (media === "music" || media === "sets") ? "" : document.getElementById("saved-filter-tag").value.trim();
     const payload = media === "music"
-        ? { preset: (document.getElementById("library-filter") || {}).value || "all" }
+        ? { preset: state.filter || "all" }
         : currentVideoFilterPayload();
     const playlistBox = document.getElementById("saved-filter-playlist");
     const playlist = !!(playlistBox && playlistBox.checked) && media !== "sets";
@@ -635,7 +637,8 @@ function applyMusicPreset(preset) {
     const select = document.getElementById("library-filter");
     if (!select) return;
     if (typeof clearMusicColumnFilters === "function") clearMusicColumnFilters();
-    select.value = preset || "all";
+    select.value = String(preset || "all").split("+")[0];
+    select.dataset.combined = preset || "all";
     select.dispatchEvent(new Event("change"));
 }
 
@@ -1099,7 +1102,7 @@ function videoSelectionFacts() {
             n,
             noun: n === 1 ? "set" : "sets",
             detail: movies ? `${movies} movie${movies === 1 ? "" : "s"} in the library` : "",
-            buttons: n ? [["video-scrape-open", selectionCount("Scrape…", n), ""], ["video-batch-art", selectionCount("Artwork", n), "btn-ghost"], ["video-batch-cleanfanart", selectionCount("Clean artwork…", n), "btn-ghost"], ["video-batch-nfo", selectionCount("Write .nfo", n), "btn-ghost"], ["video-batch-lock", selectionCount(videoSelectionAllLocked() ? "Unlock" : "Lock", n), "btn-ghost"], ["video-batch-processed", selectionCount("Processed", n), "btn-process"], ["video-select-clear", "Clear", "btn-ghost"], ["video-set-delete", selectionCount("Remove…", n), "btn-ghost btn-remove"]] : [],
+            buttons: n ? [["video-scrape-open", selectionCount("Scrape…", n), ""], ["video-batch-art", selectionCount("Artwork", n), "btn-ghost"], ["video-batch-cleanfanart", selectionCount("Clean artwork…", n), "btn-ghost"], ["video-batch-nfo", selectionCount("Write .nfo", n), "btn-ghost"], ["video-batch-lock", selectionCount(videoSelectionAllLocked() ? "Unlock" : "Lock", n), "btn-ghost"], ["video-batch-processed", selectionCount("Processed", n), "btn-process"], ["video-batch-reload", n], ["video-select-clear", "Clear", "btn-ghost"], ["video-set-delete", selectionCount("Remove…", n), "btn-ghost btn-remove"]] : [],
         };
     }
     if (state.media === "tv") {

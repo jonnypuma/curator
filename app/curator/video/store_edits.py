@@ -309,6 +309,21 @@ def match_ids(source, source_id, extra=None):
     return ids
 
 
+# Field locks Fix Match keeps: choices about the user's own copy or viewing, which a different match does not change.
+# Every other lock (title, plot, year, ids...) was set on the old, wrong match and would stop the new one from landing.
+MATCH_KEEPS_LOCKS = ("edition", "set", "tags", "user_rating", "playcount", "last_played", "episode_order")
+
+
+# What a Fix Match leaves locked on the seasons and episodes of a show: where a file belongs and what was watched.
+MATCH_KEEPS_CHILD_LOCKS = ("season_number", "episode_number", "edition", "tags", "user_rating", "playcount", "last_played")
+
+
+def match_unlocks(kind):
+    """The field locks a Fix Match lifts on a movie or a show."""
+    names = store.MOVIE_FIELDS if kind == "movie" else store.SHOW_FIELDS
+    return sorted(set(names) - set(MATCH_KEEPS_LOCKS))
+
+
 def set_match(kind, row_id, source, source_id, extra=None):
     """Point an item at a different scraper id. Old ids are dropped so the next scrape cannot mix two titles.
 
@@ -325,17 +340,28 @@ def set_match(kind, row_id, source, source_id, extra=None):
     if kind == "movie" and source in {"tmdb", "tvdb", "omdb", "trakt"}:
         before = copies.movie_seed_rows([row_id])
         row = db.fetchone(
-            "UPDATE movies SET ids = %s, tmdb_id = %s, imdb_id = %s, trakt_id = %s "
+            "UPDATE movies SET ids = %s, tmdb_id = %s, imdb_id = %s, trakt_id = %s, "
+            "locked_fields = ARRAY(SELECT unnest(COALESCE(locked_fields, ARRAY[]::text[])) EXCEPT SELECT unnest(%s::text[])) "
             "WHERE id = %s AND NOT locked RETURNING id",
-            (Jsonb(ids), ids.get("tmdb"), ids.get("imdb"), ids.get("trakt"), row_id),
+            (Jsonb(ids), ids.get("tmdb"), ids.get("imdb"), ids.get("trakt"), match_unlocks("movie"), row_id),
         )
     elif kind == "show" and source in {"tmdb", "tvdb", "omdb", "trakt"}:
         before = copies.episode_seeds_for_shows([row_id])
         row = db.fetchone(
-            "UPDATE tv_shows SET ids = %s, tmdb_id = %s, tvdb_id = %s, imdb_id = %s, trakt_id = %s "
+            "UPDATE tv_shows SET ids = %s, tmdb_id = %s, tvdb_id = %s, imdb_id = %s, trakt_id = %s, "
+            "locked_fields = ARRAY(SELECT unnest(COALESCE(locked_fields, ARRAY[]::text[])) EXCEPT SELECT unnest(%s::text[])) "
             "WHERE id = %s AND NOT locked RETURNING id",
-            (Jsonb(ids), ids.get("tmdb"), ids.get("tvdb"), ids.get("imdb"), ids.get("trakt"), row_id),
+            (Jsonb(ids), ids.get("tmdb"), ids.get("tvdb"), ids.get("imdb"), ids.get("trakt"), match_unlocks("show"), row_id),
         )
+        if row:
+            # The season and episode names, plots and dates of the old match would otherwise stay where they were locked.
+            for table in ("tv_seasons", "tv_episodes"):
+                db.execute(
+                    f"UPDATE {table} SET locked_fields = ARRAY(SELECT unnest(COALESCE(locked_fields, ARRAY[]::text[])) "
+                    "INTERSECT SELECT unnest(%s::text[])) WHERE show_id = %s AND NOT locked "
+                    "AND NOT (COALESCE(locked_fields, ARRAY[]::text[]) <@ %s::text[])",
+                    (list(MATCH_KEEPS_CHILD_LOCKS), row_id, list(MATCH_KEEPS_CHILD_LOCKS)),
+                )
     elif kind == "set" and source == "tmdb":
         row = db.fetchone(
             "UPDATE movie_sets SET tmdb_collection_id = %s, updated_at = NOW() "

@@ -54,6 +54,29 @@ async def queue_missing_artist_artwork(body: dict | None = JsonBody):
     return await run(work)
 
 
+@router.post("/api/artwork/many/{action}")
+async def artwork_many(action: str, body: dict | None = JsonBody):
+    """Act on several ticked pictures of the music artwork window: select (save), remove, ban, or unban one."""
+    from resonance import artwork_bulk
+
+    ids = [str(item) for item in ((body or {}).get("ids") or [])][:100]
+
+    def work():
+        if not ids:
+            raise AppError("Tick at least one image", 400)
+        if action == "select":
+            return cleaned(artwork_bulk.select_many(ids))
+        if action == "remove":
+            return cleaned(artwork_bulk.remove_many(ids))
+        if action == "ban":
+            return cleaned(artwork_bulk.ban(ids))
+        if action == "unban":
+            return cleaned(artwork_bulk.unban(ids[0]))
+        raise AppError("Unknown action", 400)
+
+    return await run(work)
+
+
 @router.post("/api/artwork/{art_id}/select")
 async def select_artwork(art_id: str):
     def work():

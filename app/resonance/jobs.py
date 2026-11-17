@@ -440,6 +440,15 @@ def _lidarr_worker():
             scan_queue.finished()
 
 
+def note_items(job_id, items):
+    """Keep the names a scan worked on ({"items", "item_count"}) in its result, for the Recent list."""
+    from psycopg.types.json import Jsonb
+
+    if not job_id or not items:
+        return
+    db.execute("UPDATE scan_jobs SET result = COALESCE(result, '{}'::jsonb) || %s::jsonb WHERE id = %s", (Jsonb(items), job_id))
+
+
 def _run_lidarr_item(item, notify_players=False):
     label = item.get("label") or item["album"]
     try:
@@ -454,6 +463,10 @@ def _run_lidarr_item(item, notify_players=False):
     except Exception:
         logger.exception("could not start Lidarr scan for %s", label)
         return {"status": "failed", "message": "The scan could not start"}
+    try:
+        note_items(row["id"], {"items": [str(label)], "item_count": 1})
+    except Exception:
+        logger.debug("could not name the Lidarr scan", exc_info=True)
     try:
         message = scanner.scan_release(row["id"], item["album"], item.get("artist"))
         status = "cancelled" if message == "Scan cancelled" else "completed"
@@ -480,7 +493,8 @@ def _run_lidarr_item(item, notify_players=False):
                 folder = artist or album
                 folders = [folder] if folder else []
                 items = [label] if label else []
-                notify.request("music", folders=folders, items=items, message=f"Updated: {label}")
+                notify.request("music", folders=folders, items=items, message=f"Updated: {label}",
+                               trigger="Lidarr import scan")
             except Exception:
                 logger.info("player notify failed after Lidarr scan for %s", label, exc_info=True)
         return {"id": row["id"], "status": status, "message": message}

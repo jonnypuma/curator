@@ -1268,6 +1268,7 @@ function onVideoAction(name, action, event) {
     }
     if (name === "video-art-upload") return chooseVideoArtFile(action.dataset.artKind);
     if (name === "video-art-tick") return onArtTick(action);
+    if (name === "video-art-undo") return runAction(undoVideoArt, "Putting the artwork back…");
     if (name === "video-art-ban") return runAction(() => banVideoArt([{ url: action.dataset.url, art_kind: action.dataset.artKind }]), "Banning…");
     if (name === "video-art-unban") return runAction(() => unbanVideoArt(action.dataset.url), "Unbanning…");
     if (name === "video-art-bulk-ban") return runAction(banTickedArt, "Banning…");
@@ -1346,6 +1347,7 @@ function onVideoAction(name, action, event) {
     if (name === "video-expand-all") return runAction(expandAllVideoRows, "Expanding…");
     if (name === "video-collapse-all") return collapseAllVideoRows();
     if (name === "video-trailer-popout") return openTrailerPopout(action);
+    if (name === "video-trailer-play") return playInlineTrailer(action);
     if (name === "video-trailer-pip") return requestTrailerPip(document.querySelector("#video-center video.vtrailer"));
     if (name === "video-trailer-popout-pip") return requestTrailerPip(document.getElementById("trailer-popout-video"));
     if (name === "video-trailer-popout-size") return toggleTrailerPopoutSize();

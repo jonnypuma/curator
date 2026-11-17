@@ -133,6 +133,10 @@ function renderSettings() {
             <label class="field">Highest quality ${typeof videoSelect === "function" ? videoSelect("video-trailer-resolution", (typeof videoCfg === "function" ? videoCfg() : {}).trailer_resolution || "1080p", [["2160p", "2160p"], ["1080p", "1080p"], ["720p", "720p"]]) : ""}</label>
             <p class="muted">The tallest picture to search for when a trailer is downloaded, by hand or after an import. A trailer already on disk is only replaced when it is shorter than this and YouTube has a taller copy.</p>
         </section>
+        <section class="settings-section" data-tab="general"><h3>Music videos from YouTube</h3>
+            <label class="field">Save a downloaded music video ${typeof videoSelect === "function" ? videoSelect("video-mv-folder-rule", (typeof videoCfg === "function" ? videoCfg() : {}).mv_folder_rule || "artist", [["artist", "in the artist's folder (made when it is missing)"], ["existing", "in the artist's folder only when there already is one"], ["flat", "at the top of the Music videos folder"]]) : ""}</label>
+            <p class="muted">Used by + Add from YouTube on the Music videos tab. The file is named Artist - Title (Year). An artist folder is found whatever its spelling (AC/DC, AC-DC and ac dc are the same folder), so a second folder is not made for the same artist. The button needs a folder with the media type Music videos above.</p>
+        </section>
         <section class="settings-section" data-tab="general"><h3>Prune safety</h3>
             <label class="choice"><input type="checkbox" id="prune-safety" ${cfg.prune_safety !== false ? "checked" : ""}> Hold back removals when too much is missing</label>
             <p class="muted">On: a scan does not remove missing items from the database when more than 20 % of a mount, or of one library path, cannot be found (a drive that came back half-empty). They stay in the library marked Not found, and you can remove them with Remove all not found. Off: the scan removes whatever it cannot find, whatever the share. A library path that is readable but completely empty is always left alone. Applies to music, movies and TV shows. No file is ever touched.</p>
@@ -180,6 +184,7 @@ function renderSettings() {
             <p class="section-label">Artwork lookup during</p>
             <p class="muted">After the release step, the scan pauses so you can choose artwork for that album before the next one starts. Forced also pauses when the Force checkbox is on.</p>
             <div class="suffix-types" role="group" aria-label="Scan types that pause to choose artwork">${scanModeButtons(cfg, "artwork_lookup_modes")}</div>
+            <h3>During a scan</h3>
             <label class="choice"><input type="checkbox" id="refresh-discography-during-scan" ${cfg.refresh_discography_during_scan !== false ? "checked" : ""}> Update MusicBrainz discography during a scan</label>
             <p class="muted">An incremental deep scan checks only artists that gained a new album or had an album's files change, and only when that artist's catalog is missing or older than 7 days. A full or deep scan checks every artist in the scanned folders on that same 7 day rule. A catalog newer than that is left as it is.</p>
             <label class="choice"><input type="checkbox" id="fill-mb-metadata-during-incremental" ${cfg.fill_mb_metadata_during_incremental !== false ? "checked" : ""}> Fill in missing MusicBrainz metadata during an incremental deep scan</label>
@@ -192,6 +197,8 @@ function renderSettings() {
             <p class="muted">The last step of any scan (incremental, full or deep) refreshes the artists and albums whose stored metadata (including tags written into the tracks) or artwork changed during the scan, also when a missing value was filled in, and albums the scan added. Emby and Jellyfin mark those folders as changed, so they read them again, and Plex scans them; both need path rows under Integrations. Kodi and Navidrome already get a music library scan after every music scan, which reads changed tags; Kodi has no way to refresh one album's album.nfo or artwork, so use Refresh in Kodi for those.</p>
             <label class="choice"><input type="checkbox" id="limited-artwork-during-scan" ${cfg.limited_artwork_during_scan ? "checked" : ""}> Limited artwork search during scan</label>
             <p class="muted">When this is on, the artwork step only looks for a missing artist thumb or album cover. When it is off, that step looks for every artwork type that is checked under Artwork to fetch and is still missing from the folder.</p>
+            <label class="choice"><input type="checkbox" id="music-scan-fix-shape" ${cfg.scan_fix_art_shape_music !== false ? "checked" : ""}> Replace artwork with the wrong shape during a scan</label>
+            <p class="muted">A fanart, banner, landscape or disc art whose size is the wrong shape for its type gets the best right-shaped picture already listed for it. Covers, artist thumbs and logos come in every shape and are never judged. Pictures you uploaded stay.</p>
             <label class="choice"><input type="checkbox" id="scan-rewrite-nfo" ${cfg.scan_rewrite_nfo ? "checked" : ""}> Rewrite .nfo files at the end of a scan</label>
             <p class="muted">The last stage writes an album.nfo that is missing, and it rewrites album.nfo for a new or changed album that already has a MusicBrainz id. The file is written after reviews, countries, and original years are stored. When this is on, a full or deep scan also rewrites every artist.nfo and album.nfo in the scanned folders; an incremental scan still writes only the new and changed albums. A full or deep scan without this box still writes files that are missing. A file that already holds the same text is left alone, without a .bak, and is not counted as written.</p>
             <label>Skip a metadata miss for
@@ -1015,6 +1022,8 @@ function rememberSettingsForm() {
     if (fillMb) state.settings.fill_mb_metadata_during_incremental = fillMb.checked;
     if (fillMissing) state.settings.fill_missing_during_scan = fillMissing.checked;
     if (limitedArtwork) state.settings.limited_artwork_during_scan = limitedArtwork.checked;
+    const musicShape = document.getElementById("music-scan-fix-shape");
+    if (musicShape) state.settings.scan_fix_art_shape_music = musicShape.checked;
     const refreshMeta = document.getElementById("scan-refresh-metadata");
     const refreshArt = document.getElementById("scan-refresh-artwork");
     if (refreshMeta) state.settings.scan_refresh_metadata = refreshMeta.checked;

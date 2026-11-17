@@ -122,7 +122,10 @@ function clearMusicLibraryFilters() {
     state.query = "";
     try { sessionStorage.setItem("resonance.filter", "all"); } catch (error) { /* private window */ }
     const select = document.getElementById("library-filter");
-    if (select) select.value = "all";
+    if (select) {
+        select.value = "all";
+        select.dataset.combined = "all";
+    }
     const search = document.getElementById("artist-search");
     if (search) search.value = "";
     if (typeof syncLibraryFilterButton === "function") syncLibraryFilterButton();
@@ -300,11 +303,30 @@ function libraryFilterLabel(choice) {
     return count == null ? choice.label : `${choice.label} (${count.toLocaleString()})`;
 }
 
+// The filters that are on, in the order they were picked. state.filter holds them joined with + ("unmatched+new");
+// "all" and "pending" are never combined.
+function musicFilters() {
+    return String(state.filter || "all").split("+").filter((name) => name && name !== "all");
+}
+
+function musicFilterHas(name) {
+    return musicFilters().includes(name);
+}
+
 function syncLibraryFilterButton() {
     const select = document.getElementById("library-filter");
     const button = document.getElementById("library-filter-btn");
     if (!select || !button) return;
-    const choice = libraryFilterChoices().find((item) => item.value === select.value) || libraryFilterChoices()[0];
+    const choices = libraryFilterChoices();
+    const on = musicFilters();
+    if (on.length > 1) {
+        const labels = on.map((name) => (choices.find((item) => item.value === name) || { label: name }).label);
+        button.textContent = `${on.length} filters`;
+        button.title = `All of: ${labels.join(", ")}`;
+        paintLibraryFilterOptions();
+        return;
+    }
+    const choice = choices.find((item) => item.value === (on[0] || select.value)) || choices[0];
     if (!choice) return;
     button.textContent = libraryFilterLabel(choice);
     button.title = choice.title || choice.label;
@@ -319,7 +341,7 @@ function paintLibraryFilterOptions() {
     const needle = String((find && find.value) || "").trim().toLowerCase();
     const rows = libraryFilterChoices().filter((choice) => !needle || choice.label.toLowerCase().includes(needle));
     host.innerHTML = rows.map((choice) => {
-        const current = choice.value === select.value ? " is-current" : "";
+        const current = (musicFilters().length ? musicFilterHas(choice.value) : choice.value === "all") ? " is-current" : "";
         const title = choice.title ? ` title="${escapeHtml(choice.title)}"` : "";
         return `<button type="button" class="filter-option${current}" data-action="library-filter-pick" data-filter="${escapeHtml(choice.value)}"${title}>${escapeHtml(libraryFilterLabel(choice))}</button>`;
     }).join("") || `<p class="muted filter-option-empty">No matching filters</p>`;
@@ -346,11 +368,25 @@ function closeLibraryFilterMenu() {
     if (button) button.setAttribute("aria-expanded", "false");
 }
 
+// Picking a filter adds it to the ones that are on (they must all hold); picking one that is on takes it off. All
+// clears them. Pending stands alone: it lists what this page is working on, not something the server filters.
 function pickLibraryFilter(value) {
     const select = document.getElementById("library-filter");
     if (!select) return;
-    select.value = value || "all";
+    const name = value || "all";
+    let on = musicFilters();
+    if (name === "all" || name === "pending") on = name === "pending" ? ["pending"] : [];
+    else if (on.includes(name)) on = on.filter((item) => item !== name);
+    else on = on.filter((item) => item !== "pending").concat(name);
+    setMusicFilters(on);
+}
+
+function setMusicFilters(names) {
+    const select = document.getElementById("library-filter");
+    if (!select) return;
+    const on = (names || []).filter((name) => name && name !== "all");
+    select.value = on[0] || "all";
+    select.dataset.combined = on.join("+") || "all";
     closeLibraryFilterMenu();
-    syncLibraryFilterButton();
     select.dispatchEvent(new Event("change"));
 }

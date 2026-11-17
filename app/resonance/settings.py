@@ -224,6 +224,7 @@ DEFAULTS = {
     "scan_refresh_dry_run": False,
     "fill_mb_metadata_during_incremental": True,
     "limited_artwork_during_scan": False,
+    "scan_fix_art_shape_music": True,
     "metadata_miss_days": 30,
     "nfo_on_bio_save": True,
     "scan_rewrite_nfo": False,
@@ -828,6 +829,7 @@ def _normalize(data, strict_paths=False):
     merged["scan_refresh_dry_run"] = _flag(data.get("scan_refresh_dry_run", False))
     merged["fill_mb_metadata_during_incremental"] = _flag(data.get("fill_mb_metadata_during_incremental", True))
     merged["limited_artwork_during_scan"] = _flag(data.get("limited_artwork_during_scan", False))
+    merged["scan_fix_art_shape_music"] = _flag(data.get("scan_fix_art_shape_music", True))
     merged["biography_longest"] = _flag(data.get("biography_longest", True))
     merged["dup_count_special_releases"] = _flag(data.get("dup_count_special_releases", False))
     merged["upgrade_count_special_releases"] = _flag(data.get("upgrade_count_special_releases", False))

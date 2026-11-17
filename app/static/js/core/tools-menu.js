@@ -4,6 +4,7 @@ const TOOLS_OPEN = {
     "tools-wishlist": () => openWishlist(),
     "tools-cleanup": () => openCleanup(),
     "tools-history": () => openActivityHistory(),
+    "tools-changes": () => openWhatsChanged(),
     "tools-journeys": () => openJourneys(),
     "tools-disk": () => openDisk(),
     "tools-orphans": () => openOrphans(),

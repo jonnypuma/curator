@@ -1044,7 +1044,7 @@ def set_detail(set_id):
     movies = db.fetchall(
         f"""
         SELECT m.id, m.title, m.year, m.edition, m.rating, m.runtime_minutes, m.artwork, m.status, m.plot,
-               {FILE_BRIEF}
+               m.folder, {FILE_BRIEF}
         FROM movies m LEFT JOIN video_files f ON f.id = m.file_id
         WHERE m.set_id = %s
         ORDER BY m.year NULLS LAST, lower(m.title)

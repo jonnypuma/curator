@@ -345,7 +345,8 @@ def _run(op, kind, ids, label, dest=None, send_players=None, art_types=None, fil
             _notify()
         players.close()
         if folders:
-            notify.request("video", folders=sorted(set(folders)), clean=op in ("rename", "extras", "move"))
+            notify.request("video", folders=sorted(set(folders)), clean=op in ("rename", "extras", "move"),
+                           trigger=f"File job ({op})")
         final, message = ("cancelled", "Stopped") if _cancel.is_set() else ("done", "Finished")
     except Exception as exc:
         logger.exception("file job failed")

@@ -361,11 +361,17 @@ function artSection(title, rows, types, subject, idPrefix) {
     const blocks = [...groups.entries()].map(([type, grouped]) => {
         const items = exclusiveArtRows(grouped, type, chosenId);
         const cards = items.map((row) => {
-            const classes = ["art-card", row.is_selected ? "selected" : "", row.suggested ? "suggested" : ""].filter(Boolean).join(" ");
+            const classes = ["art-card", row.is_selected ? "selected" : "", row.suggested ? "suggested" : "", row.banned ? "is-banned" : ""].filter(Boolean).join(" ");
+            // An online picture can be banned (never suggested, never picked automatically); a banned one can be unbanned.
+            const online = /^https?:/i.test(String(row.source_url || ""));
+            const ban = !online ? "" : row.banned
+                ? `<button type="button" class="art-ban is-on" data-action="art-unban" data-art="${escapeHtml(row.id)}" title="Unban this picture: it can be suggested and picked again" aria-label="Unban this picture">${banIcon()}</button>`
+                : `<button type="button" class="art-ban" data-action="art-ban" data-art="${escapeHtml(row.id)}" title="Ban this picture: never suggested, never picked automatically" aria-label="Ban this picture">${banIcon()}</button>`;
             const asset = row.asset_type || "front";
             const pickTitle = "Compare this artwork";
-            return `<div class="${classes}" data-art="${escapeHtml(row.id)}" data-asset="${escapeHtml(asset)}" data-provider="${escapeHtml(row.source_provider || "")}" data-resolution="${escapeHtml(row.resolution || "")}" data-size="${row.file_size_bytes || ""}" data-suggested="${row.suggested ? "1" : ""}" data-reason="${escapeHtml(row.suggestion_reason || "")}" data-ondisk="${row.on_disk ? "1" : ""}" data-selected="${row.is_selected ? "1" : ""}">
+            return `<div class="${classes}" data-art="${escapeHtml(row.id)}" data-asset="${escapeHtml(asset)}" data-provider="${escapeHtml(row.source_provider || "")}" data-resolution="${escapeHtml(row.resolution || "")}" data-size="${row.file_size_bytes || ""}" data-suggested="${row.suggested ? "1" : ""}" data-reason="${escapeHtml(row.suggestion_reason || "")}" data-ondisk="${row.on_disk ? "1" : ""}" data-selected="${row.is_selected ? "1" : ""}" data-online="${online ? "1" : ""}" data-banned="${row.banned ? "1" : ""}">
                 <div class="art-shot">
+                    <label class="art-tick" title="Tick to download, ban or delete several images at once"><input type="checkbox" data-action="art-tick" aria-label="Tick this image"></label>
                     <button type="button" class="art-pick" data-action="highlight-art" data-art="${escapeHtml(row.id)}" title="${escapeHtml(pickTitle)}">
                         <img src="/api/artwork/${row.id}/preview?w=342" loading="lazy" alt="">
                     </button>
@@ -374,6 +380,7 @@ function artSection(title, rows, types, subject, idPrefix) {
                 </div>
                 <div class="art-meta-row">
                     <div class="art-meta" data-action="highlight-art" data-art="${escapeHtml(row.id)}">${artMetaHtml(row)}</div>
+                    ${ban}
                     <button type="button" class="art-delete" data-action="delete-art" data-art="${escapeHtml(row.id)}" title="Remove this artwork from the database and disk" aria-label="Remove this artwork">${trashIcon()}</button>
                 </div>
             </div>`;
@@ -536,7 +543,7 @@ async function deleteArtNow(id) {
 function artMetaHtml(row) {
     const size = row.file_size_bytes ? formatBytes(Number(row.file_size_bytes)) : "";
     const reason = row.suggested && row.suggestion_reason ? ` (${escapeHtml(row.suggestion_reason)})` : "";
-    return `${escapeHtml(assetLabel(row.asset_type))} · ${escapeHtml(row.source_provider || "")}<br>${escapeHtml(row.resolution || "unknown")} ${escapeHtml(size)}${row.suggested ? ` · Suggested${reason}` : ""}${row.is_selected ? " · Selected" : ""}`;
+    return `${escapeHtml(assetLabel(row.asset_type))} · ${escapeHtml(row.source_provider || "")}<br>${escapeHtml(row.resolution || "unknown")} ${escapeHtml(size)}${row.suggested ? ` · Suggested${reason}` : ""}${row.is_selected ? " · Selected" : ""}${row.banned ? ` · <strong class="art-banned-note">Banned</strong>` : ""}${row.wrong_shape ? ` · <strong class="art-banned-note" title="Listed at the shape of another type: never suggested or picked automatically">Wrong shape</strong>` : ""}`;
 }
 
 function markArtSelected(row) {
@@ -858,4 +865,63 @@ function openAlbumCoverZoom() {
         `/api/albums/${album.id}/cover?t=${stamp}`,
         `${album.title || "Album"} · Front cover`,
     );
+}
+
+
+// Ticking several pictures in the music artwork window: a bar offers Download, Ban and Delete for all of them.
+function musicArtTicked() {
+    return [...document.querySelectorAll("#artwork-modal .art-card")].filter((card) => {
+        const box = card.querySelector("[data-action='art-tick']");
+        return box && box.checked;
+    });
+}
+
+function paintMusicArtTicks() {
+    document.querySelectorAll("#artwork-modal .art-card").forEach((card) => {
+        const box = card.querySelector("[data-action='art-tick']");
+        card.classList.toggle("is-ticked", Boolean(box && box.checked));
+    });
+    const bar = document.getElementById("art-bulk");
+    if (!bar) return;
+    const cards = musicArtTicked();
+    bar.classList.toggle("hidden", !cards.length);
+    if (!cards.length) return;
+    const fresh = cards.filter((card) => card.dataset.selected !== "1").length;
+    const bannable = cards.filter((card) => card.dataset.online === "1" && card.dataset.banned !== "1").length;
+    bar.innerHTML = `<span class="art-bulk-count">${cards.length} ticked</span>
+        <button type="button" class="btn-primary" data-action="art-bulk-select" ${fresh ? "" : "disabled"} title="Download the ticked pictures. The first ticked cover (banner, logo…) becomes the file the players use; further ones are saved next to it as folder1, folder2… Fanart is added as new files.">Download ${fresh}</button>
+        <button type="button" class="btn-ghost" data-action="art-bulk-ban" ${bannable ? "" : "disabled"} title="Ban the ticked online pictures: never suggested, never picked automatically">Ban ${bannable}</button>
+        <button type="button" class="btn-danger" data-action="art-bulk-delete" title="Remove the ticked pictures from disk and the database">Delete ${cards.length}</button>
+        <button type="button" class="btn-ghost" data-action="art-bulk-clear">Clear ticks</button>`;
+}
+
+function clearMusicArtTicks() {
+    document.querySelectorAll("#artwork-modal [data-action='art-tick']").forEach((box) => { box.checked = false; });
+    paintMusicArtTicks();
+}
+
+async function musicArtMany(action, ids) {
+    if (!ids.length) return null;
+    const result = await api(`/api/artwork/many/${action}`, { method: "POST", body: { ids } });
+    await refreshArtworkModal();
+    paintMusicArtTicks();
+    if (action === "select" || action === "remove") {
+        if (state.center === "artist" && state.artistId) await selectArtist(state.artistId);
+        else if (state.album) await selectAlbum(state.album.album.id, true);
+    }
+    return result;
+}
+
+async function musicArtBulk(action) {
+    const cards = musicArtTicked();
+    const ids = (action === "select" ? cards.filter((card) => card.dataset.selected !== "1")
+        : action === "ban" ? cards.filter((card) => card.dataset.online === "1" && card.dataset.banned !== "1") : cards)
+        .map((card) => card.dataset.art);
+    const result = await musicArtMany(action, ids);
+    if (!result) return;
+    const failed = (result.failed || []).length;
+    const tail = failed ? `, ${failed} failed: ${result.failed[0].error}` : "";
+    if (action === "select") notify(`${result.saved || 0} image${result.saved === 1 ? "" : "s"} saved${tail}.`, failed ? "warning" : "success");
+    else if (action === "remove") notify(`${result.removed || 0} image${result.removed === 1 ? "" : "s"} removed${tail}.`, failed ? "warning" : "success");
+    else notify(`${result.banned || 0} picture${result.banned === 1 ? "" : "s"} banned.`, "success");
 }

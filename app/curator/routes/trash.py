@@ -45,7 +45,11 @@ def restore_trash(body: TrashIds):
 def delete_trash(body: TrashIds):
     if not body.ids:
         raise AppError("Choose what to delete", 400)
-    return {"deleted": trash.delete(body.ids)}
+    deleted = trash.delete(body.ids)
+    wanted = {str(item) for item in body.ids}
+    # The ones that could not be deleted stay listed, so the window can drop the rest without reading the bin again.
+    left = [str(row["id"]) for row in trash.items() if str(row["id"]) in wanted] if deleted < len(wanted) else []
+    return {"deleted": deleted, "left": left}
 
 
 @router.post("/trash/empty")

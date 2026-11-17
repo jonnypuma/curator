@@ -394,11 +394,23 @@ def snapshot():
     scans = scan_queue.snapshot()
     # Do the DB call outside the lock to avoid holding _cache_lock during a potentially slow query.
     try:
-        _running_row = db.fetchone("SELECT count(*)::int AS n FROM ingest_queue WHERE status = 'running'")
-        running_items = _running_row["n"] if _running_row else 0
+        _running_rows = db.fetchall(
+            "SELECT title, media, GREATEST(0, EXTRACT(EPOCH FROM (LOCALTIMESTAMP - started_at)))::int AS running_for "
+            "FROM ingest_queue WHERE status = 'running' ORDER BY started_at, title")
+        running_items = len(_running_rows)
     except Exception:
-        running_items = 0
+        _running_rows, running_items = [], 0
     stage = _stage() if _state["running"] else ""     # reads the scan's own state, so never under _cache_lock
+    if _state["running"] and _running_rows:
+        # The batch scans and scrapes its folders itself, outside the scan queue: listed there too, first, so the
+        # Scan Queue shows what is being scanned.
+        medias = {str(row.get("media") or "") for row in _running_rows}
+        scans = [{
+            "id": "webhook-batch", "kind": "webhook", "label": "Webhook imports",
+            "media": "music" if medias == {"music"} else "video" if "music" not in medias else "library",
+            "mode": stage or "imports", "titles": [compact_episodes(row.get("title") or "") for row in _running_rows][:12],
+            "status": "running", "running_seconds": max(int(row.get("running_for") or 0) for row in _running_rows),
+        }] + list(scans)
     with _cache_lock:
         count = _cache["count"]
         remaining = max(0, int(round(_cache["deadline"] - time.monotonic()))) if count else 0
@@ -830,7 +842,7 @@ def _video(media, group, auto, interrupt=False):
         with journey.bound(trips):
             queued = notify.request("video", folders=targets, clean=any(owes_clean(row) for row in rows),
                                     message=_message(rows, titles), front=True, media=media, items=titles,
-                                    quality=queue_quality.for_ingest(media, rows))
+                                    quality=queue_quality.for_ingest(media, rows), trigger=_trigger(rows))
         if not queued:
             journey.stage(trips, "library", "skipped", "No player library update is turned on for this media")
         db.execute(
@@ -925,6 +937,26 @@ def owes_clean(row):
     A removal reads "Removed: ..." in the notice; an upgrade still reads "Updated: ...", so it is kept apart from removed.
     """
     return bool(row.get("removed") or (row.get("extra") or {}).get("replaced"))
+
+
+def _trigger(rows):
+    """Who sent the webhooks behind a library update: 'Radarr webhook (Download)', 'Sonarr webhook (Download, Rename)'."""
+    names = {"radarr": "Radarr", "sonarr": "Sonarr", "lidarr": "Lidarr", "curator": "Curator"}
+    found = {}
+    for row in rows or []:
+        source = str(row.get("source") or "").strip().lower()
+        if not source:
+            continue
+        events = found.setdefault(source, [])
+        event = str(row.get("event") or "").strip()
+        if event and event not in events:
+            events.append(event)
+    parts = []
+    for source, events in found.items():
+        label = names.get(source, source.title())
+        label = f"{label} webhook" if source != "curator" else "Curator"
+        parts.append(f"{label} ({', '.join(events[:3])})" if events else label)
+    return ", ".join(parts) or "Webhook"
 
 
 def _message(rows, titles):
@@ -1077,7 +1109,7 @@ def _music(rows, interrupt=False):
         with journey.bound(trips):
             queued = notify.request("music", folders=folders, clean=any(row.get("removed") for row in rows),
                                     message=_message(rows, titles), front=True, items=titles,
-                                    quality=queue_quality.for_ingest("music", rows))
+                                    quality=queue_quality.for_ingest("music", rows), trigger=_trigger(rows))
         if not queued:
             journey.stage(trips, "library", "skipped", "No player library update is turned on for music")
     db.execute(

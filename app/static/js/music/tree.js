@@ -266,12 +266,15 @@ function renderMusicRibbons() {
         ["silver", "Partial", counts.silver],
         ["nfo-changes", "NFO Change", counts["nfo-changes"]],
     ];
-    const current = state.filter || "all";
-    // Same badge style as the movie and TV quick filters: pressing a lit one clears it.
-    host.innerHTML = pills.map(([key, label, count]) => {
-        const on = current === key;
-        return `<button type="button" class="vribbon${on ? " is-on" : ""}" data-action="library-filter-pick" data-filter="${on && key !== "all" ? "all" : escapeHtml(key)}" aria-pressed="${on}">${escapeHtml(label)} <small>${count}</small></button>`;
-    }).join("");
+    const picked = typeof musicFilters === "function" ? musicFilters() : [];
+    // Same badge style as the movie and TV quick filters. Several can be on at once (they must all hold); pressing a
+    // lit one takes it off, and All or Clear all takes them all off.
+    const pillKeys = new Set(pills.map(([key]) => key));
+    const more = picked.filter((key) => !pillKeys.has(key)).map((key) => [key, key.replace(/^type-/, "").replace(/-/g, " "), ""]);
+    host.innerHTML = pills.concat(more).map(([key, label, count]) => {
+        const on = key === "all" ? !picked.length : picked.includes(key);
+        return `<button type="button" class="vribbon${on ? " is-on" : ""}" data-action="library-filter-pick" data-filter="${escapeHtml(key)}" aria-pressed="${on}">${escapeHtml(label)} <small>${count}</small></button>`;
+    }).join("") + (picked.length ? `<button type="button" class="btn-ghost vribbon-clear" data-action="library-filter-pick" data-filter="all">Clear all</button>` : "");
 }
 
 function toggleMusicViewMode() {

@@ -34,6 +34,9 @@ RATING_SOURCES = ("themoviedb", "imdb", "tvdb", "trakt", "tomatometerallcritics"
                   "tomatometeravguseraudience", "metacritic", "metacriticuser", "anilist", "ofdb")
 LANG_STANDARDS = ("iso639-1", "iso639-2")
 TRAILER_RESOLUTIONS = ("2160p", "1080p", "720p")
+# Where a music video added from YouTube is saved inside the Music videos folder: in the artist's folder, made when
+# it is missing ("artist"), in the artist's folder only when there already is one ("existing"), or at the top ("flat").
+MV_FOLDER_RULES = ("artist", "existing", "flat")
 
 DEFAULT_MIN_WIDTH = {"poster": 1000, "fanart": 1920, "clearlogo": 400, "clearart": 500, "banner": 758,
                      "landscape": 1000, "discart": 500, "keyart": 1000, "characterart": 0, "squareart": 1000}
@@ -221,6 +224,11 @@ def _clean_art_types(value, allowed):
     return picked or ["fanart"]
 
 
+# The health score's checks and whether each counts until the user says otherwise (the list is mirrored in
+# static/js/video/common.js HEALTH_CHECKS). Settings keys: ui_movie_health_<key> and ui_tv_health_<key>.
+HEALTH_CHECKS = (("matched", True), ("scraped", True), ("nfo", True), ("poster", True), ("fanart", True),
+                 ("file", True), ("subs", False), ("warnings", False))
+
 def normalize(data):
     data = data if isinstance(data, dict) else {}
     widths = data.get("min_width") if isinstance(data.get("min_width"), dict) else {}
@@ -278,6 +286,10 @@ def normalize(data):
         # Artwork of the wrong shape for its type (a fanart saved as the poster) is replaced during a scan. On by default.
         "scan_fix_art_shape_movies": _flag(data.get("scan_fix_art_shape_movies"), True),
         "scan_fix_art_shape_tv": _flag(data.get("scan_fix_art_shape_tv"), True),
+        "scan_fix_art_shape_sets": _flag(data.get("scan_fix_art_shape_sets"), True),
+        # The set fields a scrape writes (a set only has its overview; its title comes from the movies).
+        "set_fields": [name for name in (data.get("set_fields") if isinstance(data.get("set_fields"), list) else ["overview"])
+                       if name in ("overview",)],
         "scan_clean_art_types_movies": _clean_art_types(data.get("scan_clean_art_types_movies"), ("fanart", "extrafanart")),
         "scan_clean_art_types_tv": _clean_art_types(data.get("scan_clean_art_types_tv"), ("fanart", "characterart", "extrafanart")),
         "scan_limited_art": _flag(data.get("scan_limited_art"), False),
@@ -321,6 +333,7 @@ def normalize(data):
                                       _flag(os.environ.get("CMM_PURGE_DUPLICATE_SUBS"), False)),
         "extras_layout": _choice(data.get("extras_layout"), ("kodi", "plex"), "kodi"),
         "trailer_resolution": _choice(data.get("trailer_resolution"), TRAILER_RESOLUTIONS, "1080p"),
+        "mv_folder_rule": _choice(data.get("mv_folder_rule"), MV_FOLDER_RULES, "artist"),
         "trailer_on_webhook": _flag(data.get("trailer_on_webhook"), False),
         "trailer_on_sonarr_season": _flag(data.get("trailer_on_sonarr_season"), False),
         "theme_on_webhook": _flag(data.get("theme_on_webhook"), False),
@@ -380,12 +393,16 @@ def normalize(data):
         "ui_movie_edition": _flag(data.get("ui_movie_edition"), True),
         "ui_movie_date_added": _flag(data.get("ui_movie_date_added"), True),
         "ui_movie_processed": _flag(data.get("ui_movie_processed"), True),
+        "ui_movie_health": _flag(data.get("ui_movie_health"), True),
+        **{f"ui_{media}_health_{key}": _flag(data.get(f"ui_{media}_health_{key}"), default)
+           for media in ("movie", "tv") for key, default in HEALTH_CHECKS},
         "ui_movie_art_badges": _flag(data.get("ui_movie_art_badges"), True),
         "ui_tv_year": _flag(data.get("ui_tv_year"), True),
         "ui_tv_seasons": _flag(data.get("ui_tv_seasons"), True),
         "ui_tv_episodes": _flag(data.get("ui_tv_episodes"), True),
         "ui_tv_date_added": _flag(data.get("ui_tv_date_added"), True),
         "ui_tv_processed": _flag(data.get("ui_tv_processed"), True),
+        "ui_tv_health": _flag(data.get("ui_tv_health"), True),
         "ui_tv_progress": _flag(data.get("ui_tv_progress"), True),
         "ui_tv_art_badges": _flag(data.get("ui_tv_art_badges"), True),
         "ui_set_art_badges": _flag(data.get("ui_set_art_badges"), True),

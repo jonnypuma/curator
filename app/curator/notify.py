@@ -271,7 +271,19 @@ def _skip_reason(cfg, kind):
     return f"Kodi {noun} library update skipped. No Kodi library address is set."
 
 
-def request(kind, folders=(), clean=False, message=None, queue_ids=(), front=False, media=None, items=(), quality=None):
+def _asked_by():
+    """' Triggered by: Radarr webhook.' for the library job on this thread, or ''."""
+    try:
+        from curator.library_queue import current_trigger
+
+        asked = current_trigger()
+    except Exception:
+        asked = ""
+    return f" Triggered by: {asked}." if asked else ""
+
+
+def request(kind, folders=(), clean=False, message=None, queue_ids=(), front=False, media=None, items=(), quality=None,
+            trigger=None):
     """Hand changed folders to the library queue. One job per enabled player.
 
     The webhook row is removed by the caller without waiting for any player.
@@ -281,13 +293,14 @@ def request(kind, folders=(), clean=False, message=None, queue_ids=(), front=Fal
     if kind not in ("video", "music"):
         return
     _, cfg = automation.current()
-    from curator.library_queue import handoff
+    from curator.library_queue import handoff, triggered_by
 
     media_name = media or ("music" if kind == "music" else "video")
     notice = notice_kind(kind, message)
     if notice:
         announce(notice, message)
-    queued = handoff(media_name, folders, clean, message or "", items, quality)
+    with triggered_by(trigger or ""):
+        queued = handoff(media_name, folders, clean, message or "", items, quality)
     if not queued:
         text = _skip_reason(cfg, kind)
         _activity(text, "noted")
@@ -510,6 +523,38 @@ def _wait_library_task(cfg, player):
 
 
 _SERVER_START_GRACE = 45
+
+
+def _plex_keys(cfg, media):
+    want = {"movies": "movie", "tv": "show", "music": "artist"}.get(media)
+    return {str(section.get("key") or "") for section in _plex_sections(cfg)
+            if section.get("key") and (not want or section.get("type") == want)}
+
+
+def full_scan_running(player, media):
+    """True while this player reports a library scan in progress, False when it reports none, None when it does not
+    say (Navidrome, a player that does not answer, or one that is not set up)."""
+    try:
+        if player == "kodi":
+            return _kodi_scanning("music" if media == "music" else "video")
+        _, cfg = automation.current()
+        if player in {"emby", "jellyfin"}:
+            return _library_task_running(cfg, player)
+        if player == "plex":
+            keys = _plex_keys(cfg, media)
+            return _plex_busy(cfg, keys) if keys else None
+    except Exception:
+        logger.info("could not ask %s whether it is scanning", player, exc_info=True)
+    return None
+
+
+def wait_full_scan(player, media):
+    """Stay here until the player's scan in progress has ended. Stops when the library job is cancelled."""
+    if player == "kodi":
+        _wait_idle("music" if media == "music" else "video")
+        return
+    while full_scan_running(player, media):
+        _pause()
 
 
 def _kodi_folder(folder, mappings):
@@ -957,7 +1002,7 @@ def _run_one(kind, job, total=None):
     for attempt in (1, 2):
         if _kodi_scanning(kind):
             noun = "video" if kind == "video" else "music"
-            message = f"Kodi is still scanning the {noun} library. {where} waits until that scan finishes."
+            message = f"Kodi is still scanning the {noun} library. {where} waits until that scan finishes.{_asked_by()}"
             _activity(message, "done", path, title)
             _job_note(kind, message)
             _wait_idle(kind)
@@ -1045,7 +1090,7 @@ def _send_scan(kind, directory, title=""):
         _job_note(kind, message)
         return False
     message = f"Kodi is scanning {where}."
-    _activity(f"Kodi {noun} library scan sent for {where}.", "done", directory or "", label)
+    _activity(f"Kodi {noun} library scan sent for {where}.{_asked_by()}", "done", directory or "", label)
     _job_note(kind, message)
     return True
 
@@ -1727,6 +1772,10 @@ def refresh_items(player, media, items):
         return f"{label} had nothing to refresh."
     if player == "kodi":
         return _kodi_refresh(cfg, media, items)
+    # Only Kodi takes the artwork of a set, an album or an artist by itself; the others read it on their own scans.
+    items = [item for item in items if item.get("kind") not in ART_ONLY_KINDS]
+    if not items:
+        return f"{label} had nothing to refresh."
     if player in {"emby", "jellyfin"}:
         from curator.library_queue import scope_for
 
@@ -1779,7 +1828,47 @@ _KODI_ART = {
     "movie": ("VideoLibrary.GetMovieDetails", "VideoLibrary.SetMovieDetails", "movieid", "moviedetails"),
     "tvshow": ("VideoLibrary.GetTVShowDetails", "VideoLibrary.SetTVShowDetails", "tvshowid", "tvshowdetails"),
     "episode": ("VideoLibrary.GetEpisodeDetails", "VideoLibrary.SetEpisodeDetails", "episodeid", "episodedetails"),
+    "set": ("VideoLibrary.GetMovieSetDetails", "VideoLibrary.SetMovieSetDetails", "setid", "setdetails"),
+    "album": ("AudioLibrary.GetAlbumDetails", "AudioLibrary.SetAlbumDetails", "albumid", "albumdetails"),
+    "artist": ("AudioLibrary.GetArtistDetails", "AudioLibrary.SetArtistDetails", "artistid", "artistdetails"),
 }
+# Items Kodi takes as an artwork change only (no file to refresh): a movie set, an album, an artist.
+ART_ONLY_KINDS = {"set", "album", "artist"}
+
+
+def _same_name(left, right):
+    return str(left or "").strip().casefold() == str(right or "").strip().casefold()
+
+
+def _kodi_art_only(target, mappings, item, cache):
+    """New artwork of a movie set, an album or an artist: found in Kodi by its name. Returns 1 when Kodi took it, 0
+    when Kodi has no such item."""
+    kind, title = item.get("kind"), str(item.get("title") or item.get("label") or "").strip()
+    if not title or not item.get("art"):
+        return 0
+    if kind == "set":
+        if "sets" not in cache:
+            cache["sets"] = (kodi_call(*target, "VideoLibrary.GetMovieSets", {"properties": ["title"]}) or {}).get("sets") or []
+        row = next((found for found in cache["sets"] if _same_name(found.get("title") or found.get("label"), title)), None)
+        return _kodi_new_art(target, mappings, "set", int(row["setid"]), item["art"]) if row else 0
+    if kind == "artist":
+        found = (kodi_call(*target, "AudioLibrary.GetArtists", {
+            "filter": {"field": "artist", "operator": "is", "value": title}}) or {}).get("artists") or []
+        row = next((one for one in found if _same_name(one.get("artist") or one.get("label"), title)), None)
+        return _kodi_new_art(target, mappings, "artist", int(row["artistid"]), item["art"]) if row else 0
+    if kind == "album":
+        found = (kodi_call(*target, "AudioLibrary.GetAlbums", {
+            "filter": {"field": "album", "operator": "is", "value": title},
+            "properties": ["title", "artist", "displayartist"]}) or {}).get("albums") or []
+        artist = str(item.get("artist") or "")
+        rows = [one for one in found if _same_name(one.get("title") or one.get("label"), title)]
+        named = [one for one in rows if not artist or _same_name(one.get("displayartist"), artist)
+                 or any(_same_name(name, artist) for name in one.get("artist") or [])]
+        done = 0
+        for row in named or (rows if len(rows) == 1 else []):
+            done = _kodi_new_art(target, mappings, "album", int(row["albumid"]), item["art"]) or done
+        return done
+    return 0
 
 
 def kodi_art_inner(url):
@@ -1835,17 +1924,22 @@ def _kodi_new_art(target, mappings, kind, item_id, art):
 
 def _kodi_refresh(cfg, media, items):
     target = _library_target(cfg)
-    if not target or not _side_enabled(cfg, "video"):
-        return _skip_reason(cfg, "video")
+    side = "music" if media == "music" else "video"
+    if not target or not _side_enabled(cfg, side):
+        return _skip_reason(cfg, side)
     from curator.library_queue import mappings_for
 
     mappings = mappings_for("kodi", cfg)
     refreshed, new_folders, unmapped, art_done = 0, [], 0, 0
     keep = []   # watched state to put back after the refresh (a refresh can drop the resume point)
     shows = None
+    named = {}
     for item in items:
         _stop_if_cancelled()
         kind = item.get("kind")
+        if kind in ART_ONLY_KINDS:
+            art_done += _kodi_art_only(target, mappings, item, named)
+            continue
         if kind in {"movie", "episode"}:
             remote = _remote(item.get("path"), mappings)
             if not remote:
@@ -1918,6 +2012,11 @@ def _kodi_refresh(cfg, media, items):
     if unmapped:
         plural = unmapped != 1
         text += f" {unmapped} item{'s' if plural else ''} had no Kodi path row and {'were' if plural else 'was'} left out."
+    # In Alerts and Recent webhooks too, with the titles: an artwork update leaves no other trace there.
+    labels = [str(item.get("label") or "").strip() for item in items if str(item.get("label") or "").strip()]
+    from curator import job_history
+
+    _activity(text, "done" if (refreshed or art_done or folders) else "noted", "", job_history.names_text(labels, shown=5))
     return text
 
 

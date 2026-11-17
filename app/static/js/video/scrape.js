@@ -369,6 +369,13 @@ async function reloadSelectedRows(action) {
     if (state.media === "tv") {
         const ids = new Set(tvCheckedShows());
         targets = (state.video.shows || []).filter((show) => ids.has(show.id) && show.path && show.path.indexOf("wanted://") !== 0).map((show) => show.path);
+    } else if (state.media === "sets") {
+        // A set has no folder of its own to scan: its movies' folders are scanned.
+        for (const id of selectionIds("set")) {
+            const set = await api(`/api/v1/sets/${encodeURIComponent(id)}`);
+            (set.movies || []).forEach((movie) => targets.push(movie.folder));
+        }
+        targets = targets.filter((path) => path && path.indexOf("wanted://") !== 0);
     } else {
         targets = (state.video.movies || []).filter((movie) => selectionHas("movie", movie.id)).map((movie) => movie.folder || movie.path).filter((path) => path && path.indexOf("wanted://") !== 0);
     }
@@ -378,6 +385,11 @@ async function reloadSelectedRows(action) {
         return;
     }
     const data = await api("/api/v1/scan", { method: "POST", body: { media: state.media === "tv" ? "tv" : "movies", mode, targets } });
+    if (state.media === "sets") {
+        notify(data.queued ? `${word} scan of the sets' ${targets.length} movie folder${targets.length === 1 ? "" : "s"} queued.`
+            : data.started ? `${word} scan of the sets' ${targets.length} movie folder${targets.length === 1 ? "" : "s"}.` : "A scan is already running.", "info");
+        return;
+    }
     if (data.queued) {
         notify(data.duplicate ? "That scan is already queued." : `${word} scan queued for ${targets.length} folder${targets.length === 1 ? "" : "s"}. It starts when the current scan finishes.`, "info");
         return;
@@ -575,6 +587,7 @@ async function openVideoArtPicker(kind, id, currentSrc) {
     const title = document.getElementById("video-art-title");
     if (title) title.textContent = data.title ? `Artwork · ${data.title}` : "Artwork";
     document.getElementById("video-art-body").innerHTML = problem + paintVideoArtChoices(kind, data.images || [], data.artwork || {}, data.alternates || {});
+    paintVideoArtUndo(data.undo);
     primeVideoCompare();
 }
 
@@ -1500,9 +1513,10 @@ function onVideoMenu(event) {
         items.push(["rescan", `Rescan${many}`, canRescan]);
     }
     if (target.kind === "movie" || target.kind === "show") {
-        items.push(["library-update", `Update library…${many}`, true]);
+        items.push(["library-update", `Update player library…${many}`, true, false, "Ask Kodi, Emby, Jellyfin or Plex to scan this folder. You pick the players."]);
         const arr = target.kind === "movie" ? "radarr" : "sonarr";
-        items.push(["arr-rescan", `Update library in ${providerIcon(arr)}${many}`, integrationOn(arr) ? true : "off", false, `Ask ${arr === "radarr" ? "Radarr" : "Sonarr"} to rescan ${count > 1 ? "these items" : "this item"}`, true]);
+        const arrName = arr === "radarr" ? "Radarr" : "Sonarr";
+        items.push(["arr-rescan", `Rescan in ${providerIcon(arr)} ${arrName}${many}`, integrationOn(arr) ? true : "off", false, `Ask ${arrName} to rescan ${count > 1 ? "these items" : "this item"}. This does not update Kodi or another player: use Update player library for that.`, true]);
         items.push(["move", `Move…${many}`, true]);
     }
     if (target.kind === "movie" || target.kind === "show" || target.kind === "season" || target.kind === "episode") {
@@ -2277,6 +2291,7 @@ async function repaintVideoArt() {
     const data = await api(`/api/v1/artwork/choices/${encodeURIComponent(pick.kind)}/${encodeURIComponent(pick.id)}`);
     const body = document.getElementById("video-art-body");
     if (body) body.innerHTML = paintVideoArtChoices(pick.kind, data.images || [], data.artwork || {}, data.alternates || {});
+    paintVideoArtUndo(data.undo);
     paintArtTicks();
     primeVideoCompare();
 }
@@ -2401,4 +2416,25 @@ async function unbanVideoArt(url) {
 
 function banTickedArt() {
     return banVideoArt(tickedArtCards().map((card) => artCardTickInfo(card).ban).filter(Boolean));
+}
+
+// Undo last artwork: shown when a picture of this item was replaced (by a pick, an upload or a job) and is still kept.
+function paintVideoArtUndo(artKind) {
+    const button = document.getElementById("video-art-undo");
+    if (!button) return;
+    button.classList.toggle("hidden", !artKind);
+    button.title = artKind ? `Put back the ${artKind} that was replaced last. Pressing it again brings the newer one back.` : "";
+}
+
+async function undoVideoArt() {
+    const pick = state.videoArtPick || {};
+    if (!pick.kind || !pick.id) return;
+    const saved = await api(`/api/v1/artwork/undo/${encodeURIComponent(pick.kind)}/${encodeURIComponent(pick.id)}`, {
+        method: "POST",
+        body: { players: pickedPlayers("video-art-players") },
+    });
+    noteArtVersion(saved && saved.path);
+    notify(`The earlier ${saved.restored || "artwork"} is back.`, "success");
+    await repaintVideoArt();
+    await refreshOpenVideo();
 }

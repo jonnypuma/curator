@@ -20,7 +20,10 @@ class MusicVideoIds(BaseModel):
 def musicvideos_list():
     from curator.video import musicvideos
 
-    return {"items": musicvideos.list_items(), "scan": musicvideos.status()}
+    from curator.video import mv_download
+
+    # roots tells the page whether Add from YouTube has anywhere to save to.
+    return {"items": musicvideos.list_items(), "scan": musicvideos.status(), "roots": mv_download.roots()}
 
 
 @router.get("/musicvideos/scan")
@@ -68,6 +71,83 @@ def musicvideos_remove(body: MusicVideoIds):
     from curator.video import musicvideos
 
     return musicvideos.forget([str(_uuid(item)) for item in body.ids])
+
+
+class MusicVideoYoutube(BaseModel):
+    id: str
+    artist: str = ""
+    title: str = ""
+    year: str | int | None = None
+    root: str | None = None
+
+
+@router.get("/musicvideos/youtube/plan")
+def musicvideos_youtube_plan(artist: str = "", title: str = "", year: str = "", root: str = ""):
+    """Which artist the typed name is linked to and which folder the download would be saved in."""
+    from curator.video import mv_download
+
+    return mv_download.plan(artist, title, year, root or None)
+
+
+@router.get("/musicvideos/artists")
+def musicvideos_artists():
+    """The artist names the library already has, for the artist box of Add from YouTube."""
+    from curator.video import mv_download
+
+    return {"artists": mv_download.known_artists()[:3000]}
+
+
+@router.get("/musicvideos/youtube")
+def musicvideos_youtube_search(q: str = ""):
+    """Search YouTube for a music video to add."""
+    from curator.video import mv_download
+
+    return {"results": mv_download.search(q)}
+
+
+@router.get("/musicvideos/youtube/status")
+def musicvideos_youtube_status():
+    from curator.video import mv_download
+
+    return mv_download.status()
+
+
+@router.post("/musicvideos/youtube")
+def musicvideos_youtube_download(body: MusicVideoYoutube):
+    """Download the picked video into the Music videos folder and add it to the library."""
+    from curator.video import mv_download
+
+    return mv_download.start(body.id, body.artist, body.title, body.year, body.root)
+
+
+class MusicVideoLock(BaseModel):
+    ids: list[str] = []
+    locked: bool = True
+
+
+@router.post("/musicvideos/lock")
+def musicvideos_lock(body: MusicVideoLock):
+    from curator.routes.scrape import _uuid
+    from curator.video import musicvideos
+
+    return musicvideos.set_locked([str(_uuid(item)) for item in body.ids], body.locked)
+
+
+class MusicVideoRename(BaseModel):
+    ids: list[str] = []
+    preview: bool = False
+
+
+@router.post("/musicvideos/rename")
+def musicvideos_rename(body: MusicVideoRename):
+    """Rename the files to "Artist - Title (Year)". preview only says what would change."""
+    from curator.routes.scrape import _uuid
+    from curator.video import musicvideos
+
+    ids = [str(_uuid(item)) for item in body.ids]
+    if body.preview:
+        return {"plan": musicvideos.rename_plan(ids)}
+    return musicvideos.rename(ids)
 
 
 @router.post("/musicvideos/lookup")

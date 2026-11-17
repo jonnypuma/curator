@@ -125,6 +125,8 @@ const TV_RIBBONS = [
     ["hlg", "HLG", (row) => tvGap(row, "hlg_count", (e) => e.hdr_format === "hlg" || e.hdr_secondary === "HLG"), "hlg_count"],
     ["sdr", "SDR", (row) => tvGap(row, "sdr_count", (e) => e.hdr_format === "sdr"), "sdr_count"],
     ["missing", "Missing episodes", (row) => row._kind === "missing" || !!row.missing || Number(row.missing_count) > 0 || ((row.missing_episodes || []).length > 0)],
+    ["needswork", "Needs work", (row) => { const health = videoHealthScore(row); return !!health && health.score < 100; }],
+    ["complete", "Complete", (row) => { const health = videoHealthScore(row); return !!health && health.score === 100; }],
     ["health", "Health warnings", (row) => healthWords(row).length > 0],
     ["nonfo", "No NFO", (row) => tvNoNfo(row), "no_nfo_count"],
     ["nfo", "NFO changes", (row) => !!row.nfo_stale || !!row.nfo_family_stale],

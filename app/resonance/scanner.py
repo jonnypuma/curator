@@ -594,6 +594,7 @@ def scan(job_id, force=False, mode="incremental", roots=None, verbose=False, alb
         if fill_missing:
             changed_ids = lookup_ids if mode == "incremental" else None
             left_alone = skipped_albums if mode == "incremental" else None
+            _note_scan_items(progress, lookup_ids)
             _fill_missing_metadata(progress, roots, changed_ids, left_alone)
             _fill_missing_artwork(progress, roots, changed_ids, left_alone)
         # An incremental scan records countries, duplicates, upgrades and original years for the albums it added or
@@ -3594,6 +3595,25 @@ def _store_missing_album(album, review_order, desc_order, lastfm, clean_text):
     return True
 
 
+def _note_scan_items(progress, album_ids):
+    """Name the albums this scan added or changed in its result, for the Jobs panel's Recent list. Never raises."""
+    try:
+        from curator import job_history
+        from resonance import jobs
+
+        ids = [str(item) for item in dict.fromkeys(album_ids or [])]
+        if not ids:
+            return
+        rows = db.fetchall(
+            "SELECT ar.name || ' — ' || al.title AS label FROM albums al JOIN artists ar ON ar.id = al.artist_id "
+            "WHERE al.id = ANY(%s::uuid[]) ORDER BY lower(ar.name), lower(al.title) LIMIT %s",
+            (ids, job_history.ITEMS_KEPT),
+        )
+        jobs.note_items(progress.job_id, job_history.items_result([row["label"] for row in rows], len(ids)))
+    except Exception:
+        logger.exception("could not name the scanned albums")
+
+
 def _fill_missing_artwork(progress, roots, album_ids=None, skipped=None):
     """Download artwork that is still missing. Runs after the sidecar count.
 
@@ -3609,6 +3629,16 @@ def _fill_missing_artwork(progress, roots, album_ids=None, skipped=None):
         note = _with_skip("No new or changed albums", skipped)
         progress.log(f"Artwork: {note}.", phase="artwork", message=note)
         return
+    if load_settings().get("scan_fix_art_shape_music", True) is not False:
+        # Before the missing-artwork pass: a fanart, banner or disc art of the wrong shape gets a right-shaped one.
+        try:
+            from resonance import artwork_bulk
+
+            artwork_bulk.fix_wrong_shapes(album_ids, lambda line: progress.log(line, phase="artwork"))
+        except ScanCancelled:
+            raise
+        except Exception:
+            logger.exception("the artwork shape check failed")
     artists, albums, artist_types, album_types = artwork.scan_targets(roots, limited, album_ids)
     total = len(artists) + len(albums)
     progress.update(0, total, _with_skip("Missing artwork", skipped), "artwork")

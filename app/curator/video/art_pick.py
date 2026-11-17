@@ -162,6 +162,15 @@ def remove(kind, item_id, art_kind, path=None):
     return {"removed": True, "file_deleted": removed, "kind": art_kind, "path": target}
 
 
+def undo(kind, item_id, players=None):
+    """Put back the picture that was replaced last, of whatever type it was."""
+    last = art_extra.last_replaced(kind, item_id)
+    if not last:
+        raise AppError("There is no replaced artwork to put back", 404)
+    result = choose(kind, item_id, last["url"], last["kind"], players)
+    return {**result, "restored": last["kind"]}
+
+
 def remove_many(kind, item_id, items):
     """Move several artwork files of one item to the recycle bin: items are {"art_kind", "path"} as on the cards.
     Each one is checked like a single delete; one that fails is reported and the rest still go."""
@@ -319,6 +328,12 @@ async def _choices(kind, item_id):
         shown["artwork"] = {key: value for key, value in shown["artwork"].items() if extra_of(key) != "extrathumbs"}
     await _mark_extra_in_use(shown)
     shown["alternates"] = alternates(kind, item_id)
+    try:
+        last = art_extra.last_replaced(kind, item_id)
+    except Exception:           # the Undo button is a convenience: it must never stop the window from opening
+        logging.getLogger(__name__).debug("could not look up the replaced artwork", exc_info=True)
+        last = None
+    shown["undo"] = last["kind"] if last else ""
     facts = _file_facts(shown["artwork"])
     facts.update(_file_facts({f"{art_kind}{index}": path for art_kind, paths in shown["alternates"].items()
                               for index, path in enumerate(paths, start=1)}))
@@ -508,6 +523,12 @@ def _flush_player_art(pending, players=None):
 def player_art_item(kind, item_id, art):
     """(media, refresh item) for an artwork-only refresh of one movie or show, or None."""
     art = {key: value for key, value in (art or {}).items() if key in PLAYER_ART and value}
+    if art and kind == "set":
+        row = store.set_row(item_id) or {}
+        if not row.get("name"):
+            return None
+        return "movies", {"kind": "set", "title": row["name"], "label": row["name"],
+                          "folder": row.get("folder") or os.path.dirname(next(iter(art.values()))), "art": art}
     if not art or kind not in ("movie", "show"):
         return None
     if kind == "movie":

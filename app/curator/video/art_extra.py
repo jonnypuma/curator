@@ -115,6 +115,20 @@ def listed(kind, item_id):
     return items
 
 
+def last_replaced(kind, item_id):
+    """The newest picture of this item that a pick, an upload or a job replaced: {"url", "kind"}, or None. Putting it
+    back keeps the picture it replaces in turn, so Undo twice is a redo."""
+    rows = db.fetchall(
+        "SELECT id, art_kind, path FROM video_art_extra WHERE kind = %s AND item_id = %s AND origin = 'replaced' "
+        "ORDER BY created_at DESC LIMIT 5",
+        (kind, item_id),
+    )
+    for row in rows:
+        if os.path.isfile(row["path"]):
+            return {"url": f"{URL_PREFIX}{row['id']}", "kind": row["art_kind"]}
+    return None
+
+
 def path_for(extra_id):
     try:
         uuid.UUID(str(extra_id))

@@ -41,6 +41,14 @@ def cleanup_run(body: CleanupRun):
     return bulk_cleanup.status()
 
 
+@router.get("/changes")
+def what_changed(days: int = 7):
+    """Added items, deletes and renames, replaced artwork and failed jobs of the last days."""
+    from curator import changes
+
+    return changes.collect(days)
+
+
 @router.get("/history")
 def activity_history(search: str = "", action: str = "", limit: int = 200, offset: int = 0):
     from resonance import history

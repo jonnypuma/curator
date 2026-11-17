@@ -556,6 +556,11 @@ def select(art_id, refresh_scores=True):
     updated["undo"] = remembered
     updated["already_on_disk"] = already
     updated["downloaded"] = bool(downloaded) and not already
+    if not already:
+        # Kodi keeps a cached copy of the old picture: queue an artwork refresh of this album or artist.
+        from resonance import artwork_players
+
+        artwork_players.changed([updated])
     return updated
 
 
@@ -1125,7 +1130,11 @@ def start_missing_artists(artist_ids):
 
 
 def _unselected(rows, asset_type, cfg):
+    from resonance import artwork_bulk
+
     group = [row for row in rows if row.get("asset_type") == asset_type and not row.get("is_selected")]
+    # A banned picture, or one of the wrong shape for its type, is never picked automatically.
+    group = artwork_bulk.eligible(group)
     if not group:
         return []
     best = preferred_artwork(group, cfg)
@@ -2920,13 +2929,23 @@ def _annotate(rows, cfg):
     for row in rows:
         key = (str(row["album_id"] or ""), str(row["artist_id"] or ""), row["asset_type"])
         groups.setdefault(key, []).append(row)
+    from curator.video import art_bans
+    from resonance import artwork_bulk
+
     reasons = {}
     for group in groups.values():
-        winner = preferred_artwork(group, cfg)
-        reasons[str(winner["id"])] = suggestion_reason(winner, group, cfg)
+        # The suggestion is the best picture that is neither banned nor the wrong shape; none when all are.
+        allowed = artwork_bulk.eligible(group)
+        if not allowed:
+            continue
+        winner = preferred_artwork(allowed, cfg)
+        reasons[str(winner["id"])] = suggestion_reason(winner, allowed, cfg)
+    banned_urls = art_bans.urls()
     annotated = []
     for row in rows:
         item = dict(row)
+        item["banned"] = artwork_bulk.banned(row, banned_urls)
+        item["wrong_shape"] = artwork_bulk.wrong_shape(row)
         item["suggested"] = str(row["id"]) in reasons
         item["suggestion_reason"] = reasons.get(str(row["id"]), "")
         item["on_disk"] = _row_on_disk(row)

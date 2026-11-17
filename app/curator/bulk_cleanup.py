@@ -435,9 +435,9 @@ def run_plan(plan, skip=()):
         from curator import notify
 
         if video:
-            notify.request("video", folders=sorted(video), clean=True)
+            notify.request("video", folders=sorted(video), clean=True, trigger="Bulk duplicate cleanup")
         if music:
-            notify.request("music", folders=sorted(music), clean=True)
+            notify.request("music", folders=sorted(music), clean=True, trigger="Bulk duplicate cleanup")
     except Exception:
         logger.info("the library update after the cleanup was not sent", exc_info=True)
     history.record("cleanup", f"{deleted} copies deleted", detail=f"{failed} failed, {freed} bytes freed")

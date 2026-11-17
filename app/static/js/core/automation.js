@@ -1068,7 +1068,7 @@ function queueScanRow(scan) {
         <td>${mediaLabelHtml(scan.media)}</td>
         <td>${escapeHtml(mode)}</td>
         <td class="mono">${where}</td>
-        <td>${running ? `${runningMark(scan, "Running")} <button type="button" class="btn-ghost btn-remove" data-action="queue-cancel-scan" data-id="${escapeHtml(scan.id)}">Cancel</button>` : `<button type="button" class="btn-ghost btn-remove" data-action="queue-drop-scan" data-id="${escapeHtml(scan.id)}">Remove</button>`}</td>
+        <td>${scan.kind === "webhook" ? runningMark(scan, "Running") : running ? `${runningMark(scan, "Running")} <button type="button" class="btn-ghost btn-remove" data-action="queue-cancel-scan" data-id="${escapeHtml(scan.id)}">Cancel</button>` : `<button type="button" class="btn-ghost btn-remove" data-action="queue-drop-scan" data-id="${escapeHtml(scan.id)}">Remove</button>`}</td>
     </tr>`;
 }
 
@@ -1079,9 +1079,10 @@ function queueLibraryRow(item) {
     // Each album or title once: when every name has its own line with quality badges, the names are not listed again
     // above those lines.
     const covered = names.length > 1 && facts.length > 0 && names.every((name) => facts.some((entry) => entry.label === name));
-    const what = names.length
+    const asked = item.trigger ? `<br><small class="muted queue-trigger">Triggered by: ${escapeHtml(item.trigger)}</small>` : "";
+    const what = (names.length
         ? `${queueTitleWithQuality(covered ? "" : names.join(", "), item.quality)}<br><small class="muted">${escapeHtml(item.scope || "")}</small>`
-        : escapeHtml(item.scope || "");
+        : escapeHtml(item.scope || "")) + asked;
     const button = running ? "Cancel" : "Remove";
     const stateLabel = running ? runningMark(item, libraryProgressLabel(item) || "Scanning") : "Queued";
     return `<tr>
@@ -1190,10 +1191,32 @@ function queueHistoryTable(rows, empty) {
     </tr>`).join("")}</tbody></table>`;
 }
 
+// The Recent list under the queue can be folded away, to leave the room to what is waiting. Remembered in this browser.
+function queueRecentFolded() {
+    try { return localStorage.getItem("curator.queueRecentFolded") === "1"; } catch (error) { return false; }
+}
+
+function paintQueueRecentFold() {
+    const folded = queueRecentFolded();
+    const wrap = document.getElementById("queue-events-wrap");
+    const button = document.getElementById("queue-recent-toggle");
+    if (wrap) wrap.classList.toggle("is-folded", folded);
+    if (button) {
+        button.setAttribute("aria-expanded", folded ? "false" : "true");
+        button.title = folded ? "Show this list" : "Hide this list, to see more of the queue";
+    }
+}
+
+function toggleQueueRecent() {
+    try { localStorage.setItem("curator.queueRecentFolded", queueRecentFolded() ? "0" : "1"); } catch (error) { /* private window */ }
+    paintQueueRecentFold();
+}
+
 function paintQueueHistory() {
     const tab = queueTab();
     const title = document.getElementById("queue-events-title");
     const host = document.getElementById("queue-events");
+    paintQueueRecentFold();
     if (tab === "scan") {
         if (title) title.textContent = "Recent scans";
         const rows = (state.queuePanel.scanEvents || []).map((item) => ({ ...item, where: item.message || item.source || "" }));
@@ -1538,6 +1561,7 @@ const AUTOMATION_ACTIONS = {
     "queue-copy-call": () => runAction(copyWebhookCall),
     "queue-clear": () => clearQueueAsk(),
     "queue-tab": (action) => selectQueueTab(action.dataset.tab),
+    "queue-recent-toggle": () => toggleQueueRecent(),
     "queue-drop": (action) => runAction(() => dropQueueItem(action.dataset.id)),
     "queue-drop-scan": (action) => runAction(() => dropQueuedScan(action.dataset.id)),
     "queue-cancel-scan": (action) => runAction(() => cancelQueuedScan(action.dataset.id)),

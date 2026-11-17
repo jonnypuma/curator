@@ -1612,6 +1612,22 @@ def _writes_metadata(job):
     return job.groups is None or bool(job.groups & _METADATA_GROUPS)
 
 
+def _fix_title_note(job, row, merged, changes, locked):
+    """One log line after a Fix Match saying what became of the title, so a title that stays is never a mystery."""
+    if not getattr(job, "fix", False):
+        return
+    old = str(row.get("title") or "")
+    new = str((merged or {}).get("title") or "")
+    if "title" in (locked or ()):
+        job.log(f"Fix Match: the title stays {old!r} because the title field is locked")
+    elif not new:
+        job.log(f"Fix Match: the new match gave no title, so {old!r} stays")
+    elif "title" in (changes or {}):
+        job.log(f"Fix Match: title {old!r} is now {new!r}")
+    else:
+        job.log(f"Fix Match: the new match has the same title, {new!r}")
+
+
 def _fields(job, names, level="movie"):
     names = [field for field in names if field not in RATING_FIELDS]
     if getattr(job, "fix", False) and job.picks is None:
@@ -2161,6 +2177,7 @@ async def _movie(job, client, found, movie_id):
     locked = set(row.get("locked_fields") or [])
     fields = _fields(job, store.MOVIE_FIELDS)
     changes = merge.updates(row, merged, fields, job.policy, locked)
+    _fix_title_note(job, row, merged, changes, locked)
     changes = _rate(job, changes, row, locked)
     if _writes_metadata(job) and (changes or job.groups is None):
         if not await asyncio.to_thread(store.apply_fields, "movies", movie_id, changes, source=main.get("source") or "tmdb"):
@@ -2204,7 +2221,9 @@ async def _set_sync(job, client, found, set_id, collection=None):
         collection = await _quiet(job, "TMDB collection", found["tmdb"].collection(collection_id, images=want_art))
     if collection:
         if _wants(job, "story"):
-            await asyncio.to_thread(store.save_set_meta, set_id, collection.get("overview"), collection.get("tmdb_id"))
+            # Settings, Movie Sets, Metadata fields: an unticked overview is left as it is (the TMDB id is still kept).
+            overview = collection.get("overview") if "overview" in (job.cfg.get("set_fields") or ["overview"]) else None
+            await asyncio.to_thread(store.save_set_meta, set_id, overview, collection.get("tmdb_id"))
             row["overview"] = collection.get("overview") or row.get("overview")
             row["tmdb_collection_id"] = row.get("tmdb_collection_id") or collection.get("tmdb_id")
         if collection.get("parts"):
@@ -2497,6 +2516,7 @@ async def _show(job, client, found, show_id):
         locked = set(show.get("locked_fields") or [])
         fields = _fields(job, store.SHOW_FIELDS, "show")
         changes = merge.updates(show, merged, fields, job.policy, locked)
+        _fix_title_note(job, show, merged, changes, locked)
         changes = _rate(job, changes, show, locked, "show")
         if job.picks is None:
             write_show = _writes_metadata(job) and (changes or job.groups is None)

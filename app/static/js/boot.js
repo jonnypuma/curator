@@ -318,7 +318,7 @@ async function startCurator() {
     beginClientBoot();
     try {
         const filterEl = document.getElementById("library-filter");
-        if (filterEl) filterEl.value = state.filter;
+        if (filterEl) filterEl.value = String(state.filter || "all").split("+")[0];
         if (typeof syncLibraryFilterButton === "function") syncLibraryFilterButton();
         if (typeof renderColumnMenu === "function") renderColumnMenu();
         if (typeof bindEvents === "function") bindEvents();

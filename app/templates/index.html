@@ -113,6 +113,7 @@
                     <button type="button" class="group-item" role="menuitem" data-action="tools-wishlist">Upgrade wishlist</button>
                     <button type="button" class="group-item" role="menuitem" data-action="tools-cleanup">Bulk duplicate cleanup…</button>
                     <button type="button" class="group-item" role="menuitem" data-action="tools-journeys">Follow imports</button>
+                    <button type="button" class="group-item" role="menuitem" data-action="tools-changes">What changed</button>
                     <button type="button" class="group-item" role="menuitem" data-action="tools-history">Activity history</button>
                     <button type="button" class="group-item" role="menuitem" data-action="tools-disk">Disk space</button>
                     <button type="button" class="group-item" role="menuitem" data-action="tools-orphans">Orphan report</button>
@@ -144,6 +145,7 @@
                     <label class="choice"><input type="checkbox" id="musicvideos-corrupt"> Corrupt only</label>
                 </div>
                 <div class="job-actions">
+                    <button type="button" data-action="musicvideos-add" disabled title="Add a folder with the media type Music videos under Settings, General, first. The download is saved there.">+ Add from YouTube</button>
                     <button type="button" class="btn-ghost" data-action="musicvideos-scan" data-mode="incremental">Scan</button>
                     <button type="button" class="btn-ghost" data-action="musicvideos-scan" data-mode="full">Full scan</button>
                     <button type="button" class="btn-ghost" data-action="musicvideos-lookup" title="Fill a blank album, genre or plot from TheAudioDB">Look up blanks</button>
@@ -573,6 +575,11 @@
             </div>
             <div class="modal-body">
                 <p id="trash-summary" class="muted"></p>
+                <div class="job-actions">
+                    <button type="button" class="btn-ghost" id="trash-pick-all" data-action="trash-pick-all">Select all</button>
+                    <button type="button" class="btn-ghost" id="trash-restore-picked" data-action="trash-restore-picked" disabled>Restore selected</button>
+                    <button type="button" class="btn-danger" id="trash-delete-picked" data-action="trash-delete-picked" disabled>Delete selected</button>
+                </div>
                 <div id="trash-list"></div>
                 <div class="job-actions">
                     <button type="button" class="btn-ghost" data-action="trash-reload">Refresh</button>
@@ -728,6 +735,7 @@
                 <input id="artwork-query" type="search" autocomplete="off" spellcheck="false" placeholder="Artist - Album" aria-label="Artwork search criteria">
                 <button type="submit">Search</button>
             </form>
+            <div id="art-bulk" class="art-bulk hidden" aria-live="polite"></div>
             <div class="art-workspace">
             <div id="art-compare" class="art-compare hidden">
                 <div class="art-compare-stage">
@@ -1213,6 +1221,21 @@
             </div>
         </div>
     </div>
+    <div id="changes-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="changes-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="changes-title">What changed</h2>
+                <button type="button" class="btn-ghost" data-close="changes-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="job-actions">
+                    <select id="changes-period" aria-label="Period"></select>
+                    <span id="changes-note" class="muted"></span>
+                </div>
+                <div id="changes-body"></div>
+            </div>
+        </div>
+    </div>
     <div id="history-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="history-title">
         <div class="modal-content modal-wide">
             <div class="modal-header">
@@ -1355,11 +1378,11 @@
         <div class="modal-content modal-wide">
             <div class="modal-header">
                 <h2 id="queue-title">Queue</h2>
+                <div id="queue-now" class="queue-now" aria-live="polite"><span class="queue-now-idle muted">Idle</span></div>
                 <button type="button" class="btn-ghost" data-action="journeys-open" title="Each import's path from the webhook to the player library update">Follow imports</button>
                 <button type="button" class="btn-ghost" data-close="queue-modal">Close</button>
             </div>
             <div class="modal-body">
-                <div id="queue-now" class="queue-now" aria-live="polite"><span class="queue-now-idle muted">Idle</span></div>
                 <div class="queue-tabs" role="tablist" aria-label="Queue">
                     <button type="button" class="is-active" data-action="queue-tab" data-tab="webhook" role="tab" aria-selected="true">Webhook Queue</button>
                     <button type="button" data-action="queue-tab" data-tab="scan" role="tab" aria-selected="false">Scan Queue</button>
@@ -1385,7 +1408,7 @@
                 <h3 id="queue-list-title">Waiting</h3>
                 <div id="queue-items" class="queue-items"><p class="muted">Nothing queued.</p></div>
                 <div id="queue-events-wrap" class="queue-history">
-                    <h3 id="queue-events-title">Recent webhooks</h3>
+                    <button type="button" id="queue-recent-toggle" class="queue-recent-toggle" data-action="queue-recent-toggle" aria-expanded="true" aria-controls="queue-events"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg><h3 id="queue-events-title">Recent webhooks</h3></button>
                     <div id="queue-events" class="queue-events"><p class="muted">No webhooks yet.</p></div>
                 </div>
             </div>
@@ -1771,6 +1794,24 @@
         <button type="button" class="btn-ghost" data-action="page-reload-later">Later</button>
     </div>
 
+    <div id="mv-youtube-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mv-youtube-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h2 id="mv-youtube-title">Add a music video from YouTube</h2>
+                <button type="button" class="btn-ghost" data-close="mv-youtube-modal">Close</button>
+            </div>
+            <div class="modal-body">
+                <form id="mv-youtube-form" class="artwork-search">
+                    <label for="mv-youtube-query">Search YouTube</label>
+                    <input id="mv-youtube-query" type="search" autocomplete="off" spellcheck="false" placeholder="Artist and title">
+                    <button type="submit">Search</button>
+                </form>
+                <p id="mv-youtube-note" class="muted">Pick a result, check the artist and title, then download. The file is saved as Artist - Title (Year), in the folder shown under the names (the rule is under Settings, General, Music videos from YouTube), at the quality set under Trailer download quality.</p>
+                <datalist id="mv-youtube-artists"></datalist>
+                <div id="mv-youtube-results" class="mv-youtube-results"></div>
+            </div>
+        </div>
+    </div>
     <div id="webhook-call-modal" class="modal modal-wide hidden" role="dialog" aria-modal="true" aria-labelledby="webhook-call-title">
         <div class="modal-content">
             <div class="modal-header">
@@ -1856,6 +1897,7 @@
         <div class="modal-content modal-wide">
             <div class="modal-header">
                 <h2 id="video-art-title">Artwork</h2>
+                <button type="button" class="btn-ghost hidden" id="video-art-undo" data-action="video-art-undo">Undo last artwork</button>
                 <div id="video-art-players" class="player-boxes player-boxes-inline"></div>
                 <button type="button" class="btn-ghost" data-close="video-art-modal">Close</button>
             </div>
@@ -1944,7 +1986,7 @@
     {% for name in [
         'core/ui-sync', 'core/constants', 'core/state', 'core/events', 'core/api', 'music/library', 'core/scan',
         'music/tree', 'music/columns', 'music/center', 'music/editor', 'music/match', 'music/artwork', 'music/artist-actions',
-        'music/batch', 'core/settings', 'core/folders', 'core/settings-tabs', 'core/video-settings', 'core/pattern-builder', 'core/music-pattern-builder', 'video/subtitles-find', 'core/about', 'core/trash', 'core/orphans', 'core/disk', 'core/musicvideos', 'core/cleanup', 'core/activity-history', 'core/wishlist', 'core/twins', 'core/compare', 'core/journeys', 'core/tools-menu', 'core/imdb-data', 'core/outbound', 'core/panes', 'core/vgrid', 'core/restore', 'core/insights', 'core/automation', 'core/trakt', 'core/setup', 'core/actions', 'core/keyboard', 'core/jobs', 'music/tools', 'music/lyrics-editor',
+        'music/batch', 'core/settings', 'core/folders', 'core/settings-tabs', 'core/video-settings', 'core/pattern-builder', 'core/music-pattern-builder', 'video/subtitles-find', 'core/about', 'core/trash', 'core/orphans', 'core/disk', 'core/musicvideos', 'core/cleanup', 'core/activity-history', 'core/whats-changed', 'core/wishlist', 'core/twins', 'core/compare', 'core/journeys', 'core/tools-menu', 'core/imdb-data', 'core/outbound', 'core/panes', 'core/vgrid', 'core/restore', 'core/insights', 'core/automation', 'core/trakt', 'core/setup', 'core/actions', 'core/keyboard', 'core/jobs', 'music/tools', 'music/lyrics-editor',
         'core/layout', 'music/cells', 'core/menus', 'music/badges', 'core/palette', 'core/util',
         'core/media', 'video/common', 'video/duplicates', 'video/selection', 'video/scan', 'video/movies', 'video/sets', 'video/tv', 'video/edit', 'video/scrape', 'video/files', 'video/languages', 'video/tags', 'video/list-keys', 'video/sub_sync', 'video/view',
         'core/live', 'boot'

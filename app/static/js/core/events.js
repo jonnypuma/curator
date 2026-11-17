@@ -76,9 +76,12 @@ function bindEvents() {
         ["dock", "dock-scan", "activity"].forEach((id) => { const el = document.getElementById(id); if (el) fit.observe(el); });
     }
     document.getElementById("library-filter").addEventListener("change", (event) => {
-        const wasLatest = state.filter === "latest";
-        state.filter = event.target.value;
-        if (typeof musicLatestSort === "function" && wasLatest !== (state.filter === "latest")) musicLatestSort(state.filter === "latest");
+        const wasLatest = String(state.filter || "").split("+").includes("latest");
+        // Several filters at once travel in data-combined ("unmatched+new"); the select itself shows the first one.
+        state.filter = event.target.dataset.combined || event.target.value;
+        delete event.target.dataset.combined;
+        const isLatest = String(state.filter || "").split("+").includes("latest");
+        if (typeof musicLatestSort === "function" && wasLatest !== isLatest) musicLatestSort(isLatest);
         sessionStorage.setItem("resonance.filter", state.filter);
         if (typeof syncLibraryFilterButton === "function") syncLibraryFilterButton();
         const overlay = document.getElementById("filter-overlay");
@@ -733,6 +736,23 @@ async function onClick(event) {
     if (name === "skip-scan-release") return runAction(() => answerScanPrompt({ action: "skip" }), "Skipping this album…");
     if (name === "continue-scan-artwork") return runAction(() => answerScanPrompt({ action: "continue" }), "Continuing the scan…");
     if (name === "skip-scan-artwork") return runAction(() => answerScanPrompt({ action: "skip" }), "Skipping artwork…");
+    if (name === "art-tick") return paintMusicArtTicks();
+    if (name === "art-bulk-clear") return clearMusicArtTicks();
+    if (name === "art-bulk-select") return runAction(() => musicArtBulk("select"), "Downloading artwork…");
+    if (name === "art-bulk-ban") return runAction(() => musicArtBulk("ban"), "Banning…");
+    if (name === "art-ban") return runAction(async () => { await musicArtMany("ban", [action.dataset.art]); notify("Picture banned. It is never suggested or picked automatically.", "success"); }, "Banning…");
+    if (name === "art-unban") return runAction(async () => { await musicArtMany("unban", [action.dataset.art]); notify("Picture unbanned.", "success"); }, "Unbanning…");
+    if (name === "art-bulk-delete") {
+        const count = musicArtTicked().length;
+        askDanger(
+            "Remove Artwork",
+            `Remove ${count} image${count === 1 ? "" : "s"} from disk and the database?`,
+            `Delete ${count}`,
+            () => runAction(() => musicArtBulk("remove"), "Removing artwork…"),
+            true
+        );
+        return;
+    }
     if (name === "delete-art") {
         askDanger(
             "Remove Artwork",

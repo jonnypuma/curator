@@ -217,6 +217,13 @@ function artLanguageFields(cfg) {
 
 const MEDIAINFO_NOTE = "Curator keeps a small file named like the video, ending in .cmm_mediainfo.xml, with what the probe found, so a moved or renamed folder is not probed again. Turning this off stops new files from being written. Files already there stay and are still read. Movies and TV have their own box; CMM_WRITE_SIDECARS sets both until you save here.";
 
+// What counts toward the health score, one box per check, under the box that shows the score.
+function healthCheckBoxes(media) {
+    const boxes = HEALTH_CHECKS.map((check) => videoCheck(`video-ui-${media}-health-${check[0]}`, healthCheckOn(media, check[0]), check[1])).join("");
+    const what = media === "tv" ? "For a show the .nfo, file and subtitle checks include its episodes." : "";
+    return `<div class="health-checks"><p class="muted">What counts toward the score, each the same. ${what}</p>${boxes}</div>`;
+}
+
 function videoCheck(id, value, label) {
     return `<label class="choice"><input type="checkbox" id="${id}" ${value ? "checked" : ""}> ${escapeHtml(label)}</label>`;
 }
@@ -310,6 +317,41 @@ function overwriteSaved(media, side) {
     return cfg.overwrite_policy === "overwrite" || cfg.overwrite_policy === true;
 }
 
+// A section whose settings are shared by movies, TV and sets, shown on another tab too. The controls here are copies
+// of the ones on the Movies tab: changing either changes both, and Save reads the Movies ones (wireSharedSettings).
+function sharedSettingsSection(title, ids) {
+    return `<h3>${escapeHtml(title)}</h3>
+        <p class="muted settings-shared-note">Shared by movies, TV and sets: a change here is the same setting as on the Movies tab.</p>
+        <div class="settings-shared" data-shared-ids="${escapeHtml(ids.join(","))}"></div>`;
+}
+
+function wireSharedSettings() {
+    document.querySelectorAll("#settings-body .settings-shared:not([data-wired])").forEach((host) => {
+        host.dataset.wired = "1";
+        String(host.dataset.sharedIds || "").split(",").filter(Boolean).forEach((id) => {
+            const source = document.getElementById(id);
+            const label = source && source.closest("label");
+            if (!label) return;
+            const copy = label.cloneNode(true);
+            const control = copy.querySelector("input, select, textarea");
+            if (!control) return;
+            control.removeAttribute("id");
+            control.dataset.sharedFrom = id;
+            const push = (from, to) => {
+                if (from.type === "checkbox") to.checked = from.checked;
+                else to.value = from.value;
+            };
+            push(source, control);
+            control.addEventListener("change", () => {
+                push(control, source);
+                source.dispatchEvent(new Event("change", { bubbles: true }));
+            });
+            source.addEventListener("change", () => push(source, control));
+            host.appendChild(copy);
+        });
+    });
+}
+
 function policyFields(media, note) {
     const meta = overwriteSaved(media, "metadata");
     const art = overwriteSaved(media, "artwork");
@@ -328,6 +370,8 @@ function videoSettingsHtml() {
             ${videoCheck("video-ui-movie-edition", cfg.ui_movie_edition !== false, "Show edition in title")}
             ${videoCheck("video-ui-movie-date-added", cfg.ui_movie_date_added !== false, "Show date added")}
             ${videoCheck("video-ui-movie-processed", cfg.ui_movie_processed !== false, "Show processed/unprocessed checkmark")}
+            ${videoCheck("video-ui-movie-health", cfg.ui_movie_health !== false, "Show the health score")}
+            ${healthCheckBoxes("movie")}
             ${videoCheck("video-ui-movie-poster-badges", cfg.ui_movie_poster_badges !== false, "Show resolution, HDR and audio badges on the poster")}
             ${videoCheck("video-ui-movie-art-badges", cfg.ui_movie_art_badges !== false, "Show resolution and aspect ratio badges on artwork")}
             <label class="choice"><input type="checkbox" data-video-collapse ${cfg.collapse_versions ? "checked" : ""}> Collapse versions of the same movie or episode into one row</label>
@@ -362,13 +406,14 @@ function videoSettingsHtml() {
             <label class="field">Movie .nfo name ${videoSelect("video-nfo-name", cfg.movie_nfo_name || "filename", [["filename", "<video name>.nfo"], ["movie", "movie.nfo in the movie folder"]])}</label>
             ${videoCheck("video-write-nfo", cfg.write_nfo !== false, "Write .nfo files after a scrape")}
             ${videoCheck("video-download-art", cfg.download_artwork !== false, "Download artwork next to the files")}
-            ${videoCheck("video-write-mediainfo-movies", cfg.write_mediainfo_movies !== false, "Write a .cmm_mediainfo.xml media info file beside each movie")}
-            <p class="muted">${MEDIAINFO_NOTE}</p>
             ${videoCheck("video-nfo-backup", cfg.nfo_backup !== false, "Keep a .nfo.bak when a rewrite replaces a file")}
             ${videoCheck("video-write-on-edit", cfg.write_on_edit !== false, "Rewrite the .nfo after an inline edit")}
             ${videoCheck("video-actor-thumbs", cfg.actor_thumbs !== false, "Include actor photo links")}
             ${videoCheck("video-keywords", !!cfg.keywords_as_tags, "Save TMDB keywords as tags")}
             <label class="field">Items scraped at once <input id="video-concurrency" type="number" min="1" max="12" value="${Number(cfg.concurrency) || 4}"></label>
+            <h3>Media info files</h3>
+            ${videoCheck("video-write-mediainfo-movies", cfg.write_mediainfo_movies !== false, "Write a .cmm_mediainfo.xml media info file beside each movie")}
+            <p class="muted">${MEDIAINFO_NOTE}</p>
             <h3>On Radarr import</h3>
             ${videoCheck("video-trailer-webhook", !!cfg.trailer_on_webhook, "Download the movie trailer")}
             <p class="muted">After a Radarr import has been scanned and scraped, the movie trailer is downloaded from the YouTube link the scraper saved. A movie that already has a trailer is only fetched again when the file is below the quality set under General and YouTube has a taller copy.</p>
@@ -385,12 +430,20 @@ function videoSettingsHtml() {
                 <span class="path-field"><input id="video-set-folder" value="${escapeHtml(cfg.set_folder || "")}" placeholder="/movies/_Sets" spellcheck="false"><button type="button" class="btn-ghost" data-action="browse-set-folder">Browse</button></span>
             </label>
             <p class="muted">Curator writes one folder per set here, named after the set (for example <code>Alien Collection/poster.jpg</code>), with the set artwork and a <code>set.nfo</code>. Point Kodi's Settings, Media, Videos, "Movie set information folder" at the same folder. Browse lists folders the container can see. The folder must already exist. A folder inside a movie library folder works, and so does a separate mount. CMM_SET_FOLDER in docker-compose is used when this box is empty. Leave both empty to skip set artwork.</p>
+            <h3>During a scan</h3>
+            <label class="choice"><input type="checkbox" id="video-scan-fix-shape-sets" ${cfg.scan_fix_art_shape_sets !== false ? "checked" : ""}> Replace artwork with the wrong shape during a scan</label>
+            <p class="muted">Sets have no scan of their own, so this runs at the end of a movie scan. A set whose poster, fanart, banner or other picture has the wrong shape for its type gets the picture the artwork window suggests for that type. Pictures you uploaded or kept stay.</p>
+            <h3>Metadata fields</h3>
+            <p class="muted">A scrape writes the fields that are checked and leaves the others alone. A set has one scraped field; its title comes from its movies.</p>
+            <label class="choice"><input type="checkbox" id="video-set-field-overview" ${(Array.isArray(cfg.set_fields) ? cfg.set_fields : ["overview"]).includes("overview") ? "checked" : ""}> Overview</label>
+            ${sharedSettingsSection("Artwork languages", ["video-art-lang-0", "video-art-lang-1", "video-art-lang-2", "video-art-lang-3", "video-fanart-textless"])}
             <h3>Set artwork</h3>
             <p class="muted">From TMDB collection images and Fanart.tv (when its key is set). Minimum widths are shared with movie artwork.</p>
             ${videoArtChecks("set_art", ["poster", "fanart", "clearlogo", "clearart", "banner", "landscape", "discart", "squareart"])}
             ${policyFields("sets", "A scan fills an empty set overview and the set images that are checked. Turn a box on to replace those existing values. An image is replaced only when the new one is larger. A movie scrape that updates its set uses these switches.")}
             ${videoCheck("video-set-nfo", cfg.set_nfo !== false, "Write set.nfo with the set title, original title, and overview")}
             <p class="muted">Set art is written when a movie in the set is scraped, or from the Sets tab with Scrape.</p>
+            ${sharedSettingsSection("Writing", ["video-dialect", "video-download-art", "video-nfo-backup", "video-write-on-edit"])}
         </section>
         <section class="settings-section" data-tab="tv">${sortTheControl("The Office is listed under O.")}
             <h3>UI Elements</h3>
@@ -399,6 +452,8 @@ function videoSettingsHtml() {
             ${videoCheck("video-ui-tv-episodes", cfg.ui_tv_episodes !== false, "Show number of episodes")}
             ${videoCheck("video-ui-tv-date-added", cfg.ui_tv_date_added !== false, "Show date added")}
             ${videoCheck("video-ui-tv-processed", cfg.ui_tv_processed !== false, "Show processed/unprocessed checkmark")}
+            ${videoCheck("video-ui-tv-health", cfg.ui_tv_health !== false, "Show the health score on shows")}
+            ${healthCheckBoxes("tv")}
             ${videoCheck("video-ui-tv-progress", cfg.ui_tv_progress !== false, "Show season and episode completeness progress bars under posters")}
             ${videoCheck("video-ui-tv-poster-badges", cfg.ui_tv_poster_badges !== false, "Show season, episode and file badges on the poster")}
             ${videoCheck("video-ui-tv-art-badges", cfg.ui_tv_art_badges !== false, "Show resolution and aspect ratio badges on artwork")}
@@ -420,6 +475,7 @@ function videoSettingsHtml() {
             <h3>Artwork sources</h3>
             <p class="muted">Images are taken from the first source in this order that has one. Drag a row to change the order. An unchecked source is not asked, and it drops to the bottom. Shows, seasons, and episodes use this list. TVMaze supplies posters, banners, backgrounds, and episode stills.</p>
             ${videoChain("tv_art_sources")}
+            ${sharedSettingsSection("Artwork languages", ["video-art-lang-0", "video-art-lang-1", "video-art-lang-2", "video-art-lang-3", "video-fanart-textless"])}
             <h3>Show artwork</h3>
             ${videoArtChecks("tv_art", ["poster", "fanart", "extrafanart", "extrathumbs", "clearlogo", "clearart", "banner", "landscape", "characterart", "squareart"])}
             ${extraFanartCount()}
@@ -444,6 +500,7 @@ function videoSettingsHtml() {
             <label class="field">Shortest part (seconds) <input id="video-split-min-part" type="number" min="1" max="600" step="1" value="${splitNum(cfg.split_min_part, 30)}"></label>
             ${videoCheck("video-scan-split-notify", cfg.scan_split_notify === true, "After splitting, send library update to the players (also removes any old entry from Kodi when its file is gone)")}
             ${policyFields("tv", "Shows, seasons, and episodes use these. A scan fills the checked fields and images that are empty. Turn a box on to replace those existing values. An image is replaced only when the new one is larger. The .nfo dialect and the other writing options stay on the Movies tab.")}
+            ${sharedSettingsSection("Writing", ["video-dialect", "video-write-nfo", "video-download-art", "video-nfo-backup", "video-write-on-edit", "video-actor-thumbs", "video-keywords", "video-concurrency"])}
             <h3>Media info files</h3>
             ${videoCheck("video-write-mediainfo-tv", cfg.write_mediainfo_tv !== false, "Write a .cmm_mediainfo.xml media info file beside each episode")}
             <p class="muted">${MEDIAINFO_NOTE}</p>
@@ -625,6 +682,8 @@ function readVideoSettings(root) {
         scan_clean_art_tv: sectionChecked(root, "tv", "[data-video-scan-clean-art]"),
         scan_fix_art_shape_movies: sectionChecked(root, "movies", "[data-video-scan-fix-shape]"),
         scan_fix_art_shape_tv: sectionChecked(root, "tv", "[data-video-scan-fix-shape]"),
+        scan_fix_art_shape_sets: checked("video-scan-fix-shape-sets"),
+        set_fields: checked("video-set-field-overview") ? ["overview"] : [],
         scan_clean_art_types_movies: sectionTypes(root, "movies"),
         scan_clean_art_types_tv: sectionTypes(root, "tv"),
         ...["metadata", "artwork", "ratings"].reduce((out, name) => {
@@ -647,6 +706,8 @@ function readVideoSettings(root) {
         ui_movie_edition: checked("video-ui-movie-edition"),
         ui_movie_date_added: checked("video-ui-movie-date-added"),
         ui_movie_processed: checked("video-ui-movie-processed"),
+        ui_movie_health: checked("video-ui-movie-health"),
+        ...Object.fromEntries(["movie", "tv"].flatMap((media) => HEALTH_CHECKS.map((check) => [`ui_${media}_health_${check[0]}`, checked(`video-ui-${media}-health-${check[0]}`)]))),
         ui_movie_art_badges: checked("video-ui-movie-art-badges"),
         ui_movie_poster_badges: checked("video-ui-movie-poster-badges"),
         ui_tv_poster_badges: checked("video-ui-tv-poster-badges"),
@@ -657,6 +718,7 @@ function readVideoSettings(root) {
         ui_tv_episodes: checked("video-ui-tv-episodes"),
         ui_tv_date_added: checked("video-ui-tv-date-added"),
         ui_tv_processed: checked("video-ui-tv-processed"),
+        ui_tv_health: checked("video-ui-tv-health"),
         ui_tv_progress: checked("video-ui-tv-progress"),
         ui_tv_art_badges: checked("video-ui-tv-art-badges"),
         ui_set_art_badges: checked("video-ui-set-art-badges"),
@@ -687,7 +749,7 @@ function readVideoSettings(root) {
         sub_lang_standard: value("video-sub-standard"), sub_rename: checked("video-sub-rename"),
         sub_charset: checked("video-sub-charset"), sub_line_endings: value("video-sub-endings"),
         sub_on_webhook: checked("video-sub-webhook"), sub_purge_duplicates: checked("video-sub-purge"), extras_layout: value("video-extras-layout"),
-        trailer_resolution: value("video-trailer-resolution"), trailer_on_webhook: checked("video-trailer-webhook"), trailer_on_sonarr_season: checked("video-trailer-sonarr"),
+        trailer_resolution: value("video-trailer-resolution"), mv_folder_rule: value("video-mv-folder-rule") || "artist", trailer_on_webhook: checked("video-trailer-webhook"), trailer_on_sonarr_season: checked("video-trailer-sonarr"),
         theme_on_webhook: checked("video-theme-webhook"),
         export_format: value("video-export-format") || "csv",
         kodi_playlist_dir: value("video-kodi-playlist-dir") || "",

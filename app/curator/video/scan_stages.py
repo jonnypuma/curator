@@ -270,6 +270,8 @@ def _fix_art_shapes_from_scan(job, roots):
                       for level, _id, label, art in below]
             job.log(f"Artwork shape: {row.get('title') or row['id']}: {'; '.join(notes)}")
     if not todo:
+        if kind == "movie":
+            _fix_set_art_shapes(job, cfg)
         return
     if not cfg.get("tmdb_key"):
         job.log(f"Artwork shape: {len(todo)} with the wrong shape left as they are, no TMDB API key under Settings, General")
@@ -288,6 +290,32 @@ def _fix_art_shapes_from_scan(job, roots):
                 job.log(f"Artwork shape: {item_id} failed: {exc}")
             job.progress(message=f"Artwork shape {index}/{len(todo)}", processed=index, total=len(todo), phase="cleanart")
     job.log(f"Artwork shape: {changed} of {len(todo)} {'shows' if kind == 'show' else 'movies'} with the wrong shape fixed")
+    if kind == "movie":
+        _fix_set_art_shapes(job, cfg)
+
+
+def _fix_set_art_shapes(job, cfg):
+    """Movie sets have no scan of their own: their artwork is checked with the movies."""
+    from curator.video import art_pick, clean_fanart
+
+    if not cfg.get("set_folder") or not cfg.get("tmdb_key") or not cfg.get("scan_fix_art_shape_sets", True):
+        return
+    rows = store_db().fetchall("SELECT id, name, artwork, locked FROM movie_sets")
+    todo = [str(row["id"]) for row in rows
+            if not row.get("locked") and clean_fanart._checked("set", str(row["id"]), row.get("artwork") or {})]
+    changed = 0
+    with art_pick.batched_player_art(players=[]):
+        for item_id in todo:
+            if job.cancelled:
+                break
+            try:
+                if clean_fanart.replace("set", item_id, cfg, lambda line: job.log(f"Artwork shape: {line}"),
+                                        art_types=[clean_fanart.WRONG_SHAPE], fill_missing=False):
+                    changed += 1
+            except Exception as exc:
+                job.log(f"Artwork shape: set {item_id} failed: {exc}")
+    if todo:
+        job.log(f"Artwork shape: {changed} of {len(todo)} movie sets with the wrong shape fixed")
 
 
 def _clean_art_from_scan(job, roots):

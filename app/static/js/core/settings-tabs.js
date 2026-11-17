@@ -25,7 +25,28 @@ function gotoSettingsTab(tab, target) {
     if (section) section.scrollIntoView({ block: "start" });
 }
 
+// Each heading of a Settings tab and the options under it become one card, so the groups read apart. The markup the
+// tabs build stays as it is (a long run of headings, options and notes); this only wraps it, once per render.
+function tidySettingsSections() {
+    document.querySelectorAll("#settings-body .settings-section:not([data-tidied])").forEach((section) => {
+        section.dataset.tidied = "1";
+        let card = null;
+        [...section.childNodes].forEach((node) => {
+            const heading = node.nodeType === 1 && node.tagName === "H3";
+            if (heading || !card) {
+                if (!heading && node.nodeType === 3 && !node.textContent.trim()) return;
+                card = document.createElement("div");
+                card.className = "settings-card";
+                section.insertBefore(card, node);
+            }
+            card.appendChild(node);
+        });
+    });
+}
+
 function applySettingsTab(options) {
+    if (typeof wireSharedSettings === "function") wireSharedSettings();
+    tidySettingsSections();
     const active = SETTINGS_TABS.includes(state.settingsTab) ? state.settingsTab : "general";
     document.querySelectorAll("#settings-tabs [data-settings-tab]").forEach((tab) => {
         tab.setAttribute("aria-selected", tab.dataset.settingsTab === active ? "true" : "false");
@@ -178,6 +199,32 @@ function playerCleanScheduleSection() {
     </section>`;
 }
 
+// "0 3 * * *" in plain words: "Every day at 03:00". "" for a pattern this does not know (the cron text still shows).
+function cronWords(cron) {
+    const parts = String(cron || "").trim().split(/\s+/);
+    if (parts.length !== 5) return "";
+    const [minute, hour, day, month, weekday] = parts;
+    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    const number = (value) => /^\d+$/.test(value);
+    const time = () => `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    const step = (value) => (/^\*\/\d+$/.test(value) ? Number(value.slice(2)) : 0);
+    if (month !== "*") return "";
+    if (step(minute) && hour === "*" && day === "*" && weekday === "*") return `Every ${step(minute)} minutes`;
+    if (number(minute) && step(hour) && day === "*" && weekday === "*") {
+        return `Every ${step(hour)} hours${minute === "0" ? "" : `, at ${Number(minute)} past the hour`}`;
+    }
+    if (number(minute) && hour === "*" && day === "*" && weekday === "*") return `Every hour, at ${Number(minute)} past the hour`;
+    if (!number(minute) || !number(hour)) return "";
+    if (day === "*" && weekday === "*") return `Every day at ${time()}`;
+    if (day === "*" && /^[0-7](,[0-7])*$/.test(weekday)) {
+        const names = weekday.split(",").map((value) => days[Number(value)]);
+        return `Every ${names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0]} at ${time()}`;
+    }
+    if (day === "*" && weekday === "1-5") return `Every weekday at ${time()}`;
+    if (number(day) && weekday === "*") return `On day ${Number(day)} of every month at ${time()}`;
+    return "";
+}
+
 function paintPlayerCleanSchedules() {
     const box = document.getElementById("player-clean-schedules-saved");
     if (!box) return;
@@ -192,7 +239,7 @@ function paintPlayerCleanSchedules() {
         const kindLabel = item.kind === "clean" ? "Clean" : "Update";
         return `<article class="schedule-saved-item">
             <div class="schedule-preview-header">
-                <span><strong>${escapeHtml(playerLabel)}</strong> — ${escapeHtml(kindLabel)} — ${escapeHtml(mediaLabel)} — <code>${escapeHtml(item.cron)}</code></span>
+                <span><strong>${escapeHtml(playerLabel)}</strong> — ${escapeHtml(kindLabel)} — ${escapeHtml(mediaLabel)} — ${cronWords(item.cron) ? `<strong>${escapeHtml(cronWords(item.cron))}</strong> ` : ""}<code title="The schedule as cron text">${escapeHtml(item.cron)}</code></span>
                 <button type="button" class="btn-ghost btn-remove" data-action="remove-player-clean-schedule" data-index="${index}">Remove</button>
             </div>
         </article>`;

@@ -205,9 +205,38 @@ def artist_sort_key(name, ignore_the=True):
     return text.lower()
 
 
+def _all_of(results):
+    """The artists every result lists, each with only the albums every result lists for it."""
+    if not results:
+        return []
+    kept = []
+    others = [{str(artist["id"]): artist for artist in result} for result in results[1:]]
+    for artist in results[0]:
+        matches = [other.get(str(artist["id"])) for other in others]
+        if any(match is None for match in matches):
+            continue
+        shared = None
+        for match in matches:
+            ids = {str(album["id"]) for album in match.get("albums") or []}
+            shared = ids if shared is None else shared & ids
+        albums = [album for album in artist.get("albums") or [] if str(album["id"]) in (shared or set())]
+        if not albums and (artist.get("albums") or any(match.get("albums") for match in matches)):
+            continue                      # the filters hold for different albums of this artist, never for the same one
+        kept.append({**artist, "albums": albums})
+    return kept
+
+
 def library(filter_name="all", query="", artist_ids=None):
-    """The music tree. artist_ids limits it to those artists (a refresh after an edit); the filter still applies."""
-    filter_name = filter_name if filter_name in LIBRARY_FILTERS else "all"
+    """The music tree. artist_ids limits it to those artists (a refresh after an edit); the filter still applies.
+
+    Several filters joined with + ("unmatched+missing-art") must all hold: each is read as before and only the artists
+    and albums that every one of them returns are kept."""
+    # A + in a web address arrives as a space, so either separates the names.
+    names = [name for name in dict.fromkeys(str(filter_name or "").replace(" ", "+").split("+"))
+             if name in LIBRARY_FILTERS and name != "all"]
+    if len(names) > 1:
+        return _all_of([library(name, query, artist_ids) for name in names])
+    filter_name = names[0] if names else "all"
     clauses = []
     params = []
     if artist_ids is not None:

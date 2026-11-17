@@ -7,6 +7,8 @@ and media type collapse into one job.
 """
 from __future__ import annotations
 
+import contextvars
+from contextlib import contextmanager
 import logging
 import threading
 import uuid
@@ -31,6 +33,54 @@ _clean_tries = {player: 0 for player in PLAYERS}
 _bound = threading.local()
 _queued_for = threading.local()
 _threads = {}
+_trigger = contextvars.ContextVar("library_trigger", default="")
+TRIGGERS_KEPT = 6
+RESTARTED = "Curator restarted while this update was running"
+
+
+@contextmanager
+def triggered_by(text):
+    """Name what asks for the library updates queued inside this block, such as "Radarr webhook"."""
+    token = _trigger.set(str(text or "").strip())
+    try:
+        yield
+    finally:
+        _trigger.reset(token)
+
+
+def _trigger_for(message):
+    """The trigger of a new request: the named one, else its message when that says who asked (a schedule, a button,
+    Retry). A message that only lists titles ("Updated: Heat") names no trigger."""
+    named = _trigger.get()
+    if named:
+        return named
+    text = str(message or "").strip()
+    if not text or text.lower().startswith(("updated", "removed", "added")):
+        return ""
+    return text
+
+
+def merged_triggers(*groups):
+    """Every trigger once, oldest first, at most TRIGGERS_KEPT (the rest become "and N more")."""
+    found = []
+    for group in groups:
+        for text in ([group] if isinstance(group, str) else list(group or [])):
+            text = str(text or "").strip()
+            if text and text not in found and not text.startswith("and ") :
+                found.append(text)
+    if len(found) > TRIGGERS_KEPT:
+        return found[:TRIGGERS_KEPT] + [f"and {len(found) - TRIGGERS_KEPT} more"]
+    return found
+
+
+def trigger_text(payload):
+    """'Radarr webhook; Scheduled video library update', or '' when nothing was recorded."""
+    return "; ".join(str(text) for text in ((payload or {}).get("triggers") or []) if str(text or "").strip())
+
+
+def current_trigger():
+    """The trigger of the library job running on this thread, for the alerts a player writes while it works."""
+    return getattr(_bound, "trigger", "")
 
 
 def owes_library_clean(player, payload):
@@ -338,8 +388,8 @@ def retry_logged(source, message, path=""):
         return None
     player, full, paths = found
     if player == "plex" and full:
-        enqueue(player, "movies", True, [], False, "Retry")
-        enqueue(player, "tv", True, [], False, "Retry")
+        enqueue(player, "movies", True, [], False, "Retry button in Recent updates")
+        enqueue(player, "tv", True, [], False, "Retry button in Recent updates")
         return "Plex movies and TV"
     if player == "kodi":
         if "music" in (message or "").lower() or (path and "/music" in path.lower().replace("\\", "/")):
@@ -350,7 +400,7 @@ def retry_logged(source, message, path=""):
         media = "library"
     else:
         media = "video"
-    enqueue(player, media, full, paths, False, "Retry")
+    enqueue(player, media, full, paths, False, "Retry button in Recent updates")
     if full:
         return f"{_LABELS.get(player, player)} · Full scan"
     return paths[0] if paths else _LABELS.get(player, player)
@@ -386,6 +436,7 @@ def enqueue(player, media, full, paths=(), clean=False, message="", clean_only=F
         payload = folded(player, media, full, paths, payload, clean, items, reason, quality)
         payload["clean_only"] = bool(clean_only)
         payload["journeys"] = _journeys(*[(row.get("payload") or {}).get("journeys") for row in matches])
+        payload["triggers"] = merged_triggers(*[(row.get("payload") or {}).get("triggers") for row in matches], _trigger_for(message))
         if message and not payload.get("message"):
             payload["message"] = message
         keep = matches[0]["id"]
@@ -402,6 +453,7 @@ def enqueue(player, media, full, paths=(), clean=False, message="", clean_only=F
     payload["message"] = message or ""
     payload["clean_only"] = bool(clean_only)
     payload["journeys"] = _journeys()
+    payload["triggers"] = merged_triggers(_trigger_for(message))
     row_id = str(uuid.uuid4())
     db.execute(
         """
@@ -435,7 +487,10 @@ def refresh_plan(player, media, items, cfg):
     """Whether this player takes a refresh of these items, and why not. Returns (ok, reason)."""
     if player == "navidrome":
         return False, ""                      # every music scan already sends Navidrome a scan
-    if player == "kodi" and media == "music":
+    art_only = bool(items) and all(item.get("kind") in ("set", "album", "artist") for item in items)
+    if art_only and player != "kodi":
+        return False, ""                      # only Kodi takes the artwork of a set, an album or an artist by itself
+    if player == "kodi" and media == "music" and not art_only:
         return False, ""                      # every music scan already sends Kodi a music library scan
     if not _side_on(cfg, player, media):
         return False, ""
@@ -618,6 +673,7 @@ def _public(row):
         "items": items,
         "quality": history_quality(row),
         "scope": _scope_label(payload, full, paths),
+        "trigger": trigger_text(payload),
         "status": row.get("status") or "queued",
         "running_seconds": _running_seconds(row),
         "progress": _progress(player, media, row.get("status")),
@@ -711,7 +767,17 @@ def start():
         WHERE lane = 'arr' AND kind = 'kodi'
         """
     )
-    db.execute("UPDATE work_queue SET status = 'queued', started_at = NULL WHERE lane = 'library' AND status = 'running'")
+    # An update that was running when Curator stopped runs again. It says so, or the repeat looks like a new request.
+    db.execute(
+        """
+        UPDATE work_queue
+        SET status = 'queued', started_at = NULL,
+            payload = CASE WHEN COALESCE(payload->'triggers', '[]'::jsonb) @> %s THEN payload
+                           ELSE jsonb_set(payload, '{triggers}', COALESCE(payload->'triggers', '[]'::jsonb) || %s) END
+        WHERE lane = 'library' AND status = 'running'
+        """,
+        (Jsonb([RESTARTED]), Jsonb([RESTARTED])),
+    )
     _stop.clear()
     for player in PLAYERS:
         thread = _threads.get(player)
@@ -772,6 +838,7 @@ def _finish_row(player, row):
     if owes_library_clean(player, row.get("payload")):
         _clean_due[player] = True
     bind(player)
+    _bound.trigger = trigger_text(row.get("payload"))
     failed = None
     stopped = False
     detail = ""
@@ -815,6 +882,10 @@ def _finish_row(player, row):
             reason = str((row.get("payload") or {}).get("reason") or "").strip()
             if reason and reason not in text:
                 text = f"{text} Full scan because {reason}.".strip()
+            asked = trigger_text(row.get("payload"))
+            if asked:
+                text = f"{text} Triggered by: {asked}.".strip()
+            _bound.trigger = ""
             work_log.note(
                 "library",
                 player,
@@ -933,6 +1004,18 @@ def _execute(player, row):
     names = payload.get("items") or []
     if payload.get("refresh"):
         return notify.refresh_items(player, payload.get("media") or row.get("source") or "", payload["refresh"])
+    if payload.get("full") and not payload.get("legacy") and RESTARTED in (payload.get("triggers") or []):
+        # The player kept scanning while Curator was down. Sending the same full scan again would only repeat it, so
+        # wait for the one in progress (the jobs behind it must not start early) and call this job done.
+        media = payload.get("media") or row.get("source") or "video"
+        if notify.full_scan_running(player, media):
+            label = _LABELS.get(player, player)
+            noun = "" if media == "library" else "music " if media == "music" else "video "
+            text = f"{label} was still running this {noun}library scan when Curator came back, so it was not sent again."
+            if player == "kodi":
+                notify._activity(f"{text}{notify._asked_by()}", "noted", "", "the full library")
+            notify.wait_full_scan(player, media)
+            return text
     if payload.get("legacy"):
         return notify.run_kodi(payload.get("media") or "video", payload.get("folders") or [], False, payload.get("message"), names)
     return notify.run_library(
