@@ -69,8 +69,37 @@ The rest of the Python code lives under `app/curator/`:
 1. Copy `docker-compose.yml.example` to `docker-compose.yml`, and `.env.example` to `.env`. Set `MUSIC_PATH`, `MOVIES_PATH`, and `TV_PATH` to the host folders.
    The folders must already exist. Compose does not create missing library folders, because Docker
    cannot `chown` a folder it creates on a network share.
-2. `docker compose up -d`
-3. Open `http://<host>:4455`.
+2. `python scripts/pack-media.py` once, when building from source. It packs the shipped badge images in `app/media/`
+   (logos of studios, networks, record labels, codecs and providers, thousands of small files) into one file,
+   `app/media.zip`, which the image takes instead of the folder. Run it again after adding or changing an image there.
+3. `docker compose up -d`
+4. Open `http://<host>:4455`. On a new install the setup wizard opens by itself (see below).
+
+### Setup wizard
+
+A step-by-step window that takes a new install from nothing to its first scan. It opens by itself the first time the
+page loads on a fresh install (nothing configured and nothing scanned yet), and **Settings → About → Run setup wizard**
+opens it any time. Each step has **Back**, **Skip** and **Save and continue**, and the dots at the top show where you
+are; a tick means that step was saved. Skip saves nothing. Every step saves the same settings the Settings window does,
+so anything here can be changed there later.
+
+1. **Library folders**: one card each for music, movies, TV shows and music videos. Add a folder by typing its path
+   inside the container, with **Browse**, or with one click on a mounted volume Curator found. Each folder is checked
+   at once: it must exist, Curator must be able to list it, and it must be on a mounted volume. A read-only mount is
+   marked *Read only*: scans work, but `.nfo` files, artwork, renames and deletes need write access.
+2. **Metadata and artwork**: keys for TMDB, TheTVDB, OMDb, Fanart.tv, Last.fm and AcoustID, each with **Test** and a
+   link to where the key is made; the MusicBrainz contact; a **Test** for MusicBrainz and TheAudioDB, which need no
+   key; and Trakt sign-in.
+3. **Download apps**: Radarr, Sonarr, Lidarr and Bazarr address and API key with **Test connection**; the webhook
+   address with your `CMM_API_KEY` already in it and a copy button (Bazarr gets its Apprise address); and path mapping
+   rows for when the app sees the library under another path. **Save and test paths** checks that each Curator path
+   exists and that the app's root folders under the row land on folders that exist here.
+4. **Players**: Kodi, Plex, Emby, Jellyfin and Navidrome address and credentials with **Test connection**, one box for
+   the video library and one for the music library, and Curator path → player path rows. **Save and test paths**
+   asks Kodi to open each folder, and compares the rows with the library folders Plex, Emby and Jellyfin report.
+5. **Finish**: what is set up and what is not, and one box per library to start its first scan.
+
+The container runs with umask 002, so the folders and files Curator creates are 775 and 664: the owner and the group can write and everyone can read, which keeps Kodi working. Set `UMASK` in the environment for another value. Existing folders and files keep what they have, so run `find <library> -type d -exec chmod 775 {} +` and `find <library> -type f -exec chmod 664 {} +` once to match them.
 
 Three folders hold what Curator writes. `config` has settings, logs, Trakt tokens and the undo files (`config/undo`).
 `data` (mounted as `/data`, set by `DATA_DIR`) has the artwork that cannot be fetched again: files you uploaded and
@@ -84,12 +113,14 @@ image you choose is removed as soon as the image is saved with the music. You ca
 `- ./cache:/cache` and `CACHE_DIR: /cache` to `docker-compose.yml`. On the first start Curator moves the old files
 into place and updates the paths it had saved. Files it cannot move are left where they are and keep working.
 
-The image includes ffmpeg, ffprobe, MediaInfo, dovi_tool, mkvtoolnix, yt-dlp, tesseract, and alass (automatic subtitle sync; the alass release is x86-64 only, so on other CPUs the image builds without it and the Automatic button is hidden). yt-dlp is downloaded when the image is built, newest release, and Deno is included because yt-dlp needs a JavaScript runtime to read YouTube. YouTube changes often, so an old yt-dlp stops working. If trailer or theme song downloads start failing (the log line names the yt-dlp version and says when it is old), open **About** (click the Curator name at the top left) and press **Update yt-dlp** next to the yt-dlp row. Curator downloads the newest release from GitHub, checks it against the SHA-256 list published with that release, starts it once to make sure it runs, and keeps it in `cache/bin/`. From then on it runs whichever of that copy and the image's yt-dlp is newer, so a later image rebuild is not held back by it. About also says how old the installed version is and whether GitHub lists a newer release (it asks GitHub when the window opens, at most once every six hours, and sends nothing from your install); the Health list there warns when the version is more than four months old. The update is only ever started by pressing the button. Purging the cache folder removes the updated copy and the image's yt-dlp is used again. Rebuilding the image also works: `docker compose build --build-arg YTDLP_REFRESH=$(date +%s)`. `YTDLP_VERSION` fixes a particular release instead. Tesseract reads picture subtitles (see Syncing external subtitles). It ships with English, Norwegian, Swedish, Danish, Finnish, German, French, Spanish, Italian, Dutch, Portuguese, and Polish. To change the list, set the `TESSERACT_LANGS` build argument (for example `"eng nor"`) under `build:` in `docker-compose.yml` and rebuild (`docker-compose.yml.example` has the commented line).
+The image includes ffmpeg, ffprobe, MediaInfo, dovi_tool, mkvtoolnix, yt-dlp, tesseract, and alass (automatic subtitle sync; the alass release is x86-64 only, so on other CPUs the image builds without it and the Automatic button is hidden). yt-dlp is downloaded when the image is built, newest release, and Deno is included because yt-dlp needs a JavaScript runtime to read YouTube. YouTube changes often, so an old yt-dlp stops working. If trailer or theme song downloads start failing (the log line names the yt-dlp version and says when it is old), open **About** (click the Curator name at the top left) and press **Update yt-dlp** next to the yt-dlp row (the button glows while GitHub lists a newer release). Curator downloads the newest release from GitHub, checks it against the SHA-256 list published with that release, starts it once to make sure it runs, and keeps it in `cache/bin/`. From then on it runs whichever of that copy and the image's yt-dlp is newer, so a later image rebuild is not held back by it. About links to the project page, <https://github.com/jonnypuma/curator>, and also says how old the installed version is and whether GitHub lists a newer release (it asks GitHub when the window opens, at most once every six hours, and sends nothing from your install); the Health list there warns when the version is more than four months old. Below it, **Slow requests** lists every request that took two seconds or more since Curator started (the newest 50), with when it ran and how long it took. The update is only ever started by pressing the button. Purging the cache folder removes the updated copy and the image's yt-dlp is used again. Rebuilding the image also works: `docker compose build --build-arg YTDLP_REFRESH=$(date +%s)`. `YTDLP_VERSION` fixes a particular release instead. Tesseract reads picture subtitles (see Syncing external subtitles). It ships with English, Norwegian, Swedish, Danish, Finnish, German, French, Spanish, Italian, Dutch, Portuguese, and Polish. To change the list, set the `TESSERACT_LANGS` build argument (for example `"eng nor"`) under `build:` in `docker-compose.yml` and rebuild (`docker-compose.yml.example` has the commented line).
 
 ## Library folders and media types
 
 Every library folder has one media type: **Music**, **Movies**, or **TV shows**. Set them in
-Settings, General, Library folders. A folder can not sit inside a folder of another type.
+Settings, General, Library folders. A folder can not sit inside a folder of another type. Curator's own `config`,
+`cache` and `data` folders are never offered as a library folder, and a new library folder can not be one of them,
+hold one, or sit inside one.
 
 The Scan button follows the library that is open. In Music it scans music folders only. In Movies
 and Movie sets it scans movie folders, and in TV shows it scans TV folders. This applies both to
@@ -159,17 +190,55 @@ While **Folders and files** is running, the folder walk is the first 15% of that
 
 A show or season folder with no episode files is not probed for episodes. A new or changed `tvshow.nfo` or `season.nfo` in that folder is still read. Each empty folder is written to the scan log as `Empty folder: …`, and the scan report counts them. A video file that is on disk and has no episode row is stored as a new episode, including when an earlier probe already recorded the file.
 
+**Prefer clean fanart and character art** (Settings, Movies, under Artwork languages; on by default) picks fanart and character art with no title or logo on them before any language, and uses a picture with text only when no clean one exists; the artwork window suggests and lists the clean ones first. Posters, landscape and the other types keep the language order, so landscape art keeps its title.
+
+**Artwork shape.** Every artwork type has a shape: posters and key art tall, fanart, landscape and episode thumbs wide, banners a long strip, disc and square art square (logos, clear art and character art are not judged). A picture of the wrong shape (a fanart a site listed among the posters) is never chosen by a scrape, Download missing artwork or Clean artwork, and every downloaded picture is checked before it is saved; the artwork window marks it **Wrong shape** and never suggests it. **Replace artwork with the wrong shape during a scan** (Settings, Movies and TV shows, under During a scan; on by default) checks the files of the scanned items on disk and gives each wrong one the suggested picture of its type, and Clean artwork has the same as **Any artwork with the wrong shape**. For a show, season artwork and episode thumbs are checked too. The width and height of every artwork file are kept in the database with its path (read again only when the file changes), so these checks do not open the files; artwork from before 4.1.0 is read once and its size stored. **Download missing artwork** takes the picture the artwork window marks Suggested for each missing type, so fanart is clean when a clean one exists.
+
+**Clean artwork during a scan** (Settings, Movies and TV shows, under During a scan; off by default) runs Clean artwork as a scan stage, after the metadata and artwork lookup and before the .nfo files, for the ticked types (Fanart; Character art for shows; Extra fanart), with *Only pictures with a title or logo on them*. An incremental scan does the items it added or read again, a full or deep scan every item in the scanned folders; an item whose fanart was already picked or cleaned is skipped unless Extra fanart is ticked. The scan's progress shows a Clean artwork step, and the players get the new pictures through *Update client libraries for items with updated artwork*, which now also makes Kodi drop its cached copy of a changed picture.
+
+**Jobs, Recent.** Under Running and Waiting, the Jobs panel lists the last 30 finished jobs of every kind (file jobs such as Clean artwork, rename and integrity checks, scans, scrapes and background jobs), newest first, with Done, Failed or Stopped, when it ended, the movies, shows or episodes it worked on (the first 25 are kept, with the count) and its summary. A Kodi library update names what it scanned in its last line. **Log** opens the full log of a file job, a background job or a music scan, with Copy; movie and TV scans and scrapes keep theirs in Scan history. The last 300 file jobs are kept.
+
+**After an update** an open Curator page keeps running the scripts it was loaded with. When the page sees that the running Curator is a newer build, it shows *Curator was updated while this page was open* with **Reload** (and **Later**).
+
+**Clean artwork…** (select movies, shows or movie sets, Metadata menu at the bottom; a set offers Fanart, Extra fanart and Any artwork with the wrong shape, saved in its folder inside the central set folder) is for the artwork that should carry no title or logo: **Fanart** (ticked by default), for shows **Character art**, and **Extra fanart**. For extra fanart, a picture that is in `extrafanart/` more than once (the same shot at another size, framed tighter or wider, or from another site) keeps its largest copy, and one that matches an online picture listed with a language is swapped for a clean picture that is not there yet, or taken out when there is none; every file taken out goes to the recycle bin. **Also download missing clean pictures** (on by default, remembered) gives an item without fanart or character art the suggested clean one, and tops extra fanart up to the Maximum extra fanart in Settings with clean pictures that are not there yet; untick it to only clean what is there. A replaced picture becomes the one the artwork window marks Suggested for that type, and an item without that type gets it. **Replace** has three choices: only pictures with a title or logo on them (Curator matches the file with the online pictures by size, or by comparing it with small previews, and replaces one that matches a picture listed with a language), that and pictures that match nothing online, or any picture that is not the suggested one, also when it is listed as clean (TMDB lists many backdrops with the title on them without a language). Pictures you picked or uploaded in the artwork window and locked items are never touched, and a replaced file stays in the artwork window to be picked again. The job reuses the artwork window's own code, so it saves exactly the card marked Suggested, and its log names the Curator version and each picture it saved. When it ends, the open page loads the new pictures at once (no reload), and the artwork window marks the picture each file came from **In use**; scans keep that note as long as the file stays the same. Below that is one box per player switched on for the library (*Update library in Kodi after artwork download* and so on). The usual Overwrite artwork setting only replaces a picture with a larger one, so it cannot do this.
+
+**New artwork reaches the players without a rescan.** Kodi keeps a cached copy of every picture it has shown, so a new `fanart.jpg` under the same name stays hidden behind the old one. After Clean fanart, and whenever a picture is chosen or uploaded in the artwork window, Curator queues an artwork refresh of that movie or show (Queue window, Library updates) on the players whose box is ticked (the artwork window has the same boxes in its title bar, *Update library in Kodi after artwork download*): Kodi drops its cached copy of the changed pictures and, when the file name changed, points the item at the new file. Kodi then reads the new picture the next time it shows the item; nothing is rescanned or wiped, the .nfo is not read again and the watched state is untouched. Plex, Emby and Jellyfin refresh the item. For pictures changed earlier, select the movies or shows and choose **Update artwork in players…** in the Metadata menu, tick the players and press Start.
+
+**Two different entries in the right-click menu.** *Update player library…* asks Kodi, Emby, Jellyfin or Plex to scan
+the item's folder (you pick the players) and shows up under Library updates in the Queue. *Rescan in Sonarr* (or
+Radarr, Lidarr) only asks that app to rescan; no player is told. After a Sonarr rescan Curator scans the show as
+well, because Sonarr only reports files it adds or removes.
+
+**Every library update says what triggered it.** Rows under Library updates in the Queue, the finished row in Recent
+library updates, and the Kodi alerts for a scan that was sent or is waiting all end with *Triggered by*, for example a
+Radarr webhook and its event, a schedule, the manual update button, a retry, a file job or a bulk cleanup. Requests that
+were folded into one job list each trigger. An update that was running when Curator stopped is run again on start and
+says *Curator restarted while this update was running*. A full scan that Kodi, Emby, Jellyfin or Plex is still running at that
+moment is not sent a second time: Curator waits for it to finish and removes the job.
+
+Curator sends a Kodi one request at a time and waits for each answer before the next, whichever part of Curator sends it (library updates, watched sync, the Kodi report, connection tests), so a large job takes longer but never floods Kodi.
+
 Local artwork is stored during **Folders and files**: poster, fanart, banner, clearlogo, clearart, discart, landscape, keyart, squareart, characterart on shows, season poster, banner, fanart, and landscape, episode thumbs, and images in `extrafanart/` and `extrathumbs/`. At the end of that stage the log lists the `.nfo` files and every artwork type that was stored (`Saved artwork: …`).
 
-In the video artwork window each artwork type has an **Upload** button for an image (up to 25 MB) from your computer. It is saved with the same Kodi file name as a picked candidate and replaces the current file of that type.
+In the video artwork window each artwork type has an **Upload** button for an image (up to 25 MB) from your computer. It is saved with the same Kodi file name as a picked candidate and replaces the current file of that type. The **Extra fanart** section (movies, shows and sets) shows the files in `extrafanart/` as they are on disk when the window opens and offers every fanart candidate, marking **In use** the ones already there (the picture a file was added from, or the same picture at another size); choosing one, or uploading, adds it as the next `fanartN` and replaces nothing. The **Extrathumbs (legacy)** section (movies and shows) works the same way for `extrathumbs/`: it offers the landscape pictures and adds the next `thumbN`. Extra thumbs are legacy (Kodi dropped them and few players read them), so they are off by default under Settings, Movies and TV shows; while they are off the window shows no Extrathumbs section and does not read the files in `extrathumbs/`, which stay on disk. Every card says its size in pixels and its file type, and a file on disk also its file size. The bin on a file deletes exactly that file (into the recycle bin, so it can be restored), here and in the artwork strip of an item. An online picture you never want can be banned with the crossed-circle button next to its details: it is never suggested, never picked by Clean artwork, a scrape or Download missing artwork, and stays in the window greyed out with an Unban button. A ban is kept by the picture's address, so the same shot on another site needs its own ban. When a picture of the open item was replaced and is still kept, **Undo last artwork** in the window's header puts it back, and pressing it again brings the newer one back. Each card has a tick box in its top left corner; while something is ticked, a bar above the cards offers **Download** (every ticked online picture; the first ticked one of a type that holds one file, such as the poster, becomes that file, and the others are saved next to it as `poster1.jpg`, `poster2.jpg`…, which the players ignore and the window lists with a **Use** button to make one the main file; extra fanart and extrathumbs take every ticked picture), **Ban** (the ticked online pictures), **Delete** (the ticked files on disk, into the recycle bin, after one confirmation) and **Clear ticks**.
 
-The movie and TV stepper is **Folders and files**, **Metadata and artwork**, **Trailers**, then **Write .nfo**. Music keeps Directory walk, Changed files, and separate Metadata and Artwork steps.
+The movie and TV stepper is **Folders and files**, **Metadata and artwork**, **Trailers and subtitles**, then **Write .nfo**. Music keeps Directory walk, Changed files, and separate Metadata and Artwork steps.
 
 A matching `<video>.cmm_mediainfo.xml` is used on an incremental or full scan when the file name and size are the same, and the file is not opened again. A deep scan ignores that file and probes the video, then writes the XML again. `<streamdetails>` in an `.nfo` are written from the stored probe. They are not read back.
 
 When **Download missing metadata and artwork during a scan** is on, a movie or show is looked up once. That title's sources are asked together, the metadata is written, and that title's missing images are downloaded before the next title starts. **Limited artwork search** on that same pass downloads a missing poster only. When artwork download is off, the pass still writes metadata and the log says images were skipped. An incremental scan does this for items that are new or changed. A full scan does it for anything still missing. A deep scan looks up every item again. Locked items and locked fields stay as they are. Movie sets stay a separate set scrape. Music still looks up biographies and reviews first, then missing covers.
 
 Trailer download, when that scan option is on, runs during the lookup. Several trailers download at once, up to the scrape concurrency (1 to 12, default 4). A trailer is downloaded when none is on disk, or when the file is below the quality set under General and YouTube has a taller copy. A file that already meets the setting is left alone, and so is a file when YouTube has nothing taller. The new file is still capped at the setting. When the lookup is off, the trailer step runs on its own. An incremental scan does this for items that are new or changed. A full or deep scan does it for every movie, show, or season that already has a trailer link. A title whose YouTube link is saved during the lookup starts its download then.
+
+**Update client libraries after a scan.** Under During a scan on the Movies, TV and Music settings, three switches
+(off by default) make the last step of any scan, incremental, full or deep, refresh the items it changed on your players:
+*Update client libraries for items with updated metadata*, *…updated artwork* and, for Movies and TV, *…updated
+ratings*. An item counts when the scan filled in a missing value, replaced one because overwrite is on, or added the
+item. A folder scan does not make a player read an item it already has again, so Kodi and Plex refresh each changed
+movie, show or episode (Kodi reads the .nfo again), and Emby and Jellyfin get the item folders marked as changed. An
+item a player does not have yet gets a scan of its folder. The refresh shows up in Library updates. For music, Kodi and
+Navidrome already get a library scan after every music scan; Kodi cannot refresh one album's album.nfo or artwork.
+Path rows under Integrations are needed. Try it on one movie in Kodi first: a refresh rebuilds the entry from the .nfo.
 
 **Scan .iso files** is on by default, on the Movies settings under During a scan. A movie scan opens each `.iso` and stores the streams inside. Turn it off to read the disc name only. That read seeks through the disc image, so a scan of Blu-ray and UHD folders takes longer while it is on. A TV scan always reads the disc file name.
 
@@ -195,7 +264,7 @@ Add a TMDB key under Settings, General, API credentials, or set `TMDB_API_KEY` (
 and `TVDB_API_KEY`) in `.env`. Every key there has a **Test** button. Then press **Scrape** in the Movies or TV list, or right-click rows.
 A click or the arrow keys opens an item. The checkbox, Space, and the check at the top of the list select items. The same checks are used for movies, movie sets, shows, seasons, episodes, and albums.
 
-The scrape window keeps its progress bar, status line and **Start scrape** button in a row at the bottom, so the button is in view however many source options are listed above it. Only the options and the log scroll. The button becomes **Stop scrape** while a scrape runs.
+The scrape window keeps its progress bar, status line and **Start scrape** button in a row at the bottom, so the button is in view however many source options are listed above it. Only the options and the log scroll. The button becomes **Stop scrape** while a scrape runs. Each finished scrape saves its log under `config/logs` (`…_<media>_scrape.log`), and **Saved scrapes** in the window opens the list, newest first, with Copy and Export. The newest *scan_log_keep* logs per media are kept.
 
 - TMDB is the default source for TV shows, because a TheTVDB key is a paid subscription. DVD and
   absolute episode order come from TMDB episode groups. When a show has no such group and a
@@ -206,7 +275,7 @@ The scrape window keeps its progress bar, status line and **Start scrape** butto
   Movies and TV settings tabs wins. Ratings and ids from all sources are kept.
 - Trakt (needs the client ID) supplies English movie and TV show details and ratings, with no artwork. A show's seasons and episodes still come from TMDB, TheTVDB, and TVMaze. When TMDB and TheTVDB have no entry for a show, the show's own details come from Trakt and its seasons and episodes keep what is stored.
 - OMDb adds IMDb, Rotten Tomatoes, and Metacritic ratings, and English movie details (plot, release date, runtime, genres, countries, languages, cast, directors, writers) from the same request. TMDB wins where it has a value unless OMDb is first in the order or chosen as the metadata provider. A free key allows 1,000 lookups a day. When OMDb reports that limit, Curator stops asking until the next UTC day. Turn on **OMDb Patron** under the key when the key is a patron key. Curator then keeps asking after that stop.
-- On the Movies tab, **Collapse versions of the same movie into one row** groups copies of the same title. The movie page shows the studio, and the show page shows the network.
+- On the Movies tab, **Collapse versions of the same movie into one row** groups copies of the same title. Ticking a collapsed row selects every version in it (the count and every action include them all); expand the row to tick one version. On the TV tab it does the same for an episode that has a second video file. The movie page shows the studio, and the show page shows the network.
 - Overwrite is two switches for each of Movies, TV, and Movie sets: **Overwrite metadata** and **Overwrite artwork**. On replaces a value when the lookup has one. Off fills a value that is empty. An image is replaced only when the new file is larger. `CMM_OVERWRITE_ALL` turns both switches on until Settings are saved. The scrape dialog has the same two switches for that run, starting from the saved ones. **Rewrite .nfo files this time** starts from the scan's rewrite setting. On replaces the `.nfo` and keeps a `.nfo.bak` when backup is on. Off writes an `.nfo` only when one is missing.
 - `.nfo` files follow Kodi 22: `movie.nfo` or `<video>.nfo`, `tvshow.nfo`, and `season.nfo` in season
   folders. A video that holds one episode uses `<video>.nfo`. A video that holds several episodes
@@ -231,7 +300,12 @@ The scrape window keeps its progress bar, status line and **Start scrape** butto
   file name can list more episodes than the video contains, so check every cut. The source is renamed
   and kept until you delete it. Restore puts that source back and removes the parts.
   Images narrower than the minimum width set for their type are skipped.
-- **Fix Match** searches TMDB or TheTVDB, or takes a pasted id, and rescrapes with that id.
+- **Fix Match** searches TMDB or TheTVDB, or takes a pasted id, and rescrapes with that id. A title, plot or year you
+  had edited by hand on the old match is replaced too (only edition, set, tags, your rating, watched state and episode
+  order keep their locks), and so are locked season names and episode titles of a show. The job's log under Jobs,
+  Recent says what became of the title. For seven days afterwards the
+  movie or show page has **Undo Fix Match**, which puts back the metadata, seasons, episodes, artwork and .nfo files from
+  just before it (artwork and .nfo files the Fix Match added go to the recycle bin; video files are not touched).
 - TheTVDB can supply movie metadata and artwork when it is selected for that movie. The movie's identity stays its TMDB id. A TheTVDB release date from another year is not used as the premiere.
 - **Custom scrapers** on a movie, show, season, episode, or album saves a source order for that item. An empty choice follows the global order. A season or episode does not inherit the show's choice.
 - The padlock locks an item. Scans, scrapes, and edits leave a locked item alone, and locking a show
@@ -244,6 +318,60 @@ The scrape window keeps its progress bar, status line and **Start scrape** butto
   or show in its own folder is deleted with the folder. A movie that shares a folder is deleted with
   its sidecar files (`.nfo`, artwork, subtitles) and nothing else. Seasons and episodes take their
   season artwork and episode sidecars with them. Deleting or removing a copy also rewrites Duplicate, Upgrade, and Not duplicates on the copies that remain. A lone survivor loses all three. Two or more copies that still match each other keep theirs. The open library updates those pills when the delete finishes.
+
+### Provider ids
+
+The info pane for a movie, show or episode ends with a row of every provider id the item has (icon, provider, number, separated by bullets). The Edit window has a **Provider ids** field written like `tmdb=1022, tvdb=2405`. Edited ids are locked, so scrapes keep them.
+
+Season and episode numbers can also be set by hand in the Edit windows. The season window can renumber its episodes at the same time. Numbers set by hand are locked, so a scan keeps them.
+
+### Episode numbers and Sonarr
+
+With Sonarr set up, a TV scan stores each episode under the season and episode number Sonarr gives its file, which can differ from the file name (a file named S04E01 that Sonarr numbers S03E01). The library, the .nfo files and scraping use those numbers. Without Sonarr the file name decides.
+
+### ARR versions and Sonarr 5
+
+**Test connection** for Radarr, Sonarr, Lidarr and Bazarr logs the version the app reports and saves it in
+`config/arr_versions.json`. The version, the API used and the time of the test are shown under the button.
+
+Sonarr 3 and 4 are used through `/api/v3`, as before. When the test finds Sonarr 5 or newer and `/api/v5` answers,
+Curator switches to `/api/v5`; an endpoint that v5 does not have is tried again on `/api/v3`. Sonarr 5 can find a
+show by its TMDB id as well as its TVDB id, so **Look up in Sonarr** and the Sonarr searches are then also offered
+for shows that only have a TMDB id, and **Add show** can add a show Sonarr only knows by its TMDB id (it waits in the
+library as wanted until the files arrive). Below Sonarr 5 they stay greyed out for those shows. Run Test connection again
+after upgrading Sonarr so Curator picks up the new version.
+
+### Where ratings come from
+
+Every score is stored under the name of the service it came from, and **Default rating** on the Movies and TV settings tabs picks the one shown as the main score and written to the `.nfo`.
+
+| Rating | Where it comes from |
+|---|---|
+| TMDB | TMDB, in the movie, show and episode lookup. |
+| IMDb | OMDb, with a key. Or IMDb's own data files, when you turn on **IMDb ratings from IMDb's own data files** (see below). |
+| Rotten Tomatoes and Metacritic | OMDb, with a key. Or the title's page on rottentomatoes.com and metacritic.com, when those two are in the source list. |
+| Trakt | Trakt, with a client ID. |
+| TheTVDB, TVmaze, AniList, OFDb | The service of that name, when it is in the source list. OFDb (ofdb.de) is off by default, as it is mostly German. |
+
+**Open Film Database (ofdb.cc).** A free, open (ODbL) movie and TV database with an API and no key, available as a
+metadata source in the Movies and TV source lists. It is not the German OFDb at ofdb.de and it has no scores. It is
+asked by id only (IMDb, then TMDB, then TheTVDB for shows), never by title, so it cannot attach a wrong title. It fills
+what the sources above it left empty: title, original title, plot, tagline, release date and year, genres, runtime for
+movies, and status and network for shows. Put it last in the list for that. New installs have it last in the source list. An install with a saved list gets it only when you add it under Settings, Movies or TV.
+
+#### IMDb's own data files (optional)
+
+IMDb publishes free data files for personal and non-commercial use at <https://datasets.imdbws.com/>. Under Settings, Integrations, IMDb ratings from IMDb's own data files (General and Schedules link there), the switch **Use IMDb's free datasets for ratings and episode details** lets Curator use three of them: ratings, episodes and basic title facts. Read [IMDb's terms for the datasets](https://developer.imdb.com/non-commercial-datasets) and its [licensing article](https://help.imdb.com/article/imdb/general-information/can-i-use-imdb-data-in-my-software/G5JTRESSHJBBHTGX) first, and turn it on only if you use Curator for personal, non-commercial purposes.
+
+- **Off by default.** While it is off nothing is downloaded, and no lookup uses the data.
+- **Each install downloads for itself**, straight from `datasets.imdbws.com`, with a common Mozilla browser user agent by default. The **User agent** box under the switch replaces it with anything you type, for example the name your own agreement or licence with IMDb asks for. **Use default** clears it. It is a single line of plain ASCII, at most 200 characters. The files are never part of the image or the repository, and Curator has no route that serves them. `.gitignore` and `.dockerignore` keep them out of both.
+- **What stays on disk.** About 290 MB are downloaded into the cache folder, turned into one searchable index of about 270 MB (`<cache>/imdb/imdb.sqlite`), and the downloaded files are deleted right after. Building takes a minute or two. The index only covers what Curator reads: ratings, the id of each episode, and the title, year, runtime and genres of movies and shows. A failed or interrupted build leaves the old index in place. **Remove local copy** deletes it, once the switch is off.
+- **Your own downloads are used first.** Files named `title.ratings.tsv.gz`, `title.episode.tsv.gz` and `title.basics.tsv.gz` in `<data>/imdb` (the `data` folder next to `config` and `cache`) are read for the build when they are newer than the refresh interval, so nothing is downloaded. Curator never changes or deletes them.
+- **Refresh every 30 days** by default (7 to 365). IMDb updates the files daily, but ratings move slowly. Curator checks quietly in the background and downloads again only when the index is older than the interval, or when you press **Refresh now**. A refresh asks IMDb whether it has published anything new first, and the progress shows in the Jobs panel as *IMDb data*. After a failed update Curator waits a day before it tries again by itself.
+- **What it fills in.** A show scrape gives every episode its own IMDb id and score, so OMDb is not asked for each episode. For movies and shows a scrape puts the copy last in the source order: it supplies the IMDb score when OMDb gave none (no key, the daily limit, or an unknown title) and the title, year, runtime and genres that no other source had, and a value from another source is never replaced by it. **Update ratings** is different: it uses the copy first (next point).
+- **Update ratings, on one item or many.** Right-click a movie, show or episode (or a selection of them) and choose **Update ratings** (with the count when several are picked), or press **Update ratings** in the batch footer, which always runs as a job. Either way a window opens first with a tick box for every source: the local IMDb data (when it is built and switched on), TMDB, OMDb, Trakt, Rotten Tomatoes, Metacritic, AniList and OFDb. A **Select / deselect all** box above them ticks or clears every source that can be used. A source that is not set up (no key, switched off, not built) is greyed out with the reason, and your ticks are remembered for next time. Only the ticked sources are asked. The IMDb score comes from the local copy first and replaces the one OMDb has cached; TMDB, Trakt and the Rotten Tomatoes and Metacritic page scrapers (when they are on) are still asked for their own scores, and OMDb for the rest. One item updates on the spot. Several run as one job, shown in the Jobs panel as *Movie ratings*, *TV ratings* or *Episode ratings* with a Stop button, queued behind a running scan. To spare the OMDb daily limit, a batch skips OMDb for an item when the copy has its IMDb score and the item already has its Rotten Tomatoes or Metacritic score; an item that lacks those still asks OMDb. Locked items are skipped. Under the sources the window has an **Only update items where the score stored for a ticked source has…** box with *a rating below N*, *fewer than N votes*, *more than N votes* and *no score yet*, which narrows a big run to the items that most need it (a rating below 1 usually means no or very few votes). Nothing ticked updates every item; ticking several updates an item that meets any of them, checked per ticked source against the score already stored, and only the sources that qualify are asked. A missing score counts as a low rating and as few votes. The job ends with a line such as *28 updated, 26 with the IMDb score from the local data, 2 skipped, 0 failed*, and the lists and the open item reload by themselves. Without the local copy (switch off or not built yet) it works as before, from the online sources only. In a multi-episode file (for example `S02E21E22`) IMDb usually lists only the first episode, so every other episode in the file that has no IMDb score of its own takes the first episode's score and votes, in a scrape and in Update ratings. Trakt answers "429 too many requests" when asked for hundreds of episodes at once; Curator waits that out (following Trakt's Retry-After) instead of failing the items, so a big run with only Trakt ticked is slow. Tick the local IMDb data and leave Trakt out for speed.
+
+Data from IMDb's non-commercial datasets, for personal use only.
 
 ### Movie sets
 
@@ -274,6 +402,8 @@ Every disc of a release keeps the same album tag. A trailing `(CD 1)` or `(Disc 
 On an MKV, the audio and embedded subtitle tables have a **Default** button and a **Language** list with a **Set** button. Default sets the track the player starts with. Language writes the chosen language into the track, for example when it shows as unknown. Both go through mkvpropedit, in place. Changing a language asks you to confirm first. Other containers (MP4 and so on) cannot be changed in place, so the language list is greyed out and the file has to be remuxed to MKV first. Languages are always chosen from a list and never typed. External subtitle language and flags are set in the editor under the Subtitles table, which renames the sidecar. The filter menu for movies and TV shows has **Unknown audio language** and **Unknown subtitle language** to find the files that need this.
 
 **Language** in the header opens Language defaults. Choose whether a language is not the default, is the default, or is present on any track, then pick the language and an optional filename. Scope is the whole library or one movie or TV root. The list shows 1,000 files at a time. Choosing a badge sets the default audio or subtitle for that MKV, and choosing it again clears the choice. **Save all** updates the MKV files on the current page. When you have not picked a subtitle, it prefers a full subtitle, then SDH, then Forced. Files that have not been probed stay out of the list.
+
+**Switch dubbed releases to the original language.** Settings, Files, Original language has *Enable automatic switch of default language to original language*, with a switch for Movies and one for TV show episodes (off by default). A dual-language release often plays the dubbed track first. With the switch on, the default audio of an MKV is set to the original language after a Radarr or Sonarr import and after a library scan finds a new or changed file. The original language from the scrape is used first. When it is unknown, a release or folder name such as `German.DL`, `DL.French`, `Italian.DUBBED` or `DUBBED.Italian` marks the dubbed language and the one other audio language is used; `MULTI` or `DUAL` alone, three or more languages, or tracks without a language leave the file alone. A commentary track is never picked. The default subtitle then follows **Preferred subtitle languages**, five dropdowns in priority order: with 1. English, 2. German, 3. Swedish, a full English subtitle wins, then German, then Swedish. When the audio is itself in one of those languages, only a forced subtitle in that language is chosen, and when nothing matches, no subtitle is the default. Only MKV files are changed, in place with mkvpropedit. A file whose default tracks you set by hand in Curator (a Default button or Language defaults) is skipped until the file is replaced. **Switch to original language…** on the right-click menu of a movie, show, season or episode shows the changes first and then runs as a file job, also on hand-set files. Music has no language tracks, so it has no switch.
 
 Right-click a movie, show, season, or episode:
 
@@ -306,14 +436,15 @@ trailers can download after a Radarr import (Movies tab, On Radarr import) and s
 after a Sonarr import (TV Shows tab, On Sonarr import). A trailer is only downloaded when none is on
 disk or the file is below the quality set under General, Trailer download quality.
 
-**Missing trailer and Missing theme song filters.** The filter menus on Movies and TV shows have **Missing trailer**
-and **Missing theme song**. They list items that have no trailer or theme file in their folder. They are not the same
+**Missing trailer and Missing theme song filters.** The Movies filter menu has **Missing trailer** and
+**Missing theme song**, and the TV shows menu has **Missing theme song** (TV has **No trailer**, not Missing trailer). They list items that have no trailer or theme file in their folder. They are not the same
 as the **No trailer** filter, which lists items with no scraped trailer link and no file. A movie or show is
 checked on disk at the end of every scan, after a trailer or theme song download, after a rename, extras or move
 job, and once at startup for anything not checked yet, so a file placed by hand shows up after the next scan. An item
 whose folder cannot be reached (a mount that is offline) is not flagged, and neither is one that has not been
-checked yet. On TV, Missing trailer also lists a season that has no season trailer; Missing theme song applies to
-shows. Both can be saved in a saved filter, and a scan then tags what they match.
+checked yet. On TV, Missing theme song applies to shows. Both can be saved in a saved filter, and a scan then tags what they match.
+
+**Filter counts on TV shows** are split by kind, for example *12 shows, 340 episodes*, because the list mixes shows, seasons and episodes (only the shows you have opened contribute seasons and episodes). **Unmatched** counts shows only; **No poster** counts shows and seasons.
 
 **Duplicate subtitles:** Normalize subtitles compares the sidecars of each video by SHA-256 of their
 text, ignoring encoding, BOM, line endings, and trailing spaces. Image subtitles are compared byte for
@@ -399,13 +530,42 @@ choose **Tags…** to add or remove tags, or **Fetch keywords from TMDB** to add
 tags. Locked items are skipped. Changed items get `tags` added to their locked fields, so a later
 scrape keeps them, and their `.nfo` is rewritten when Write .nfo on edit is on.
 
+## Filter by clicking a badge
+
+Click a quality badge in the Movies or TV table to filter by it: resolution, HDR, Dolby Vision profile and FEL/MEL,
+codecs, channels, source and 3D. The badge sets that column's filter, the same one the column header opens. Clicking
+**P7** in Main HDR keeps Dolby Vision profile 7, both FEL and MEL. Clicking **FEL** on one of those rows narrows it
+to profile 7 FEL, and clicking **P7** again widens back to all of profile 7. Clicking the badge that matches the
+filter exactly clears it. Badges in different columns combine, for example 4K with Atmos.
+
+The Music table works the same way: Format, Quality, Bits, Sample rate and Bitrate are shown as coloured badges
+(green for lossless), and clicking one filters that column. **FLAC** and then **24-bit** keeps the 24-bit FLAC albums.
+
+**Latest added** keeps what was added in the last 30 days and sorts it newest first, on Movies, TV Shows and Music.
+A show or an artist counts from its newest episode or album. Turning it off puts back the sort you had.
+
 ## Saved filters
 
 The ribbons, column filters and search box on Movies, TV shows, Movie sets and Music can be saved as a named
 filter. **Save filter** stores the view on screen and **Saved** applies or deletes one. A movie or TV filter can
 also carry a tag: a scan then adds that tag to every item the filter matches (the ribbons and column values it
 can read from the database; the search box stays on the view only). Missing trailer and Missing theme song count
-among those ribbons. See Tags above for how tags are written.
+among those ribbons. A full or deep scan checks every movie or show in the scanned folders; an incremental scan only
+the ones it added or read again. A tag is only added, never taken off when an item stops matching. A filter can also be
+written as a Kodi smart playlist (see below). A movie or TV filter can also run an **action** on a schedule: Scrape
+what is missing, Quick integrity check or Download trailers, every day or every week at a chosen hour, for what it matches
+then. It runs as a job in the Jobs panel, and the Saved menu has **Run now**. An action reads the ribbons a scan does plus
+New, Latest added, Not scraped, Scrape failed, No NFO, No poster, No trailer and Ignored (and for movies Upgrade
+available, Duplicate, Probe failed and Corrupt); a filter with nothing the server can read cannot get an action. See Tags above for
+how tags are written.
+
+## Kodi smart playlists
+
+Tick **Kodi smart playlist** when saving a movie or TV filter. Curator writes `Curator - name.xsp` to the playlist
+folder (Settings, Files; default `config/playlists/video`) with a rule that lists the file names the filter matches.
+Saved music filters are written to `playlists/music` as album playlists. The search box of a saved filter narrows a playlist by title. Presets that depend on the page make no playlist. It is rewritten after every scan and when a saved filter is saved or removed. Point Kodi's
+`userdata/playlists/video` at that folder or copy the files there. Only files that start with `Curator - ` are removed
+from it.
 
 ## Analytics and export
 
@@ -417,7 +577,61 @@ this month, this year, or all time. You can narrow it to movies, TV, or one path
 
 **Export** in the toolbar saves the list as shown: the filter, the ribbons, and the path picked in
 the Scan menu all apply. Movies export one row per movie; TV exports one row per episode of the
-shown shows. Every metadata and media-info column is included. Pick CSV or XML on the Files tab.
+shown shows. Movie sets, Music (one row per album) and Music videos export the same way. Every metadata and media-info column is included. Pick CSV or XML on the Files tab.
+
+### Disk space
+
+**Disk space** in Library analytics shows each library folder's drive: free space, what the library holds there, and
+other files. Curator measures each folder once a day, so a growth line for library size and free space fills in over
+time. It also shows the recycle bin's size. In the recycle bin window you can tick several items (or all of them) and restore or delete them together. Settings, General can warn when a drive is under a free space limit and
+delete the oldest recycle bin items on it first. **Could be freed** lists the duplicate, upgrade and extra episode copies, the folders that hold most of them,
+and the biggest copies, with Delete (to the recycle bin).
+
+### Orphan report
+
+**Orphan report** in Library analytics compares Radarr, Sonarr and Lidarr with the library: files an app keeps but does
+not use, library files in an app's folder that the app does not know, and app records whose file is gone. It also walks
+the library folders for stray files nothing lists. Delete uses the library delete (the recycle bin, then a rescan in the
+app). A file that is the only copy of its title is never offered for Delete, because the app not using it does not mean nobody needs it: it gets **Rescan in** the app instead. A missing file gets **Rescan in** the app. When most of an app's files look missing, the report warns that the path
+mappings are probably wrong. **Test connections** asks each app the same questions and says what came back.
+
+**Kodi** at the bottom of the same window compares Kodi's movies and episodes with the library, file by file, through the
+Kodi path rows (Settings, Integrations): entries whose file is gone (**Clean the Kodi video library**), library files
+Kodi has no entry for (**Scan in Kodi**), files Kodi has that Curator does not list, and paths or folders no row covers.
+Nothing changes until you press a button; a library folder that is not mounted is left out. Music is not compared.
+
+### Upgrade wishlist
+
+Set a minimum per library under Settings, Files: resolution and HDR for movies and TV, lossless or 24-bit for music.
+**Upgrade wishlist** in Library analytics lists what falls short, leaving out titles that already have a better copy, and
+**Search** asks the app to look for it.
+
+### Activity history
+
+**History** in Library analytics lists what Curator deleted, restored, renamed, moved or changed, and why. Search it by
+title, path or reason. The newest 20,000 lines are kept. Music renames, remux, split, removing from the library and
+watched-sync changes are recorded too.
+
+### What changed
+
+**Tools, What changed** shows one period at a glance (last 24 hours, 7, 30 or 90 days): what was added (movies,
+episodes, albums, music videos), what was deleted, removed, renamed, moved, restored or found corrupt and why, which
+artwork was replaced, and which jobs failed. Each kind of change is a block you can fold. Activity history has the
+full searchable list.
+
+### Health score
+
+Movies and TV shows carry a score from 0 to 100 beside the title. Six things count the same out of the box: matched,
+scraped, .nfo, poster, fanart, and a file that is not corrupt and could be probed. For a show the .nfo and file checks
+include its episodes. Hover the score to read what to fix. **Needs work** and **Complete** under More filters list the
+items below and at 100. Under Settings, Movies or TV shows, below **Show the health score**, tick what counts: the six
+above plus **Subtitles** and **No other file warnings** (unknown audio language, no audio, shorter than expected),
+which are off until you tick them. Trailers, theme songs, extra artwork types and missing episodes never count.
+
+### Tools menu
+
+The **Tools** button in the header gathers the maintenance windows (duplicates, bulk cleanup, wishlist, history,
+twin shows and twin artists) in one menu instead of buttons scattered over the analytics window.
 
 ## Automation (Radarr, Sonarr, Bazarr, Lidarr)
 
@@ -430,12 +644,29 @@ http://<host>:4455/api/v1/webhooks/arr?apikey=<CMM_API_KEY>
 
 This address is open even when Basic Auth is on, because the key protects it.
 
+**Follow imports** (Tools menu, or the button in the Queue window) shows each item a webhook brings in (Radarr, Sonarr,
+Lidarr and Bazarr), each item restored from the recycle bin, and each library update or Kodi clean started in Curator, as a row of steps:
+the webhook, waiting for more webhooks for that folder, the scan, the scrape, the file jobs (subtitles, trailers,
+language and damage checks), then each player's library update (Kodi, Jellyfin, Emby, Plex or Navidrome). Green is
+done, blue is running, amber is waiting, red failed and grey not reached or not needed. Point at a step for its detail. Under each import's status is its time in all and without the wait for more webhooks.
+A webhook that could not be placed in the library ends at its first step with the reason. The window refreshes itself
+while it is open. A scan the webhook queue starts no longer opens the scan results window or its own notices; the
+window and the one "Webhook queue finished" notice per run cover it. The newest 300 imports are kept. Under Settings,
+Notifications, the event **An import ended with a failed step** sends a message (with the failed step and its reason) to
+the targets that have it ticked; new targets have it on.
+
 - **Radarr and Sonarr:** Settings, Connect, Webhook. Tick On Import, On Upgrade, On Rename, and the
   delete events. Grabs need no scan and are only logged. An import that replaces a file (an upgrade) also asks
   Kodi for a clean once the queue has finished, so the old file's entry does not stay beside the new one.
 - **Bazarr:** Settings, Notifications, add an Apprise `json://<host>:4455/api/v1/webhooks/arr?apikey=...`
   URL. Bazarr's message has no path, so Curator finds the movie or show by its title and year.
-- **Lidarr:** the same URL works. Imports are handed to Resonance's existing Lidarr import.
+- **Lidarr:** the same URL works. Imports are handed to Resonance's existing Lidarr import. A Retag call (Lidarr rewrote
+  the tags of one file) reads that album again, except one Lidarr sends while importing (its file id is still 0),
+  which the album's Download call covers; a file in a disc folder of a box set queues the whole box set under its
+  artist, as one item. Tick the delete events
+  too: an album or artist deleted in Lidarr leaves the library once its folder is gone from disk (the album is found
+  under the artist folder Lidarr names), and the players are asked to clean. Nothing leaves the library while the
+  music folder around it cannot be read. A folder that is still there (Lidarr kept the files) is read again instead.
 
 **+ Movie and + Show.** Next to the sort menu, Movies has **+ Movie** and TV Shows has **+ Show** (Movie sets has **+ Set**,
 which makes a new set). The window searches TMDB (movies) or TMDB and TheTVDB (shows). Pick a result and Curator asks
@@ -464,21 +695,50 @@ a scan, a scrape or a file job is running. Only one runs at a time, and progress
 
 ## Duplicates and upgrades
 
-Movies that are the same release (same source, resolution, and about the same size) get a Duplicate pill. A lower copy of the same movie gets Upgrade available, and the upgrade points at the better file. 3D copies are only compared with other 3D copies. Episodes use the same rules for one show, season, and episode number. Albums are duplicates when they share a MusicBrainz release, or when the artist and title match after edition notes such as `(Remaster)` or `[Deluxe Edition]` are ignored and the audio quality is the same. A subtitle in parentheses stays, so `Weezer (Blue Album)` and `Weezer (Green Album)` are different albums. A better-sounding album is an upgrade, not a duplicate.
+Movies that are the same release (same source, resolution, and about the same size) get a Duplicate pill. A lower copy of the same movie gets Upgrade available, and the upgrade points at the better file. 3D copies are only compared with other 3D copies. Episodes use the same rules for one show, season, and episode number. Albums are duplicates when they share a MusicBrainz release, or when the artist and title match after edition notes such as `(Remaster)` or `[Deluxe Edition]` are ignored and the audio quality is the same. A subtitle in parentheses stays, so `Weezer (Blue Album)` and `Weezer (Green Album)` are different albums. A better-sounding album is an upgrade, not a duplicate. A remix album (MusicBrainz release type Remix, or Remix, Remixes, Remixed or "Mixes" in the title) is never a copy of the studio album. A special release (a Deluxe, Expanded, Anniversary, Special, Limited, Collector's, Extended or box set edition, bonus tracks, or a different number of tracks) has two settings under Settings, Music, both off by default: **Count special releases as duplicates** and **Count a better-sounding special release as an upgrade**. Turn on only the second to have a Deluxe edition offered as an upgrade without marking it a duplicate. Changing either records the marks again at once.
 
-The duplicate and upgrade dialogs list each copy with the Radarr, Sonarr, or Lidarr id of the file that app already has. A copy the app does not have is labeled that way. A lookup that does not finish leaves the copies unlabeled. **Not duplicates** hides that pair. **Undo not duplicates** puts the pills back. That undo lasts until you use it or reload the page. It does not restore a file. Once a copy is deleted from disk, the file is gone. Deleting one side of a Not duplicates pair removes that choice, and the undo button for it goes away.
+Both the duplicate and the album upgrade dialog show the songs of each copy side by side, lined up by AcoustID, fingerprint, title or position, with a missing or differently named song marked. The duplicate and upgrade dialogs list each copy with the Radarr, Sonarr, or Lidarr id of the file that app already has. A copy the app does not have is labeled that way. A lookup that does not finish leaves the copies unlabeled. **Not duplicates** hides that pair. **Undo not duplicates** puts the pills back. That undo lasts until you use it or reload the page. It does not restore a file. A copy deleted from disk goes to the recycle bin, where Restore puts it back. Deleting one side of a Not duplicates pair removes that choice, and the undo button for it goes away.
 
-Deleting a copy that Radarr, Sonarr, or Lidarr is tracking asks that app to rescan when another copy of the title is still in the library, so the app can follow the file that remains.
+Two show folders that hold the same show (a shared TVDB, TMDB, or IMDb id and the same name once a bracketed year or country is left out, or the same title and year without ids) both get a Duplicate pill, even when their episodes are different releases. Shows are not collapsed into one row.
+
+**Bulk duplicate cleanup** (a red button in Library analytics and the Duplicates window) keeps the best copy of each title, and among equal copies the one the app uses. Preview lists what stays, what goes and what is left alone, and untick any title. Nothing is deleted until you press the separate red confirm button. A copy is left alone when the copy to keep is missing, empty or corrupt, or when it is another edition, locked, marked Not duplicates, a file two episodes share, or an album with tracks the kept album lacks. Weaker copies only go when that box is ticked. Files go to the recycle bin when it is on.
+
+The Duplicate pill on a show that another folder also holds opens a window comparing the folders, with Delete, Remove from library and Not duplicates.
+
+Every compare window (albums, movies, episodes, music videos, and show and artist folders) has the same layout: a line that says why the rows are copies, the copies side by side (picture, name, facts, the Radarr/Sonarr/Lidarr line and the path), the bin at the top of a copy for Delete from disk, **Remove from library** under it, and **Not duplicates** at the bottom. Albums show their songs lined up in the middle. A music video's Duplicate or Upgrade available pill opens the same window.
+
+Two artist folders are the same artist when they share a MusicBrainz artist id, or have the same name ignoring capitals and punctuation. Both get a Duplicate pill; clicking it compares the folders (albums, tracks, size) with **Merge…** (the usual artist merge) and **Not duplicates** (with Undo).
+
+Deleting a copy that Radarr, Sonarr, or Lidarr is tracking asks that app to rescan when another copy of the title is still in the library, so the app can follow the file that remains. The duplicate and upgrade windows open from the database alone, reading only the copies of that item, and the Radarr, Sonarr or Lidarr line under each copy is filled in a moment later.
+
+Deleting music from disk, like a movie or episode, asks Kodi and the other players to clean afterwards, and leaves an album alone while a batch or lookup job is writing it.
 
 ## Music
+
+To fetch only lyrics, right-click the albums or artists and choose **Search and download lyrics**. It runs as a background job (see Jobs), skips tracks that already have lyrics and changes nothing else. When it ends, a notice says how many lyrics were saved, how many tracks LRCLIB has none for, how many albums already had lyrics and what failed; the Jobs panel lists each album.
 
 A music scan reads tags, then looks up MusicBrainz, then fills missing biographies and reviews, then missing covers. Artwork uses Kodi names. One-disc albums keep `discart.png`. A multi-disc album also saves `discart1.png`, `discart2.png`, and so on. The Scrape music found by a webhook scan switch (Music tab and Automation) includes Lidarr import webhooks in that scan. Saving settings stores the choice, and the saved choice overrides compose.
 
 **Prune safety.** A scan removes items whose files are gone, with limits: a mount that would lose more than 20 % of its indexed items across all its library paths, a single path that would lose more than 20 %, or a readable path that came back empty is left alone. The limits can be turned off in Settings, General, Prune safety (a readable path with nothing in it is still always left alone). Items kept this way are marked **Not found** (albums, movies and shows). Filter on it (music: the filter menu; movies and TV: the quick filter) and use the normal remove action, or the **Remove all not found** button under the library list, to drop them from the database. The mark clears when a later scan finds the item again. Items under a path that is no longer listed in Settings for that media type are removed at the end of a full scan. No file is ever touched.
 
-Right-click an artist or an album for the music jobs: match, rename, write tags, write `album.nfo`, artwork, lyrics, ReplayGain, gap check, cue split, duplicate scan, and upgrade. An album page shows the label and catalog number when they are known. A leading The, A, or An is left out of the artist sort unless that option is turned off. Move an artist the same way as a movie: the folder is copied, artist, album, track, and artwork paths are rewritten, and the original is removed after the sizes match.
+Right-click an artist or an album for the music jobs: match, rename, write tags, write `album.nfo`, artwork, lyrics, ReplayGain, gap check, cue split, duplicate scan, and upgrade. Applying matches, treating as compilations, ReplayGain, Audit audio, Check missing tracks and Find metadata for several artists run as one **Album batch** job in the Jobs panel, with progress, a log line per album and a Stop button; an album that fails is logged and the rest go on, and the list refreshes the touched artists when it ends. An album page shows the label and catalog number when they are known. A leading The, A, or An is left out of the artist sort unless that option is turned off. Move an artist the same way as a movie: the folder is copied, artist, album, track, and artwork paths are rewritten, and the original is removed after the sizes match.
 
 The synced-lyrics editor (pencil in the player bar) has Shift all (±100 ms, ±1 s or a typed amount), anchors set at the playhead with a Linear, Piecewise or Steps fit previewed while the song plays, Undo, text editing (Enter), Find, *Restore previous save* (the replaced file is kept as `.lrc.sync-backup`) and *Sync OK*, which saves and marks the lyrics Synced.
+
+**The music list is a table.** A title bar sits over the artists and albums, with a master box that ticks every album on screen
+(a dash means some are ticked). Click a column name to sort: the albums inside each artist are sorted, and the artists follow
+their best album (the lowest value when the order rises, the highest when it falls), with rows that have no value always last.
+The arrow beside a name filters on that column; tick one or more values (several in one column are "any of", different columns
+are "all of"). Filtered columns are marked, and Clear filters clears them too. Drag a column edge to resize it, drag a name to
+move it, and use **Columns** (above the list) to choose what shows. The columns are: Status (the pills that used to sit at the
+end of the row), Year, Type, Edition, Tracks, Length, **Format**, **Quality** (for example `FLAC 24/96` or `MP3 320`; it sorts by
+the same rank that decides Upgrade available), **Bits**, **Sample rate**, **Bitrate**, Match, Country, Label, Catalog no.,
+Release status, Added, Modified, Processed, Cover, NFO and Path. The audio columns come from the tracks: the weakest track gives the
+bit depth and sample rate, the bitrate is the average, and an album with several formats shows them all (`FLAC/MP3`) and is
+found under each one in the filter. An artist row shows totals where they mean something (tracks, length, formats, dates).
+Albums scanned before these columns existed are filled in a little after start, with no rescan, and any album still blank when the list
+loads is filled right then, so the audio columns are never empty. Added, Processed and Edition
+still follow their switches under Settings, UI Elements. In the poster grid there is no title bar.
 
 Column choices, column order and widths, pane widths, sorting, density and theme are saved in `ui_state.json` in the config folder, so they survive a rebuild and are the same in every browser.
 
@@ -491,8 +751,12 @@ default 20), but the queue is never held back longer than the max postpone time
 (`CMM_MAX_POSTPONE_MINUTES`, default 120). Both can be changed on the Automation tab. Then Curator scans
 only the affected folders, scrapes the new items when that is turned on, and tells the media
 servers. If a music, movie, or TV library scan is already running when that wait ends, the scan pauses at its next checkpoint, the import batch runs, and then the scan continues. The scan shows "Paused for queued imports". A Radarr, Sonarr, Bazarr, or Lidarr search does not wait for a library scan. A Lidarr search waits only for another Lidarr search, and that wait is listed under Jobs. The queue pill in the header shows a live countdown (e.g. `45s` or `2m`) when items are queued and not yet running. Click it to see the waiting items and recent
-events, or to flush or clear the queue. The queue is kept in the database, so a restart does not
-lose it.
+events, or to flush or clear the queue. While a batch runs, the Queue window and the Jobs drawer show how far it is
+(`3/12`, "3 of 12 done, this stage 4 of 30 read, 5 more waiting"); albums count one by one, movie and show folders once
+their library folder's scan, scrape and file jobs are done. The queue is kept in the database, so a restart does not
+lose it. The lists keep your place: a redraw puts the row at the top of your view back where it was, so new calls do not push what you are reading away (at the top of the list they appear as before). **Recent webhooks** keeps each call as it arrived: **Show call** opens the JSON body the app sent, with Copy,
+which helps when a call is ignored or not recognised. Calls without a movie, series or artist block (Lidarr's
+DownloadFailure and ImportFailure, Health and ApplicationUpdate) are named after the app that sent them.
 
 ### Split episodes
 
@@ -513,7 +777,7 @@ On the Integrations tab:
 - **Kodi library updates** go to one Kodi (or a shared-database master), set with
   `KODI_LIBRARY_HOST` or `KODI_HOST`. Video and music have their own wait timers (default 60 and
   300 seconds), and each new change restarts its timer. That wait is separate from the webhook
-  debounce. After deletes and upgrades, Curator can also run a library clean.
+  debounce. After deletes, upgrades and renames, Curator can also run a library clean (Kodi video). It runs once after the queue is empty, also after Curator itself deletes items from disk, removes a replaced original (Profile 8 remux), deletes a split source, moves a folder, or finds files gone in a scan. A clean Kodi refuses is tried once more and then shows as failed in the activity log.
 
 #### Kodi path mappings
 
@@ -546,7 +810,7 @@ If any folder in a batch has no matching row, that update scans Kodi's whole vid
 A Curator library folder that is not inside any Kodi source, such as a folder Kodi was never given, still cannot be scanned on its own. Leave the Kodi path as Kodi wrote it, including spaces. Curator adds the trailing slash Kodi expects.
 
 - **Kodi notifications** show an on-screen message on `KODI_HOST`.
-- **Emby** (`EMBY_URL`, `EMBY_API_KEY`), **Jellyfin** (`JELLYFIN_URL`, `JELLYFIN_API_KEY`), **Plex** (`PLEX_URL`, `PLEX_TOKEN`), and **Navidrome** refresh from Settings, Integrations. Emby, Plex, and Navidrome each have an **Enable** switch. Off keeps the saved library choices and stops library updates. Emby also stops on-screen messages. The webhook queue hands the folders to a library-update queue and does not wait. Each player has its own worker, so a hung scan does not hold the others. With no path row, each player gets one full scan per media type (Kodi uses one video scan for movies and TV). With path rows, only the changed folders are scanned. One folder in the batch with no matching row makes that player's update a full scan. **Send library update** on a movie or show queues the chosen players for that title. The running queue and Recent library updates name the movie or show, with the folder under the title. A music update with no folder list says that no folder was included. The job leaves the queue when that player reports the scan finished.
+- **Emby** (`EMBY_URL`, `EMBY_API_KEY`), **Jellyfin** (`JELLYFIN_URL`, `JELLYFIN_API_KEY`), **Plex** (`PLEX_URL`, `PLEX_TOKEN`), and **Navidrome** refresh from Settings, Integrations. Emby, Plex, and Navidrome each have an **Enable** switch. Off keeps the saved library choices and stops library updates. Emby also stops on-screen messages. The webhook queue hands the folders to a library-update queue and does not wait. Each player has its own worker, so a hung scan does not hold the others. With no path row, each player gets one full scan per media type (Kodi uses one video scan for movies and TV). With path rows, only the changed folders are scanned. One folder in the batch with no matching row makes that player's update a full scan. **Send library update** on a movie or show queues the chosen players for that title. For Kodi it also removes that title's entries whose file is gone (an old copy after an upgrade or rename), but only when the library folder that should hold the file is mounted and readable. While Kodi works through a job of several folders, the Library updates banner and the running row say which folder it is on, how many are done and how long the current one has taken, the tab's pill counts the folders still to do, and Recent webhooks gets a row for each finished folder with its time. The running queue and Recent library updates name the movie or show, with the folder under the title, followed by the same colored quality badges as the info panel: resolution, HDR, source, codecs, audio channels, bit depth and container for a movie or episode, and format, bit depth, sample rate and bitrate for an album. An item that has not been probed, or a whole artist or show, has no badges. A music update with no folder list says that no folder was included. The job leaves the queue when that player reports the scan finished.
 
 Each target has a **Test** button. A failed call to Trakt, Radarr, Sonarr, Lidarr, Bazarr, Kodi, Emby, Jellyfin, Plex, Navidrome, TMDB, TheTVDB, OMDb, Fanart.tv, Last.fm, MusicBrainz, or another mapped host raises an alert and shows **Connection error** under that integration in Settings. The same message is kept until it changes. A later successful call clears it.
 
@@ -557,6 +821,26 @@ The **Sync** tab in Settings consolidates all scheduled and external-sync settin
 - **Library scan schedules** for music, movies, and TV are moved here from the General tab.
 - **Trakt** connection and sync options (previously under Integrations) are here.
 - **Player clean schedules** let you run a Kodi library clean (or a full refresh scan for Emby, Jellyfin, or Plex) on a cron schedule, per media type. Pick the player, the media (video or music), set a cron expression, and save. Each entry fires in a background thread that wakes every 15 seconds; a gap longer than two hours is recovered by checking the missed minutes.
+
+### Player watched sync
+
+**Player watched sync** copies play counts, last-played times and resume points between the library and Kodi,
+Jellyfin, Emby and Plex. Items are matched by file path through each player's path rows. The higher play count and
+the later time win, so nothing is marked unwatched (unless Spread unwatching is on, below); a resume point one side
+lacks is copied over. Plex is marked watched or unwatched and given a resume point, but keeps no play count above one. Jellyfin and Emby use the user named here, or the first administrator.
+**Put the watched state back after Curator refreshes an item in Kodi** restores play count, last played and resume
+point when a Kodi refresh drops them.
+
+Three options widen it. **Spread unwatching** (off by default) remembers what each player said at the last sync, so
+marking something unwatched in a player (or in Curator) is copied to the other side instead of being undone; with it
+off the higher count still wins. **Music play counts** adds tracks (Kodi, Jellyfin, Emby and Plex; Navidrome has no
+play-count sync). **Users** takes several names for Jellyfin and Emby, one pass per user. Plex stays single-user.
+
+### Collections
+
+Movie sets with two or more movies and saved filters with a tag can be pushed to Jellyfin, Emby and Plex as
+collections, now or after every scan. Curator keeps the members of the collections it made (or found by name) in step
+and leaves other collections alone.
 
 ## Trakt
 
@@ -586,6 +870,19 @@ A free Trakt account can have two connected apps. If Curator is already listed, 
 
 **Sync watched history** with **Sync now** beside Connect, or the Trakt button beside Queue in the Jobs popup. The same sync also runs every few hours. It matches movies by TMDB or IMDb id, and episodes by show id with season and episode number. Both sides keep the higher play count and the later last-played time, and nothing is ever marked unwatched. Pull only, push only, or both ways can be picked. Changed items get `<playcount>` and `<lastplayed>` written to their `.nfo` when .nfo writing is on; locked items keep their files.
 
+## Recycle bin
+
+Delete from disk moves what it deletes (movies, episodes, sets, albums, artists, extra episode copies, replaced
+tracks, duplicate subtitles) into a hidden `.curator-trash` folder at the top of the library folder it was in. That
+keeps it on the same drive, so a large file moves at once instead of being copied. **Settings, General, Recycle bin**
+turns it on or off (on by default) and sets how long items are kept (30 days by default, up to 365). **Open recycle
+bin** lists every item with its original path, size, the day it was deleted and the day it goes for good.
+**Restore** puts an item back where it was (not when something else is there now) and scans it back into the library. **Delete now** and **Empty recycle bin** delete for good. Expired items are deleted
+at startup, every 6 hours and when the bin is opened.
+
+Scans skip the bin, and marker files (`.nomedia`, `.ignore`, `.plexignore`) keep Kodi, Jellyfin, Emby and Plex out of
+it. When the bin is off, or a file sits outside every library folder, Delete from disk deletes at once.
+
 ## Backup and restore
 
 Settings, Backup lists the `.dump` files in the backup folder. **Restore…** warns that the current
@@ -604,14 +901,23 @@ kept (each is about the size of the database). It is off by default and appears 
 
 Settings → Notifications → "Send notifications to other apps" sends Curator's events to Discord, Slack, Telegram,
 Pushover, ntfy, Gotify, an Apprise API server or any webhook. Events: scan finished or failed, import processed,
-job failed, backup finished or failed, and OpenSubtitles quota nearly used. A generic webhook receives JSON with
+job failed, a scrape that failed or could not scrape some items (the first five named; a scrape a webhook import started is reported as the import instead), backup finished or failed, a corrupt file, a drive low on space, an import with a failed step, and OpenSubtitles quota nearly used. Scan finished and failed cover music, movies, TV and music videos. A generic webhook receives JSON with
 `app`, `event`, `title`, `message`, `level` and `time`. Use Send test on a target to check it.
+
+**Added to the library** is a daily or weekly list of what came in: the movies, the episodes grouped per show, the
+albums and the music videos added since the last message (up to 15 names per kind). Set how often and at which hour
+under the targets (never by default), and tick the event on the targets that should get it. **Preview** shows the
+message as it would go out now; **Send now** sends it at once. When nothing was added, nothing is sent.
 
 ## Poster grid
 
 The grid button switches a library between list and poster grid. In grid mode the S / M / L buttons set the card
 size (the choice is kept in the browser). Only the visible cards are drawn, so large libraries stay fast.
 Cards in the Movies, TV Shows and Movie sets grids are sized by their poster (2:3), so the number of columns follows the window width and the card size.
+Tick the box in a card's corner to select it. With one or more cards ticked, the batch footer slides up with the same
+buttons as the list view. The footer stays one row tall: Scrape, Rescan, Clear and a red bin are always in the row (the bin opens the same window as **Remove…**, where you choose between removing from the library and deleting from disk), and the rest sit in three menus, **Metadata** (edit, update ratings, artwork, .nfo, rename), **Media** (subtitles, trailers, thumbnails, theme songs, split episodes) and **Organize** (lock, processed, move). It slides over the status pane as far as the Scan engine button. On TV Shows the footer also lists what is ticked (shows, seasons, episodes) with a box for each kind: untick a kind and the buttons leave it alone, and the count reads *in scope / ticked*, for example *40 / 260 items*. Artwork then runs per kind, so artwork for seasons only does not touch the shows or episodes. **All** and **None** in the toolbar tick or clear
+every card. In the list view, the box in the title bar ticks every row on screen. On TV Shows the seasons and episodes of
+the ticked shows are ticked too, from one request to the server, so it is quick even for a large library. With a filter on (for example *No IMDb rating*) only the episodes that match the filter and are on disk are ticked, and only the seasons that hold one. Ticking the box again, or **All** / **None**, undoes it.
 
 ## Poster badges and artwork
 
@@ -628,9 +934,30 @@ Besides "Probe failed", files that read fine but look wrong get a warning pill i
 no video stream, no audio, only unknown-language audio, or a length under half the listed runtime. Use the
 "Health warnings" ribbon on Movies and TV to list them. Disc images are not checked.
 
+**Check integrity** (right-click, or the Media menu of the selection) decodes the first and last minute of each file
+with ffmpeg; **Full integrity check** decodes the whole file. A decode error gives the file a red **Corrupt** pill and
+puts it under the **Corrupt** filter. Replacing the file clears the result. Settings, Files can also run a quick check after each import (with a notification, and optionally a new search in the app) and a full check of some files each day.
+
+For music, **Audit audio** (right-click albums) tests each FLAC file against its stored checksum and decodes other formats with ffmpeg. An album with a track that fails gets a red **Corrupt** pill and is listed under **Corrupt files** in the music filter menu; the track shows Corrupt in the album. A newly found corrupt file is recorded in Activity history and sends the *corrupt file* notification. Replacing the file clears its result.
+
+## Music videos
+
+Give a folder the media type **Music videos** under Settings, General. The **Music videos** tab (beside Movies, TV and Music) lists them: **Scan** reads new and changed files, **Full scan** reads every file. Artist, title, album and year
+come from a Kodi `<musicvideo>` .nfo beside the file, else from the file name (`Artist - Title (Year)`, or the parent
+folder as the artist). Each file is probed for the same quality badges as movies, a missing .nfo is written, and Kodi
+gets a video library update. **Edit** changes the fields and rewrites the .nfo, and takes a picture from the video. **Remove or delete…** offers Remove from library (the file stays, and the next scan adds it back) or Delete from disk, which takes the video with its .nfo and pictures to the recycle bin under the same guards as a movie (the Music videos folder mounted and writable); Restore brings them back together. **Look up blanks** fills a blank album, genre or plot from TheAudioDB. Watched sync covers music videos in Kodi, Jellyfin and Emby. Music videos are a library tab beside Movies and TV, with filters, Duplicate and Upgrade available pills (the movie rules: the same release is a duplicate, a weaker copy of the same artist and title gets Upgrade), a Corrupt pill, **Quick integrity check** and **Full integrity check** (the same damage check as movies), and the bulk duplicate cleanup and recycle bin cover them. Kodi needs that folder as a source with the content type Music videos.
+
+
+**+ Add from YouTube** searches YouTube, lets you pick a result, and downloads it as `Artist - Title (Year)`. The button is
+off until a Music videos folder is set. The artist guessed from the video's title is linked to an artist you already have
+(the Artist box suggests them as you type), and the form says which folder the file will be saved in before you
+download. Settings, General, **Music videos from YouTube** sets the folder rule: the artist's folder, made when it is
+missing; the artist's folder only when it exists; or the top of the Music videos folder. An artist's folder is found
+whatever its spelling. The `.nfo` is a Kodi `<musicvideo>` file beside the video, with the same name.
+
 ## Keyboard and small screens
 
-Ctrl+K opens the command palette, `?` the shortcuts sheet, `/` focuses the filter, Alt+1 to Alt+4 switch library,
+Ctrl+K opens the command palette, `?` the shortcuts sheet, `/` focuses the filter, Alt+1 to Alt+5 switch library (Music, Movies, Movie sets, TV shows, Music videos),
 Ctrl+A selects all visible rows and Esc closes the top window. Below 800 px wide the Music view shows one pane at a
 time, chosen with the Library, Albums and Details tabs.
 
