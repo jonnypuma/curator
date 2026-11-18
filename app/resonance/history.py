@@ -27,6 +27,11 @@ def why(reason):
         _why.reset(token)
 
 
+def current_reason():
+    """The reason named by why() around the running work, or ''."""
+    return _why.get()
+
+
 def record(action, title="", kind="", path="", detail=""):
     """Add one line. detail says what happened; the reason set by why() says what asked for it."""
     from resonance import db

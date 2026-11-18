@@ -568,13 +568,17 @@
         </div>
     </div>
     <div id="trash-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="trash-title">
-        <div class="modal-content">
+        <div class="modal-content modal-wide">
             <div class="modal-header">
                 <h2 id="trash-title">Recycle bin</h2>
                 <button type="button" class="btn-ghost" data-close="trash-modal">Close</button>
             </div>
             <div class="modal-body">
                 <p id="trash-summary" class="muted"></p>
+                <div class="job-actions">
+                    <input id="trash-search" type="search" placeholder="Search names, paths and reasons" autocomplete="off" aria-label="Search the recycle bin">
+                    <select id="trash-kind" aria-label="Type"><option value="">All types</option></select>
+                </div>
                 <div class="job-actions">
                     <button type="button" class="btn-ghost" id="trash-pick-all" data-action="trash-pick-all">Select all</button>
                     <button type="button" class="btn-ghost" id="trash-restore-picked" data-action="trash-restore-picked" disabled>Restore selected</button>

@@ -1015,7 +1015,7 @@ def shared_folder_block(target, others):
     return ""
 
 
-def discard(album_id):
+def discard(album_id, reason=""):
     """Delete one album folder (into the recycle bin when it is on) and drop it from the index."""
     album = db.fetchone(
         """
@@ -1047,7 +1047,7 @@ def discard(album_id):
 
     if os.path.isdir(real_path) or os.path.isfile(real_path):
         label = " \u2014 ".join(part for part in (album.get("artist_name"), album.get("title")) if part)
-        trash.discard(real_path, label=label, kind="album")
+        trash.discard(real_path, label=label, kind="album", reason=reason or "Album deleted from disk")
     db.execute("DELETE FROM albums WHERE id = %s", (album_id,))
     peers = refresh_album_peers(album)
     _rescan_lidarr_after_discard(album)
@@ -1376,7 +1376,7 @@ def _drop_source_copy(source, album):
     if not source_path or not album_path or paths_overlap(source_path, album_path):
         return None, "The other copy shares this album folder, so it is still in the library."
     try:
-        return discard(source["id"]), ""
+        return discard(source["id"], "The other copy of an album, removed after its better files were taken (upgrade)"), ""
     except AppError as exc:
         return None, str(exc)
 
@@ -1397,7 +1397,7 @@ def _retire(path, album, root, purge):
     if purge:
         from resonance import trash
 
-        trash.discard(path, kind="track")
+        trash.discard(path, kind="track", reason="Track replaced by a better copy (upgrade)")
         return
     folder = os.path.join(root, "_archive", _safe(album.get("artist_name")), _safe(album.get("title")))
     os.makedirs(folder, exist_ok=True)

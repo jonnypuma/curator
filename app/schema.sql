@@ -1098,3 +1098,6 @@ CREATE TABLE IF NOT EXISTS art_bans (
     art_kind VARCHAR(20) NOT NULL DEFAULT '',
     created_at TIMESTAMP NOT NULL DEFAULT LOCALTIMESTAMP
 );
+
+-- Why an item went to the recycle bin (the job or the action that deleted it), shown in the recycle bin window.
+ALTER TABLE trash_items ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT '';

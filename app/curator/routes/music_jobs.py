@@ -192,7 +192,7 @@ async def delete_album_files(album_id: str):
 
     def work():
         library.require_uuid(album_id)
-        return cleaned(upgrade.discard(album_id))
+        return cleaned(upgrade.discard(album_id, "Album copy deleted by hand (Delete this copy)"))
 
     return await run(work)
 

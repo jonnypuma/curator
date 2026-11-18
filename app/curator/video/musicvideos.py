@@ -405,8 +405,8 @@ def delete(ids):
             stem = os.path.splitext(row["path"])[0]
             for path in [stem + ".nfo", stem + ".cmm_mediainfo.xml", *(stem + suffix for suffix in THUMB_SUFFIXES)]:
                 if os.path.isfile(path):
-                    trash.discard(path, kind="musicvideo")
-            trash.discard(row["path"], label=f"{row['artist']} — {row['title']}", kind="musicvideo")
+                    trash.discard(path, kind="musicvideo", reason="Music video deleted by hand")
+            trash.discard(row["path"], label=f"{row['artist']} — {row['title']}", kind="musicvideo", reason="Music video deleted by hand")
             db.execute("DELETE FROM music_videos WHERE id = %s", (item_id,))
             deleted.append(row["title"])
             folders_changed.add(os.path.dirname(row["path"]))

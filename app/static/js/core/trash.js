@@ -20,6 +20,50 @@ function trashItems() {
     return (state.trash && state.trash.items) || [];
 }
 
+// What the search box, the type choice and the clicked column heading leave, in that order.
+const TRASH_KINDS = { video: "Video", episode: "Episode", set: "Movie set", musicvideo: "Music video", album: "Album",
+    artist: "Artist", track: "Track", artwork: "Artwork", subtitle: "Subtitle", orphan: "Orphan file" };
+const TRASH_SORTS = {
+    item: (item) => String(item.label || "").toLowerCase(),
+    kind: (item) => String(TRASH_KINDS[item.kind] || item.kind || "").toLowerCase(),
+    reason: (item) => String(item.reason || "").toLowerCase(),
+    deleted: (item) => String(item.deleted_at || ""),
+    size: (item) => Number(item.size_bytes) || 0,
+};
+
+function trashView() {
+    if (!state.trashView) state.trashView = { search: "", kind: "", sort: "deleted", down: true };
+    return state.trashView;
+}
+
+function trashShown() {
+    const view = trashView();
+    const words = view.search.toLowerCase().split(/\s+/).filter(Boolean);
+    const rows = trashItems().filter((item) => {
+        if (view.kind && (item.kind || "") !== view.kind) return false;
+        const text = `${item.label || ""} ${item.original_path || ""} ${item.reason || ""} ${TRASH_KINDS[item.kind] || item.kind || ""}`.toLowerCase();
+        return words.every((word) => text.includes(word));
+    });
+    const key = TRASH_SORTS[view.sort] || TRASH_SORTS.deleted;
+    const way = view.down ? -1 : 1;
+    return rows.map((item, index) => [key(item), index, item])
+        .sort((a, b) => (a[0] < b[0] ? -way : a[0] > b[0] ? way : a[1] - b[1]))
+        .map((entry) => entry[2]);
+}
+
+function trashHeading(key, label) {
+    const view = trashView();
+    const mark = view.sort === key ? (view.down ? " ▼" : " ▲") : "";
+    return `<th><button type="button" class="link trash-sort" data-action="trash-sort" data-sort="${key}" title="Sort by ${escapeHtml(label.toLowerCase())}">${escapeHtml(label)}${mark}</button></th>`;
+}
+
+function sortTrash(key) {
+    const view = trashView();
+    if (view.sort === key) view.down = !view.down;
+    else Object.assign(view, { sort: key, down: key === "size" || key === "deleted" });
+    renderTrash();
+}
+
 function trashPicked() {
     if (!state.trashPicked) state.trashPicked = new Set();
     const known = new Set(trashItems().map((item) => item.id));
@@ -43,9 +87,22 @@ function renderTrash() {
     }
     const empty = document.getElementById("trash-empty");
     if (empty) empty.disabled = !items.length;
-    host.innerHTML = items.length
-        ? `<div class="trash-scroll"><table class="queue-table trash-table"><thead><tr><th class="queue-fit"><input type="checkbox" id="trash-tick-all" aria-label="Select all" title="Select or deselect all"></th><th>Item</th><th>Deleted</th><th>Gone for good</th><th>Size</th><th></th></tr></thead><tbody>${items.map(trashRow).join("")}</tbody></table></div>`
-        : `<p class="muted">The recycle bin is empty.</p>`;
+    const shown = trashShown();
+    if (summary && items.length && shown.length !== items.length) {
+        const part = shown.reduce((total, item) => total + (Number(item.size_bytes) || 0), 0);
+        summary.textContent += ` Showing ${shown.length} of ${items.length} (${fmtSize(part) || "0 MB"}).`;
+    }
+    const kinds = document.getElementById("trash-kind");
+    if (kinds) {
+        const found = [...new Set(items.map((item) => item.kind || ""))].filter(Boolean).sort();
+        const chosen = trashView().kind;
+        kinds.innerHTML = `<option value="">All types</option>${found.map((kind) => `<option value="${escapeHtml(kind)}" ${kind === chosen ? "selected" : ""}>${escapeHtml(TRASH_KINDS[kind] || kind)}</option>`).join("")}`;
+    }
+    host.innerHTML = !items.length
+        ? `<p class="muted">The recycle bin is empty.</p>`
+        : !shown.length
+            ? `<p class="muted">Nothing in the recycle bin matches the search and the type.</p>`
+            : `<div class="trash-scroll"><table class="queue-table trash-table"><thead><tr><th class="queue-fit"><input type="checkbox" id="trash-tick-all" aria-label="Select all" title="Select or deselect all that are shown"></th>${trashHeading("item", "Item")}${trashHeading("kind", "Type")}${trashHeading("reason", "Why")}${trashHeading("deleted", "Deleted")}<th>Gone for good</th>${trashHeading("size", "Size")}<th></th></tr></thead><tbody>${shown.map(trashRow).join("")}</tbody></table></div>`;
     const scroll = host.querySelector(".trash-scroll");
     if (scroll) scroll.scrollTop = keep;
     paintTrashPicked();
@@ -53,11 +110,14 @@ function renderTrash() {
 
 function trashRow(item) {
     const missing = item.present === false ? `<br><small class="muted">No longer in the bin folder</small>` : "";
-    const kind = item.kind ? `<small class="muted">${escapeHtml(item.kind)}${item.is_dir ? " folder" : ""}</small> ` : "";
+    const type = `${TRASH_KINDS[item.kind] || item.kind || ""}${item.is_dir ? " folder" : ""}`;
+    const why = item.reason ? escapeHtml(item.reason) : `<span class="muted" title="Deleted before Curator kept the reason with the item, and Activity history has none for it.">Not recorded</span>`;
     const on = trashPicked().has(item.id);
     return `<tr data-trash-id="${escapeHtml(item.id)}"${on ? ` class="is-picked"` : ""}>
         <td class="queue-fit"><input type="checkbox" class="trash-tick" data-id="${escapeHtml(item.id)}" aria-label="Select ${escapeHtml(item.label || "item")}" ${on ? "checked" : ""}></td>
-        <td>${kind}<strong>${escapeHtml(item.label || "")}</strong><br><small class="mono muted">${escapeHtml(item.original_path || "")}</small>${missing}</td>
+        <td><strong>${escapeHtml(item.label || "")}</strong><br><small class="mono muted">${escapeHtml(item.original_path || "")}</small>${missing}</td>
+        <td class="queue-fit">${escapeHtml(type)}</td>
+        <td class="trash-why">${why}</td>
         <td class="queue-fit">${escapeHtml(fmtDate(item.deleted_at))}</td>
         <td class="queue-fit">${escapeHtml(fmtDate(item.expires_at))}</td>
         <td class="queue-fit">${escapeHtml(fmtSize(item.size_bytes))}</td>
@@ -71,8 +131,10 @@ function trashRow(item) {
 // The buttons that work on the ticked rows, their count, and the master box. Touches no row, so ticking is instant.
 function paintTrashPicked() {
     const picked = trashPicked();
-    const total = trashItems().length;
+    const shownIds = trashShown().map((item) => item.id);
+    const total = shownIds.length;
     const count = picked.size;
+    const shownPicked = shownIds.filter((id) => picked.has(id)).length;
     const blob = count ? ` <span class="album-count trash-count">${count}</span>` : "";
     const remove = document.getElementById("trash-delete-picked");
     if (remove) {
@@ -87,20 +149,21 @@ function paintTrashPicked() {
     const toggle = document.getElementById("trash-pick-all");
     if (toggle) {
         toggle.disabled = !total;
-        toggle.textContent = total && count === total ? "Deselect all" : "Select all";
+        toggle.textContent = total && shownPicked === total ? "Deselect all" : "Select all";
     }
     const master = document.getElementById("trash-tick-all");
     if (master) {
-        master.checked = total > 0 && count === total;
-        master.indeterminate = count > 0 && count < total;
+        master.checked = total > 0 && shownPicked === total;
+        master.indeterminate = shownPicked > 0 && shownPicked < total;
     }
 }
 
 function pickAllTrash(on) {
     const picked = trashPicked();
-    const all = on === undefined ? picked.size !== trashItems().length : !!on;
-    picked.clear();
-    if (all) trashItems().forEach((item) => picked.add(item.id));
+    const shown = trashShown();
+    const all = on === undefined ? !shown.every((item) => picked.has(item.id)) : !!on;
+    // Only the rows the search and type leave: what is hidden keeps its tick or its blank.
+    shown.forEach((item) => (all ? picked.add(item.id) : picked.delete(item.id)));
     document.querySelectorAll("#trash-list .trash-tick").forEach((box) => {
         box.checked = all;
         const row = box.closest("tr");
@@ -172,6 +235,7 @@ function onTrashAction(name, action) {
     if (name === "trash-restore") return runAction(() => restoreTrash([action.dataset.id]), "Restoring…");
     if (name === "trash-delete") return deleteTrashAsk([action.dataset.id]);
     if (name === "trash-pick-all") return pickAllTrash();
+    if (name === "trash-sort") return sortTrash(action.dataset.sort);
     if (name === "trash-delete-picked") return deleteTrashAsk([...trashPicked()]);
     if (name === "trash-restore-picked") return runAction(() => restoreTrash([...trashPicked()]), "Restoring…");
     if (name === "trash-empty") return emptyTrashAsk();
@@ -190,3 +254,16 @@ document.addEventListener("change", (event) => {
     if (row) row.classList.toggle("is-picked", box.checked);
     paintTrashPicked();
 });
+
+document.addEventListener("input", (event) => {
+    if (!event.target || event.target.id !== "trash-search") return;
+    trashView().search = event.target.value || "";
+    renderTrash();
+});
+
+document.addEventListener("change", (event) => {
+    if (!event.target || event.target.id !== "trash-kind") return;
+    trashView().kind = event.target.value || "";
+    renderTrash();
+});
+

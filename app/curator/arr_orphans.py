@@ -473,7 +473,7 @@ def discard(path, app="", arr_id=None):
         )
         if listed:
             raise AppError("The library lists this file now. Check again.", 409)
-        trash.discard(item["path"], label=os.path.basename(item["path"]), kind="orphan")
+        trash.discard(item["path"], label=os.path.basename(item["path"]), kind="orphan", reason="File Radarr or Sonarr no longer tracks, removed in the orphan report")
         if item.get("arr_id"):
             if item["app"] == "Sonarr":
                 sonarr.rescan_series(series_id=item["arr_id"])

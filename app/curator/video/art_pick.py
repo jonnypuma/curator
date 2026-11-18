@@ -80,7 +80,7 @@ def choose(kind, item_id, url, art_kind, players=None):
         result = asyncio.run(_choose(kind, item_id, "upload://kept", art_kind or "poster", data, players))
         try:
             trash.discard(real, label=f"{store.title_of(_TABLES.get(kind, 'movies'), item_id) or ''} — {art_kind}".strip(" —"),
-                          kind="artwork")
+                          kind="artwork", reason="Artwork replaced by a newer picture")
         except OSError:
             logging.getLogger(__name__).info("the numbered copy could not be removed: %s", real, exc_info=True)
         return result
@@ -138,7 +138,7 @@ def remove(kind, item_id, art_kind, path=None):
         if os.path.splitext(target)[1].lower() not in IMAGE_EXTENSIONS:
             raise AppError("That file is not an image, so it was left alone", 400)
         try:
-            trash.discard(target, label=f"{store.title_of(table, item_id) or ''} — {art_kind}".strip(" —"), kind="artwork")
+            trash.discard(target, label=f"{store.title_of(table, item_id) or ''} — {art_kind}".strip(" —"), kind="artwork", reason="Artwork deleted in the artwork window")
             removed = True
         except OSError as exc:
             raise AppError(f"Could not delete the file: {exc.strerror or exc}", 500) from exc

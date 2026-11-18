@@ -5700,3 +5700,6 @@ button.tag-pill.is-busy .activity-spin {
 .jr-branch.is-skipped .jr-dot { background: var(--bg-surface); border-color: var(--text-muted); border-style: dashed; }
 .jr-branch.is-pending .jr-name, .jr-branch.is-skipped .jr-name { color: var(--text-muted); }
 @media (prefers-reduced-motion: reduce) { .jr-branch.is-running .jr-dot { animation: none; } }
+#trash-search { flex: 1 1 260px; min-width: 0; }
+.trash-sort { font: inherit; font-weight: 600; color: inherit; white-space: nowrap; }
+.trash-why { max-width: 320px; font-size: 12px; overflow-wrap: anywhere; }

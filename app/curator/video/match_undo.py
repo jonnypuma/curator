@@ -264,7 +264,7 @@ def _restore_files(data):
             path = os.path.join(folder, name)
             try:
                 writes.check(path)
-                trash.discard(path, kind="video")
+                trash.discard(path, kind="video", reason="Undo Fix Match: a file the Fix Match had added")
                 binned += 1
             except (OSError, AppError) as exc:
                 logger.info("Fix Match undo left %s: %s", path, exc)

@@ -49,7 +49,7 @@ def _remove_tree(path):
     from resonance import trash
 
     if os.path.isdir(path) or os.path.isfile(path):
-        trash.discard(path, kind="video")
+        trash.discard(path, kind="video", reason="Deleted from disk by hand")
 
 
 def stems_for(files):
@@ -103,7 +103,7 @@ def _remove_files(files):
     removed = 0
     for path in files:
         if os.path.isfile(path):
-            trash.discard(path, kind="video")
+            trash.discard(path, kind="video", reason="Deleted from disk by hand")
             removed += 1
     return removed
 
@@ -338,7 +338,7 @@ def _remove_set_folder(row):
         raise AppError(f"Cannot remove set folder: {blocked.replace('album', 'media item')}")
     from resonance import trash
 
-    trash.discard(real, kind="set")
+    trash.discard(real, kind="set", reason="Movie set folder deleted by hand")
 
 
 HANDLERS = {"movie": delete_movie, "show": delete_show, "season": delete_season, "episode": delete_episode, "set": delete_set}

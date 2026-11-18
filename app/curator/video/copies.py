@@ -1225,7 +1225,7 @@ def _drop_extra(path):
     if path and os.path.isfile(path):
         from resonance import trash
 
-        trash.discard(path, kind="episode")
+        trash.discard(path, kind="episode", reason="Extra copy of an episode, removed in the copies window")
 
 
 def _focus_where(kind, focus):

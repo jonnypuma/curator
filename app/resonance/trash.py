@@ -128,7 +128,14 @@ def _remove_now(path):
         os.remove(path)
 
 
-def discard(path, label="", kind=""):
+def _reason(named):
+    """Why this delete happens: the job that is running (history.why), else what the caller says."""
+    from resonance import history
+
+    return str(history.current_reason() or named or "").strip()[:300]
+
+
+def discard(path, label="", kind="", reason=""):
     """Delete a file or folder: into the recycle bin when it is on, at once when it is off.
 
     Returns the trash row id, or "" when the item was deleted at once. A path outside every library folder (where
@@ -157,14 +164,17 @@ def discard(path, label="", kind=""):
         shutil.move(path, target)       # another drive inside the same library folder: copy, then remove
     db.execute(
         """
-        INSERT INTO trash_items (id, original_path, trash_path, root, label, kind, is_dir, size_bytes, deleted_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, LOCALTIMESTAMP)
+        INSERT INTO trash_items (id, original_path, trash_path, root, label, kind, is_dir, size_bytes, deleted_at, reason)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, LOCALTIMESTAMP, %s)
         """,
         (item_id, original, target, root,
-         str(label or os.path.basename(path))[:300], str(kind or "")[:20], is_dir, size),
+         str(label or os.path.basename(path))[:300], str(kind or "")[:20], is_dir, size, _reason(reason)),
     )
     logger.info("moved to the recycle bin: %s", path)
-    _note("deleted", original, label, kind, "Moved to the recycle bin")
+    from resonance import history
+
+    with history.why(_reason(reason)):          # the Activity history line carries the same reason
+        _note("deleted", original, label, kind, "Moved to the recycle bin")
     return item_id
 
 
@@ -176,8 +186,15 @@ def items():
     _on, days = settings()
     rows = db.fetchall(
         """
-        SELECT id::text AS id, original_path, trash_path, root, label, kind, is_dir, size_bytes, deleted_at
-        FROM trash_items ORDER BY deleted_at DESC
+        SELECT t.id::text AS id, t.original_path, t.trash_path, t.root, t.label, t.kind, t.is_dir, t.size_bytes,
+               t.deleted_at,
+               -- Items binned before the reason was kept: the Activity history line of that delete may still name it.
+               COALESCE(NULLIF(t.reason, ''), (
+                   SELECT h.reason FROM activity_history h
+                   WHERE h.action = 'deleted' AND h.path = t.original_path AND h.reason <> ''
+                     AND h.at BETWEEN t.deleted_at - interval '1 minute' AND t.deleted_at + interval '1 minute'
+                   ORDER BY h.id DESC LIMIT 1), '') AS reason
+        FROM trash_items t ORDER BY t.deleted_at DESC
         """
     )
     found = []

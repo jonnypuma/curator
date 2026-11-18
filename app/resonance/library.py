@@ -2093,12 +2093,12 @@ def merge_artists(keep_id, drop_id, move_folders=True, remove_empty=False, folde
         title = item.get("title") or "Album"
         if action == "keep-existing":
             from resonance.upgrade import discard
-            discard(album["id"])
+            discard(album["id"], "Rename or move: a folder with that name already existed and you chose to keep it")
             warnings.append(f"{title} was deleted so the existing folder named {item.get('name')} could stay.")
             continue
         if action == "keep-incoming":
             from resonance.upgrade import discard
-            discard(item["existing_album_id"])
+            discard(item["existing_album_id"], "Rename or move: you chose to replace the album that had this folder name")
             relocate(album, item["dest"])
             reassign(album)
             warnings.append(f"The folder named {item.get('name')} was replaced by the incoming copy of {title}.")
@@ -2184,7 +2184,7 @@ def _remove_merged_folder(drop_path, keep_path):
         )
     from resonance import trash
 
-    trash.discard(folder, kind="artist")
+    trash.discard(folder, kind="artist", reason="Artist folder left without audio after two artists were merged")
     return ""
 
 
@@ -2678,7 +2678,7 @@ def delete_albums_from_disk(ids):
     deleted, errors, peers, track_ids = [], [], [], []
     for item in ids or []:
         try:
-            result = discard(require_uuid(item))
+            result = discard(require_uuid(item), "Album deleted from disk by hand")
             deleted.append(result.get("deleted") or str(item))
             peers = _merge_peer_flags(peers, result.get("peers"))
             track_ids.extend(result.get("track_ids") or [])
@@ -2706,7 +2706,7 @@ def delete_artists_from_disk(ids):
         blocked = False
         for album in albums:
             try:
-                result = discard(album["id"])
+                result = discard(album["id"], "Artist deleted from disk by hand")
                 peers = _merge_peer_flags(peers, result.get("peers"))
                 track_ids.extend(result.get("track_ids") or [])
             except AppError as exc:
@@ -2725,7 +2725,7 @@ def delete_artists_from_disk(ids):
                 if any(inside(root, path) for root in roots):
                     from resonance import trash
 
-                    trash.discard(real, label=artist.get("name") or "", kind="artist")
+                    trash.discard(real, label=artist.get("name") or "", kind="artist", reason="Artist deleted from disk by hand")
             except AppError as exc:
                 errors.append(str(exc))
                 continue

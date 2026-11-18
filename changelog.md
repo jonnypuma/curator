@@ -1,5 +1,2611 @@
 # Changelog
 
+## v4.3.9 — 2026-11-18 — Recycle bin: search, type, sorting, and why each item was deleted
+
+- **Why.** Every item in the recycle bin now shows the reason it was deleted: the job that did it (Bulk duplicate
+  cleanup, Scheduled integrity pass) or the action (Deleted from disk by hand, Album copy deleted by hand, Artwork
+  replaced by a newer picture, Track replaced by a better copy, Duplicate subtitle file removed, Undo Fix Match, a
+  rename or move where you chose which folder to keep, and so on). The reason is stored with the item and written
+  on its Activity history line too.
+- **Items already in the bin** take their reason from Activity history when the delete was recorded there with one,
+  which is the case for Bulk duplicate cleanup. Others read *Not recorded*: nothing kept the reason at the time.
+- **Search box** over names, original paths, reasons and types.
+- **Type** column and a type choice (Album, Artist, Track, Video, Episode, Movie set, Music video, Artwork, Subtitle,
+  Orphan file), listing only the types that are in the bin.
+- **Sorting.** Click Item, Type, Why, Deleted or Size to sort by it, and again to turn it around. Size and Deleted
+  start with the largest and the newest.
+- Select all and the box in the heading tick what the search and type leave; the count line says how many of the
+  items are shown and how large those are. The window is wider to fit the new columns.
+
+## v4.3.8 — 2026-11-18 — Deleting from the recycle bin cannot leave the bin folder
+
+- **A guard on every permanent delete.** Delete now, Delete selected, Empty recycle bin, the automatic emptying after
+  the chosen number of days and the low-space cleanup all go through one function. It now refuses any path that is
+  not strictly inside a recycle bin folder (`.curator-trash` at the top of a library folder, in the item's own
+  subfolder) and inside the bin of the library folder the item came from. Such a row is skipped, stays listed, and
+  an error is written to the log. The paths were always written that way; this makes sure a wrong or damaged row can
+  never point a delete at a library folder or a drive.
+
+## v4.3.7 — 2026-11-17 — No Kodi alert when there was nothing to update; Copy log works in Recent jobs
+
+- **No more "Kodi refreshed 0 items" for new albums.** When Curator saves artwork for an album or artist it asks Kodi
+  to show the new picture, because Kodi keeps showing its cached copy of the old one otherwise. Curator cannot know
+  whether Kodi has the album without asking, and during a Lidarr import Kodi does not have it yet. That is not news:
+  such a refresh now leaves no alert and no row in Recent library updates (the container log still has a line). The
+  same goes for an artist or a movie set Kodi does not have. A refresh that did update something is reported as before.
+- **Copy on a job's log in Jobs, Recent works.** The copy waited in the action queue, and over plain http a browser
+  only lets a page copy while it is still handling the click, so it was refused without a word. It now copies straight
+  from the click, and says so when the log is still loading or the browser refuses.
+- Nothing changed in when Kodi scans music: the albums of a webhook run are sent to the players once every item of
+  that run has been scanned in Curator, and Kodi reads their artwork during that scan.
+
+## v4.3.6 — 2026-11-17 — Follow imports shows the players side by side
+
+- **Players are one step with a branch each.** Kodi, Jellyfin, Emby, Plex and Navidrome have always been updated at
+  the same time, each on its own; one never waits for another. Follow imports drew them one after the other on the
+  line, which read as if Kodi waited for Jellyfin. With two or more players they are now one last step, a branch per
+  player joined by a dotted line, each with its own state and time. A single player is drawn as before.
+
+## v4.3.5 — 2026-11-17 — Music videos from YouTube: needs a folder, folder rule, linked to an artist
+
+- **+ Add from YouTube is off until a Music videos folder is set** under Settings, General. Hovering the button says
+  why. With more than one Music videos folder, the download form has a Folder choice.
+- **Folder rule.** Settings, General, Music videos from YouTube chooses where a download is saved: in the artist's
+  folder, made when it is missing (the default); in the artist's folder only when there already is one; or at the top
+  of the Music videos folder. An artist folder is found whatever its spelling (AC/DC, AC-DC and ac dc, or Beatles and
+  The Beatles, are the same folder), so no second folder is made for an artist.
+- **The video is linked to an artist.** The artist guessed from the YouTube title is matched to the artists you
+  already have (music videos first, then the music library) and takes that spelling. The Artist box suggests your
+  artists as you type, so you can search and pick one when the guess is wrong. Under the names the form says which
+  artist the video is linked to and which folder it will be saved in, before you download.
+- **The .nfo follows Kodi more closely.** It already was a Kodi `<musicvideo>` file next to the video with the same
+  name (title, artist, album, plot, director, year, genre, play count). It now also writes `<premiered>`, which newer
+  Kodi versions read in place of `<year>`; only the year is known, so the date is the first of January, as Kodi
+  itself exports it. Existing .nfo files get it the next time they are written (Write .nfo).
+
+## v4.3.4 — 2026-11-17 — The info pane no longer jumps down to the trailer
+
+- **The YouTube trailer is a picture with a play button until you click it.** The player used to load with the
+  page. On some videos the YouTube player takes the keyboard focus as it loads, and the browser then scrolls the
+  info pane down to it, which is why only certain movies or shows jumped. Now nothing from YouTube loads until the
+  trailer is played, so the pane stays at the top. Clicking the picture plays the trailer in place.
+- Unchanged: a downloaded trailer file plays in place as before, and Pop out player works the same.
+
+## v4.3.3 — 2026-11-17 — Fix Match overwrites seasons and episodes too, and logs what became of the title
+
+- **Fix Match on a show also lifts the field locks on its seasons and episodes.** Season names, episode titles, plots
+  and dates that were locked under the old match are replaced by the new one. Kept are the locks that say where a
+  file belongs or what you watched: season number, episode number, edition, tags, your rating and watched state.
+  A season or episode locked as a whole is left alone.
+- **The scrape log of a Fix Match now has a line about the title**: the old and the new title, or why the old one
+  stayed (the field is locked, or the new match gave no title, or both matches have the same title). Open the job
+  under Jobs, Recent to read it.
+
+## v4.3.2 — 2026-11-17 — Fix Match replaces a title that was edited by hand
+
+- **Fix Match no longer keeps the old title.** A title (or plot, year, original title and so on) that was once edited
+  by hand is locked against scrapes, and Fix Match respected that lock: everything changed to the new match except
+  the locked field, so a wrongly matched show kept its wrong name. Fix Match on a movie or a show now lifts the field
+  locks that belonged to the old match before it scrapes, so the new match lands completely.
+- Kept: the locks on edition, movie set, tags, your own rating, watched state and episode order, which are about your
+  copy and not about which title it is. An item that is locked as a whole still refuses Fix Match, as before. Field
+  locks on single seasons and episodes are left alone. Undo Fix Match puts the old locks back with the old values.
+
+## v4.3.1 — 2026-11-17 — The Sonarr, Radarr and Lidarr rescan no longer reads like a player update
+
+- **Menu names.** The right-click entry that asks Sonarr, Radarr or Lidarr to rescan was called *Update library in*
+  followed by only that app's icon, next to *Update library…* for the players, so the two were easy to mix up. It
+  is now **Rescan in Sonarr** (or Radarr, Lidarr), with the icon and the name, and the players' entry is **Update
+  player library…**.
+- **The message says what did and did not happen.** After a Sonarr, Radarr or Lidarr rescan the message ends with
+  "No player was asked to update: use Update player library for Kodi, Emby, Jellyfin or Plex." For Sonarr it also
+  says why Curator scans the show afterwards: Sonarr only reports files it adds or removes, so changed episode
+  numbers or paths would otherwise go unnoticed.
+
+## v4.3.0 — 2026-11-17 — Recycle bin: select several, delete or restore them together, no reload
+
+- **Tick boxes in the recycle bin.** Every row has a box, the header has one that ticks or clears them all, and
+  **Select all** above the list does the same (it reads **Deselect all** when everything is ticked).
+- **Delete selected** and **Restore selected** work on the ticked rows and show how many are ticked in a count on
+  the button. Delete selected asks once, naming the number of items and their total size.
+- **The list is no longer read again after a change.** Deleting or restoring one item or several takes just those
+  rows out of the list, and the list stays where you had scrolled it. An item that could not be deleted or restored
+  stays listed, and ticked. **Refresh** still reads the bin again.
+
+## v4.2.9 — 2026-11-17 — The restart rule covers Emby, Jellyfin and Plex too
+
+- **A full scan a player is still running is not sent again after a restart, on every player that can tell.** What
+  v4.2.8 did for Kodi now also holds for Emby and Jellyfin (their Scan Media Library task) and Plex (the library
+  sections that report refreshing): Curator waits for the scan in progress and removes the re-queued job, and the
+  Recent library updates row says so.
+- Navidrome does not report a scan in progress to Curator, so its scan request is sent again. As before, an idle or
+  silent player and an update of named folders are sent again.
+
+## v4.2.8 — 2026-11-17 — A restart no longer repeats a full Kodi scan that is still running
+
+- **A full Kodi scan in progress is not sent again after a restart.** A full video or music library scan that was
+  running when Curator stopped is put back in the queue on start, as before. When Kodi is still scanning at that
+  moment, Curator now waits for that scan to finish and removes the job instead of sending the same scan a second
+  time. The alert and the Recent library updates row say so. The updates queued behind it still wait their turn.
+- Unchanged: when Kodi is idle or does not answer, the scan is sent again, and an update of named folders is always
+  sent again, because the folders behind the one Kodi was on were never scanned.
+
+## v4.2.7 — 2026-11-17 — Player library updates say what triggered them
+
+- **Every player library update records its trigger.** The Queue's Library updates rows show **Triggered by:** under
+  the scope, and the finished row in Recent library updates ends with it too. The Kodi alerts "library scan sent
+  for…" and "Kodi is still scanning… waits" name it as well. Triggers are, for example, *Radarr webhook (Download)*,
+  *Sonarr webhook (Download, Rename)*, *Scheduled video library update*, *Manual library update*, *Library update*
+  (the button on selected items), *Retry button in Recent updates*, *File job (rename)*, *Bulk duplicate cleanup*,
+  *Music videos scan (incremental)*, *Lidarr import scan* and *Scan from the Kodi report*.
+- **Folded updates keep every trigger.** When several requests become one job (two full Kodi scans, or more folders
+  for the same player), the row lists each trigger once, up to six.
+- **An update that was running when Curator stopped says so.** Curator has always put such an update back in the queue
+  on start, which after a rebuild looks like a scan nobody asked for. Its trigger now ends with *Curator restarted
+  while this update was running*.
+
+## v4.2.6 — 2026-11-17 — Choose what the health score counts
+
+- **The health score no longer counts subtitles or the lesser file warnings.** An unknown audio language, no audio
+  track or a shorter-than-expected file, and missing subtitles, no longer lower a movie's or show's score. Six things
+  count out of the box: matched, scraped, .nfo, poster, fanart, and a file that is not corrupt and could be probed.
+- **Choose what counts.** Under Settings, Movies and Settings, TV shows, below **Show the health score**, there is one
+  box per check, including **Subtitles** and **No other file warnings** for those who want them back. Movies and TV
+  shows have their own choices. Every check that is ticked counts the same; with none ticked there is no score. The
+  Needs work and Complete filters follow the same choices.
+
+## v4.2.5 — 2026-11-17 — Health score for movies and shows; What changed window
+
+- **Health score.** Every movie and TV show gets a score from 0 to 100 beside its title, green at 100, amber from 70
+  and red below. Seven things count the same: matched to a database, scraped, .nfo present, poster, fanart, subtitles
+  and a file without warnings. For a show the .nfo, subtitle and file checks cover its episodes too (an episode
+  without an .nfo, without subtitles or marked corrupt lowers the show's score). Hover the score to read what to fix.
+  A missing trailer, theme song or extra artwork type does not lower it, and missing episodes do not either (they
+  have their own filter). Seasons and episodes have no score of their own.
+- **Needs work and Complete filters** under More filters on Movies and TV shows list what is below 100 and what is
+  at 100. They stack with the other filters and can be saved like them.
+- **Show the health score** under Settings, Movies and Settings, TV shows (List options) turns the badge off. It is
+  on by default.
+- **Tools, What changed.** One window for a period (last 24 hours, 7, 30 or 90 days): movies, episodes, albums and
+  music videos added, what was deleted, removed, renamed, moved, restored or found corrupt (from Activity history,
+  with the reason), artwork that was replaced, and the jobs that failed with their message. Each kind is a block that
+  folds; empty kinds are left out. It is built from what Curator already records, so it covers the days before this
+  version too.
+
+## v4.2.4 — 2026-11-17 — Undo for video artwork; add a music video from YouTube
+
+- **Undo last artwork in the video artwork window.** When a picture of the open movie, show, season, episode or set
+  was replaced (by a pick, an upload, Clean artwork or a scan) and is still kept, the window's header shows **Undo
+  last artwork**. It puts that picture back, whatever its type. Pressing it again brings the newer one back.
+- **Music videos: + Add from YouTube.** Search YouTube from the Music videos tab, pick a result, check the artist,
+  title and year Curator guessed from the video's title, and download. The file is saved as `Artist - Title (Year)`
+  in the artist's folder when your library already has one and otherwise at the top of the Music videos folder, at
+  the quality set under Settings, General, Trailer download quality. It never overwrites a file. One download runs at
+  a time, shown in the Jobs panel, and the video joins the list with its .nfo when it is done. A download YouTube
+  refuses is reported with yt-dlp's own message and leaves nothing behind.
+
+## v4.2.3 — 2026-11-17 — Music filters stack, sets can be rescanned, music videos get filters and bulk actions
+
+- **Music: several filters at once.** Picking a filter adds it to the ones that are on, and they must all hold
+  ("Unmatched" and "No Art" together). Picking a lit one takes it off; **Clear all** or All takes them all off. A
+  saved filter keeps the combination. The filter button says "2 filters" and lists them in its tooltip.
+- **Movie sets: Rescan** in the selection bar. A set has no folder of its own, so this scans the folders of its
+  movies, with the same Incremental, Full and Deep choices as movies.
+- **Music videos: quick filters,** as on the Movies and TV tabs: No NFO, No picture, No year, No album, 4K, 1080p,
+  Below 720p, Duplicate, Upgrade available, Corrupt, Locked. Several can be on at once.
+- **Music videos: tick several.** A tick box per row and a bar for the ticked ones: Write .nfo, Rename, Lock or
+  Unlock, Quick integrity check, and Remove or delete (to the recycle bin, or from the library only). A locked video
+  shows a lock by its title.
+- **Music videos: Rename** to `Artist - Title (Year)`, in the video's own folder. The .nfo, the media info file and
+  the pictures are renamed with it. It shows what would change first, and never overwrites a name that is taken.
+- Export and the integrity check already existed for music and sets (Export on every tab; *Audit audio* in the album
+  menu), and music videos could already be locked and deleted to the recycle bin one at a time.
+
+## v4.2.2 — 2026-11-17 — Settings: the same sections on every library tab
+
+- **Music** has a **During a scan** heading for its scan switches, with a new one: *Replace artwork with the wrong
+  shape during a scan* (it was on with no switch).
+- **Movie Sets** has **During a scan** (the wrong-shape check, which runs at the end of a movie scan) and **Metadata
+  fields** (a set has one scraped field, its overview; untick it and a scrape leaves the overview alone).
+- **TV Shows and Movie Sets show Artwork languages and Writing.** These settings are shared by movies, TV and sets and
+  could only be found on the Movies tab. They now appear on the other tabs too, marked as shared: changing one
+  changes the same setting everywhere.
+- **Movies** has its own **Media info files** heading, as TV has (the switch sat under Writing).
+
+## v4.2.1 — 2026-11-17 — Music and movie sets catch up with the artwork features of movies and TV
+
+- **Music artwork window: tick several pictures.** Every card has a tick box; a bar offers Download, Ban and Delete
+  for all the ticked ones. The first ticked cover (banner, logo and so on) becomes the file the players use, and
+  further ones of that type are saved next to it as `folder1.jpg`, `folder2.jpg`…; fanart and booklet pages are one
+  more file each, as before. The window does not list those numbered files yet.
+- **Music: ban a picture.** A banned picture is never suggested and never picked by the automatic artwork download.
+  It stays in the window, greyed out, with an Unban button. Bans are shared with the video artwork window.
+- **Music: wrong shapes.** A fanart, banner, landscape or disc art listed at the wrong shape for its type is marked
+  **Wrong shape**, never suggested and never picked automatically, and a music scan replaces a selected one with a
+  right-shaped picture from its list. Covers, artist thumbs and logos come in every shape and are not judged. There is
+  no switch for this in Settings yet; it is on.
+- **Movie sets get the wrong-shape check** at the end of a movie scan (sets have no scan of their own).
+- **Kodi is told about artwork changes of movie sets, albums and artists**: it forgets its cached copy and takes the
+  new file, as it already did for movies and shows. The item is found in Kodi by its name. Plex, Emby and Jellyfin
+  read that artwork on their own scans. This could not be tried against a Kodi here.
+- **Recent jobs name the albums a music scan added or changed,** and a Lidarr import names its album. Movie set jobs
+  already named their sets.
+- Music artwork sizes were already kept in the database (every listed picture has its resolution), so nothing changed
+  there.
+
+## v4.2.0 — 2026-11-17 — Settings in cards
+
+- **Settings is tidied up.** Every heading and the options under it now sit in a card of their own, with a marked
+  title, on every tab, so the groups read apart. An option is a row that lights up under the pointer; the note that
+  explains it is smaller, quieter and set in under the option's text; fields keep a sensible width instead of
+  running across the window; sub-headings are small capitals; and a warning is a red box that cannot be missed. No
+  setting moved or changed its meaning.
+
+## v4.1.9 — 2026-11-17 — Schedules in words, Kodi refresh alerts, webhook scans in the Scan Queue, a tidier Queue window
+
+- **Player schedules say when they run in plain words** ("Every day at 03:00", "Every Wednesday at 04:00"), with the
+  cron text after it.
+- **Every Kodi refresh leaves an alert,** also one that only changed artwork: "Kodi shows the new artwork of 3 items",
+  with the titles, in Alerts and Recent webhooks. Before, an artwork update to Kodi only showed in Recent library
+  updates, so there was no telling whether it had been sent or had worked. A failed one was already reported.
+- **The Scan Queue lists the webhook imports while they are scanned.** The webhook queue scans and scrapes its
+  folders itself, outside the scan queue, so that tab stayed empty and the items seemed to jump straight to Library
+  updates. The running batch now shows there as "Webhook imports", with its titles, its stage ("2 of 3 scraped") and
+  its time.
+- **Queue window:** the status line (imports, files, jobs) sits in the header next to the title, and the Recent list
+  of each tab folds away with a click on its heading, leaving the room to what is waiting. The choice is remembered.
+
+## v4.1.8 — 2026-11-16 — Card buttons keep a readable hover
+
+- **Fixed: hovering a movie in a set, a season on a show, an album in an artist's discography or a pick in a search
+  result filled it with a light colour while the title stayed white,** so the label could not be read. These cards now
+  show hover with an outline (sets and seasons) or a faint tint and an accent border (discography and picks), and keep
+  their text colour.
+
+## v4.1.7 — 2026-11-16 — The badge images travel as one file, media.zip
+
+- **The shipped badge images (studio, network and record label logos, codec, resolution and provider badges, about
+  4,750 small files) are packed into one file, `app/media.zip`,** built with `python scripts/pack-media.py`. The app
+  serves them from the zip, and the Docker image holds only the zip: the `media/` folder stays out of the build, so
+  copying the project and building the image no longer go through thousands of files. The build stops with a clear
+  message when the zip is missing. A checkout that was not packed still works from the folder. `media/network/unused`
+  (600 files nothing reads) and desktop junk such as `Thumbs.db` are left out of the zip.
+- Badge images are sent with an ETag and may be kept by the browser for a day, so a page load no longer asks the
+  server about every logo again. Logos you add in Settings, Files are unchanged: they live in the config folder.
+
+## v4.1.6 — 2026-11-16 — Several posters can be ticked in the artwork window
+
+- **Fixed: only one poster (or fanart, or any other single-file type) could be ticked at a time** in the artwork
+  window; ticking a second one unticked the first. Any number can be ticked now, so several posters can be banned,
+  deleted or downloaded in one go.
+- **Several ticked pictures of one type are all saved.** The first ticked poster (fanart, banner, and so on) becomes
+  the file the players use; the others are saved next to it as `poster1.jpg`, `poster2.jpg`… The players ignore those,
+  and scans leave them alone. The artwork window lists them under their type as "poster1 next to it", each with a
+  **Use** button that makes it the main file (the old main file is kept, to pick again) and a bin.
+- The count pills on the Queue window's tabs sit on the middle of the label now, not low in the button.
+
+## v4.1.5 — 2026-11-15 — Library updates: each album once, counts in pills, the folder Kodi is on with its time
+
+- **Fixed: a library update row listed every album twice,** once in a comma list and again with its quality badges.
+  When every title has its own line with badges, the comma list is left out.
+- **The Queue window's tab counts are pills,** like the alert counts in the header, instead of brackets after the
+  label. The Library updates count is the number of folders or titles still to do, not the number of jobs: a Kodi job
+  of 37 folders with 4 done counts 33.
+- **The Library updates banner names the folder Kodi is on and how long it has taken:** "Kodi · Music · scanning 5 of
+  37: Sonic Youth — Star Power · 0:42, 32 more waiting", ticking each second. The running row says "Scanning 5 of 37"
+  too. Kodi scans its folders one at a time; the other players send one request per folder and keep their old line.
+- **Recent webhooks gets a row for every folder Kodi finishes,** with how long it took ("Kodi music library scan
+  finished for /music/… (12 s)"). Before, only the start of each folder was recorded, and the end of the whole job.
+
+## v4.1.4 — 2026-11-15 — A wider Queue window, with labels that stay whole
+
+- **The Queue window is wider:** 96% of the window, up to 1400 px (it was 980 px), so the Item column has room for long
+  paths next to the other columns.
+- **Fixed: "Download" and "Remove" broke in the middle of the word** when the Item column squeezed the others. Only
+  titles and paths may now break inside a word; event labels and buttons stay on one line.
+
+## v4.1.3 — 2026-11-15 — The Queue panel's lists no longer jump while you read them
+
+- **Fixed: Recent webhooks (and the other Queue panel lists) jumped away from what you were reading.** The lists are
+  redrawn within a moment of every webhook and every few seconds anyway, and each redraw rebuilt the rows, so a new
+  call at the top pushed the row you were reading down. A redraw now finds the row that was at the top of your view
+  and puts it back in the same place. At the top of the list nothing is held, so new calls still appear there as
+  before. This covers Waiting and Recent in every Queue tab (webhooks, scans, ARR, library updates).
+
+## v4.1.2 — 2026-11-15 — Clean artwork for movie sets
+
+- **Clean artwork works on movie sets.** Tick sets in the Movie sets tab and choose Metadata, *Clean artwork…*. A set
+  offers **Fanart** (a fanart with a title or logo on it is replaced by the clean one the artwork window suggests),
+  **Extra fanart** (repeats out, pictures with text swapped, topped up with clean ones) and **Any artwork with the
+  wrong shape** (poster, fanart, banner, disc art and the rest). The pictures are saved in the set's folder inside the
+  central set folder, as the artwork window does; without a central set folder (Settings, Movie Sets) a set is left
+  alone and the job log says why. Locked sets and pictures you uploaded or kept stay.
+- Curator does not send set artwork to the players itself yet, so the window shows a note instead of the player boxes
+  for a selection of sets only; the players read set artwork from the central set folder when they scan the movies in
+  the set. *Update artwork in players* still works on movies and shows only.
+- Set artwork keeps its sizes in the database too, like movie and TV artwork.
+
+## v4.1.1 — 2026-11-15 — A file job no longer reports the last job's result when it starts
+
+- **Fixed: starting a file job could show the previous job's result at once** (for example "Clean artwork: 5698
+  changed, 397 unchanged, 4 failed" right as a new Clean artwork run began). The page hears about the file job from
+  three places: the live channel, the Jobs panel refresh and the file job window's own refresh. A refresh sent just
+  before the new job started could arrive just after it, and the page took it as the new job ending. Every file job
+  status now names its job and carries a number that only grows; the page drops a status older than the one it has,
+  and announces the end only of the job it saw running.
+
+## v4.1.0 — 2026-11-15 — Artwork sizes are kept in the database
+
+- **The width and height of every movie, show, season and episode artwork file are now kept with its path.** The
+  artwork map in the database gets a `_sizes` entry per file (width, height, modification time, file size). It is
+  filled whenever artwork is saved, by a scan, a pick, an upload or a download, and a file is opened only when it is
+  new or its time or size changed. Files that are gone lose their entry.
+- **Shape checks read the database, not the files.** The scan step, Clean artwork's *Any artwork with the wrong
+  shape* and the artwork window take the sizes from there. A file without a stored size (artwork from before this
+  version) is opened once and its size written back, so the first scan after the update fills them in and later scans
+  open nothing.
+- **The scan step now checks every episode thumb** of the shows it looks at, not only the episodes it added or read
+  again.
+
+## v4.0.9 — 2026-11-15 — Season artwork and episode thumbs get the shape check; Download missing artwork takes Suggested
+
+- **Season artwork and episode thumbs are checked for the wrong shape too.** Clean artwork's *Any artwork with the
+  wrong shape* now also checks every season's poster, banner, landscape and fanart, and every episode thumb, of the
+  selected shows, and gives a wrong one the suggested picture for that season or episode. The scan step checks the
+  seasons of the shows it looked at and the thumbs of the episodes it added or read again (a full TV scan does not
+  open every thumb in the library). Locked seasons and episodes stay. An episode thumb may be 4:3 up to 2.5:1, so a
+  frame from a widescreen film still fits.
+- **Download missing artwork takes the picture the artwork window marks Suggested** for each missing type: clean
+  fanart first, the right shape and the largest. It took the first listed picture before.
+- Scrapes (including the scan's artwork lookup and the webhook queue) already put clean fanart and character art
+  first whenever *Prefer clean fanart* is on, which is the default; nothing changed there.
+
+## v4.0.8 — 2026-11-15 — Artwork of the wrong shape is never chosen, and is replaced
+
+- **Artwork of the wrong shape for its type is never chosen automatically.** A picture a site lists under the wrong
+  type (a fanart among the posters) is skipped by scrapes, by *Download missing artwork* and by Clean artwork's extra
+  fanart top-up. Fanart.tv lists no sizes, so every downloaded picture is also checked itself before it is saved, and
+  the next candidate is tried. The artwork window still shows such a picture, marked **Wrong shape**, and never
+  suggests it; you can still pick it yourself. The shapes are wide ranges per type: posters and key art tall,
+  fanart, landscape and episode thumbs wide, banners a long strip, disc and square art square. Logos, clear art and
+  character art come in every shape and are not judged.
+- **Clean artwork: Any artwork with the wrong shape.** A new choice under Artwork types. Every picture of the
+  selected movies or shows whose file is the wrong shape for its type, such as a fanart saved as the poster, gets the
+  picture the artwork window suggests for that type. The files are checked on disk first, so an item whose pictures
+  are all fine is not looked up online. Pictures you uploaded or kept, and locked items, stay.
+- **Scans replace artwork of the wrong shape.** *Replace artwork with the wrong shape during a scan* (Settings, Movies
+  and TV shows, under During a scan) is on by default. It checks the files of the items the scan looked at (an
+  incremental scan the ones it added or read again, a full scan all) and replaces only the wrong ones, before Clean
+  artwork. The scan log names each one (`Heat: poster 1920×1080, a poster should be tall`), and the progress shows it
+  in the Clean artwork step. The players get the new pictures with the scan's own artwork update.
+- Season and episode artwork is not checked by Clean artwork or the scan step yet, only by the downloads.
+
+## v4.0.7 — 2026-11-15 — Lidarr's import-time Retag calls queue nothing
+
+- **Lidarr Retag calls sent during an import are skipped.** While Lidarr imports an album it writes the tags into each
+  new file and, with *On Track Retag* ticked, sends one Retag call per file before the album's Download call. Those
+  calls carry a file id of 0 (the file is not saved yet) and only repeat what the Download call reports. Curator now
+  records them in Recent webhooks as ignored, with the reason, and queues nothing; the Download call scans the album.
+  A Retag of a file Lidarr already had (a real file id, for example from Lidarr's Retag button) is still scanned.
+
+## v4.0.6 — 2026-11-15 — Ban bad artwork suggestions
+
+- **Ban a picture in the artwork window.** Every online picture has a ban button (a crossed circle) next to its details,
+  and the tick bar has **Ban** for several at once. A banned picture is never marked Suggested, never picked by Clean
+  artwork, never downloaded by a scrape and never chosen by *Download missing artwork*. It stays in the window, greyed
+  out and marked **Banned**, at the end of its type and outside the cap per site, with an Unban button. You can still
+  download it yourself with its download button.
+- A ban is kept by the picture's address, so it covers every type that lists that picture (a fanart is also an extra
+  fanart candidate). The same shot on another site has another address and needs its own ban.
+
+## v4.0.5 — 2026-11-15 — Extra thumbs are legacy and off by default
+
+- **Extra thumbs (`extrathumbs/`) are now off by default and labelled legacy.** Kodi dropped them and few players read
+  them, so a new install no longer downloads up to 10 per movie and show. Settings, Movies and TV shows, lists them as
+  *Extra thumbs (extrathumbs/) · legacy, few players read them*; a choice you saved before is kept, so untick them there
+  if you had them on. The scrape window's Extrathumbs (legacy) box starts ticked only when Settings has them on.
+- **With extra thumbs off, the artwork window leaves them out completely.** It shows no Extrathumbs section, offers no
+  candidates, and does not read or compare the files in `extrathumbs/`. Those files stay on disk untouched. Tick them in
+  Settings to see and manage them again.
+
+## v4.0.4 — 2026-11-15 — Lidarr Retag calls from a box set queue the box set under its artist
+
+- **Fixed: a Lidarr Retag call for a box set queued the disc folder as an album and the box set as its artist.** A
+  Retag call names the one file whose tags Lidarr rewrote, so its folder could be a disc folder such as
+  `Playback/HDCD5`. Each disc became its own webhook queue item, the box set was scanned once per disc, and the scan was
+  handed the box set folder as the artist. The album is now found the way a full library scan finds it, so a whole box
+  set is one queue item under the real artist folder, the same item an import of that album uses. The album scan also no
+  longer accepts an artist folder that is the album folder itself; the folders around the album decide.
+- Retag calls restart the webhook timer like any other call, up to the maximum postpone counted from the oldest waiting
+  item.
+
+## v4.0.3 — 2026-11-14 — Artwork window: tick several images, extrathumbs in one section
+
+- **Tick several images in the artwork window.** Every card has a tick box in its top left corner. While something is
+  ticked, a bar above the cards shows how many, with **Download**, **Delete** and **Clear ticks**. Download saves the
+  ticked online pictures one after another and the players get one artwork refresh for the item at the end. Extra
+  fanart and extrathumbs add one new file per ticked picture. Any other type holds one file, so ticking a second
+  picture of that type unticks the first. Delete moves the ticked files on disk to the recycle bin after one
+  confirmation. A file that cannot be deleted or downloaded is reported, and the rest still go.
+- **Fixed: extrathumbs were drawn as one section per file.** The artwork window now has a single **Extrathumbs**
+  section for movies and shows, like Extra fanart. It shows the files in `extrathumbs/` as they are on disk and offers
+  every landscape picture as a candidate (the same pictures a scrape uses for extrathumbs). Choosing or uploading one
+  adds it as the next `thumbN` and replaces nothing. A candidate that is already in the folder is marked **In use**.
+  Deleting one numbers the rest from the disk again.
+
+## v4.0.2 — 2026-11-14 — Recent jobs name the movies and shows they worked on
+
+- **Recent jobs now say which items they worked on.** Each finished job in the Jobs panel's Recent list shows the
+  movies, shows or episodes it handled under its label, such as "Heat (1995), Alien (1979) and 3 more", with every
+  kept name in the tooltip. This covers file jobs (Clean artwork, rename, subtitles and the rest), movie and TV scans
+  (the items they added or read again; an incremental TV scan names the episodes when there are 25 or fewer), and
+  scrapes, including the ones the webhook starts. A Kodi library update ends with what it scanned, for example
+  "Kodi video library scan finished: Heat (1995), Alien (1979)." The first 25 names are kept per job, with the count.
+  Jobs that finished before this version show no names.
+
+## v4.0.1 — 2026-11-14 — Ticking a collapsed versions row selects all its versions
+
+- **Fixed: a collapsed versions row selected only its best version.** With *Collapse versions of the same movie into
+  one row* on, ticking such a row added one movie to the selection, so the count was too low and every action (Clean
+  artwork, rename, scrape, delete and the rest) ran on that one version only. The row now selects every version in it,
+  the count includes them all, and the row shows as ticked when all its versions are. This holds for the list and the
+  poster grid, for a shift-click range and for the tick-all box. Expand the row to tick a single version.
+
+## v4.0.0 — 2026-11-14 — The Jobs panel keeps finished jobs: Recent, with result and log
+
+- **Recent in the Jobs panel.** A job vanished from the panel the moment it ended, so there was no way to see how it
+  went. Under Running and Waiting, the panel now lists the last 30 finished jobs of every kind (file jobs such as
+  Clean artwork, rename and integrity checks; scans; scrapes; background jobs), newest first, with Done, Failed or
+  Stopped, when each ended and its summary (for a file job "1 changed, 3 unchanged"). **Log** opens the full log, with
+  Copy, for file jobs, background jobs and music scans; movie and TV scans and scrapes point to Scan history, which keeps
+  theirs.
+- **File jobs are now recorded** when they end, with their log (the last 300 are kept). Before, their log lived only
+  in memory until the next file job started.
+
+## v3.9.9 — 2026-11-14 — The artwork bin deletes the picture you clicked, into the recycle bin
+
+- **Fixed: deleting extra fanart in the artwork window could remove another file, or nothing.** The window numbers
+  extra fanart from the folder as it is now, while the delete looked the number up in what the last scan stored, which
+  can be numbered differently. The bin now sends the exact file it belongs to (in the artwork window and in an item's
+  artwork strip), and Curator deletes only that file, when it is one of the item's artwork files or inside its folder.
+- **Deleted artwork goes to the recycle bin** (Tools) instead of being removed at once, so a wrong click can be restored.
+  The confirm names the file.
+
+## v3.9.8 — 2026-11-14 — Clean artwork can also download missing clean pictures
+
+- **Also download missing clean pictures**, a box in the Clean artwork window (on by default, remembered): an item
+  without fanart or character art gets the clean picture the artwork window suggests, and extra fanart is topped up
+  with clean pictures that are not there yet, up to the Maximum extra fanart in Settings, as the next fanartN files.
+  Untick it to only clean what is already there. The scan stage only cleans; the lookup before it already fetches
+  missing artwork.
+
+## v3.9.7 — 2026-11-14 — Clean artwork as a scan stage
+
+- **Clean artwork during a scan** (Settings, Movies and TV shows, under During a scan; off by default): a scan stage
+  after the metadata and artwork lookup and before the .nfo files. It runs Clean artwork on the ticked types (Fanart;
+  Character art for shows; Extra fanart) with *Only pictures with a title or logo on them*: an incremental scan for the
+  items it added or read again, a full or deep scan for every item in the scanned folders. An item whose fanart was
+  already picked or cleaned is skipped without asking TMDB, unless Extra fanart is ticked. The scan progress shows a
+  Clean artwork step and the log a line per item.
+- **The scan's player refresh now also drops Kodi's cached pictures** for items whose artwork changed (from this stage
+  or from the lookup), so *Update client libraries for items with updated artwork* shows the new pictures in Kodi
+  instead of the cached old ones.
+
+## v3.9.6 — 2026-11-14 — Extra fanart repeats are found when the same shot is framed differently
+
+- **Fixed: Clean artwork left repeats in extra fanart.** It compared a fingerprint of the whole picture, which only
+  matches the same picture at another size. Fanart sites mostly hold the same shot framed tighter or wider, and those
+  looked like different pictures. Pictures are now compared by searching one inside the other at several zoom levels:
+  on real TMDB backdrops a reframed copy of one shot scores 0.95 to 0.98 and the closest two different pictures 0.83,
+  and repeats count from 0.90. The same comparison now decides which extra fanart has text on it (it matches an online
+  picture listed with a language) and which candidates the artwork window marks In use.
+- The image now includes numpy, which does the comparison in about 2 ms per pair.
+
+## v3.9.5 — 2026-11-14 — The artwork window shows extra fanart as it is on disk, and every card's size and type
+
+- **Fixed: the Extra fanart section showed none of the files already there** until a picture was added, then suddenly
+  all of them. It showed what the last scan had recorded; it now reads `extrafanart/` when the window opens.
+- **Candidates already in extra fanart are marked In use**: the picture a file was added from (now recorded when you
+  add one), or the same picture at another size (compared by fingerprint). They stay in the list, so a larger copy can
+  still be chosen.
+- **Every artwork card says its size and type**: the files on disk show their width × height, file type (JPG, PNG) and
+  file size, and the online pictures their width × height and file type.
+
+## v3.9.4 — 2026-11-14 — Clean artwork tidies extra fanart
+
+- **Extra fanart in Clean artwork.** Tick it to tidy `extrafanart/` of the picked movies and shows: a picture that is
+  there more than once (the same picture at another size, or from TMDB and from Fanart.tv) keeps its largest copy, and
+  a picture with a title or logo on it (it matches an online picture listed with a language) is swapped for a clean
+  picture that is not there yet, under the same file name, or taken out when no such picture is left. Every file taken
+  out goes to the recycle bin, and pictures that match nothing online are left alone. The job line says how many
+  repeats went, how many were swapped and how many stayed.
+
+## v3.9.3 — 2026-11-13 — New artwork shows without a reload; In use survives scans; the page says when Curator was updated
+
+- **Clean artwork's new pictures show at once.** The new file keeps the old name (fanart.jpg), so the page kept showing
+  the copy it had already loaded until a reload. The job now tells the page which files it wrote, and the page loads
+  those again and redraws the list and the open item when the job ends. Its notice says *Clean artwork* instead of
+  *File job*.
+- **Fixed: In use disappeared after a scan, and the artwork window suggested the same picture again.** A scan rebuilds an
+  item's artwork from the files on disk and dropped the note of which online picture each file came from. It now keeps
+  that note for every picture whose file is unchanged.
+- **An open page says when Curator was updated.** After a rebuild, an open page keeps running its old scripts until it
+  is reloaded, which looked like features missing (the Extra fanart candidates, for one) or fixes not working. The page
+  now sees the newer build and shows *Curator was updated while this page was open* with **Reload** and **Later**.
+
+## v3.9.2 — 2026-11-13 — Clean artwork: fanart and character art only
+
+- **Replace artwork… is now Clean artwork…, for fanart and character art only**, the two types that should carry no
+  title or logo. Fanart is ticked by default; Character art is offered when shows are picked. Posters, landscape,
+  logos and the other types are no longer offered (an earlier choice of them is dropped).
+- **Character art gets the clean rules of fanart**: the three Replace choices apply to it, the artwork window lists
+  and suggests clean character art first, and scraping prefers it (Settings, Movies: *Prefer clean fanart and
+  character art*).
+
+## v3.9.1 — 2026-11-13 — Replace artwork: pick the artwork types; the fanart choices only touch fanart
+
+- **Clean fanart is now Replace artwork…, with a box per artwork type.** Fanart is ticked by default; Poster,
+  Landscape, Clearlogo, Clearart, Banner, Disc art, Keyart or Character art and Square art can be ticked too, and the
+  choice is remembered. Each ticked type gets the picture the artwork window marks Suggested for it, unless the current
+  file is already that picture; nothing else on the item is touched.
+- **The fanart choices are worded as fanart choices** and show only while Fanart is ticked: only fanart with a title
+  or logo on it, that and fanart that matches no picture online, or any fanart that is not the suggested one. "Every
+  fanart that is not the suggested picture" read as if it replaced all artwork; it never did.
+- The job log line names each type it replaced.
+
+## v3.9.0 — 2026-11-13 — Clean fanart runs the artwork window's own code
+
+- **Clean fanart now builds its list with the artwork window's own function and saves with the download button's own
+  function.** Before, the job had its own copy of the selection, which matched the window in every test but not on a
+  real library. Now the card marked Suggested in the window is, by construction, the picture the job saves.
+- **Its log says what it did and which Curator ran it**: the first line names the version, and each item names the
+  picture it saved, or why it left the fanart (for a fanart TMDB lists without a language, it names the suggested
+  picture that *Every fanart that is not the suggested picture* would put there).
+
+## v3.8.9 — 2026-11-13 — Clean fanart can put the suggested picture everywhere
+
+- **Replace, in the Clean fanart window**, now has three choices: fanart that matches a picture with text on it (as
+  before), that and fanart that matches no picture online, or **every fanart that is not the suggested picture**. The
+  last puts the picture marked Suggested in the artwork window on each item whose fanart is not already that picture.
+  TMDB lists many backdrops with the title on them as having no language, so the first two take such a picture for clean
+  and leave it; Landman's fanart, put there by the job before 3.8.4, is one. The new choice fixes those in one run.
+
+## v3.8.8 — 2026-11-13 — The artwork window shows which picture is in use; Clean fanart names its pick
+
+- **In use** on a picture in the artwork window: the current file was downloaded from it (by Clean fanart or a pick),
+  with a dashed outline next to the Suggested one. If they are not the same card, the current file is not the
+  suggestion.
+- **Clean fanart names the picture it took** in its job log (TMDB or Fanart.tv file name and size), and says it is the
+  one the artwork window suggests.
+- Checked against Landman's real TMDB list (46 backdrops, 28 of them without a language): the job takes the window's
+  suggestion in every order and every vote tried. Clean fanart before 3.8.4 took the clean picture with the highest
+  vote instead, which on TMDB is often one with the title on it; rebuild if About shows an older version.
+
+## v3.8.7 — 2026-11-13 — Curator's own folders are no longer offered as a library
+
+- **Fixed: Settings offered `/data` as a library folder.** Curator's own data folder (artwork you uploaded or
+  replaced) is a volume, so Settings, General, Library folders listed it under Volumes not in a library and under
+  Detected mounts, and the folder picker let you add it. Curator's own `config`, `cache` and `data` folders are now
+  left out everywhere a library folder is offered, and saving refuses a new library folder that is one of them, holds
+  one, or sits inside one, with a message naming the folder. A library folder saved earlier keeps working and saving.
+  The movie set folder picker still lists every volume.
+
+## v3.8.6 — 2026-11-13 — TheAudioDB works again
+
+- **Fixed: TheAudioDB found nothing.** TheAudioDB retired its old free API key (2), which now answers 404 Not found,
+  so every lookup came back empty: artist and album artwork from TheAudioDB, biographies and album reviews from it,
+  and music video details. Curator now uses the current free key (123). The request pacing is unchanged. Found by the
+  setup wizard's TheAudioDB test, which now passes.
+
+## v3.8.5 — 2026-11-13 — Setup wizard
+
+- **New: a setup wizard.** It opens by itself on a new install (nothing configured and nothing scanned yet) and from
+  **Settings → About → Run setup wizard** any time. It goes one step at a time, with Back, Skip, Save and continue and
+  a progress bar: library folders for music, movies, TV and music videos, each checked at once (exists, readable,
+  writable, on a mounted volume); keys for TMDB, TheTVDB, OMDb, Fanart.tv, Last.fm and AcoustID with a Test each, the
+  MusicBrainz contact, a Test for MusicBrainz and TheAudioDB, and Trakt sign-in; Radarr, Sonarr, Lidarr and Bazarr with
+  Test connection, the webhook address with the key filled in, and path mappings with a test that the mapped folders
+  exist; Kodi, Plex, Emby, Jellyfin and Navidrome with Test connection, one box per library, and path mappings with a
+  test; and a summary that offers one box per library to start the first scans. Every step saves through the same
+  settings the Settings window uses, and secrets are stored the same way.
+- The folder picker behind **Settings → General → Library folders → Add path** lists Music videos as a media type too.
+
+## v3.8.4 — 2026-11-13 — Clean fanart takes the picture the artwork window suggests
+
+- **Fixed: Clean fanart could put a fanart with the title on it.** It took the clean picture with the highest TMDB vote,
+  and a backdrop with the title or logo on it is often uploaded to TMDB without a language (so it counts as clean) and
+  voted up. The artwork window suggests the largest clean picture of the right shape instead, so the two disagreed. The
+  job now takes exactly the picture the window marks Suggested. A picture that TMDB lists without a language but that
+  has text on it cannot be told apart by Curator; if one is already in place, pick the suggested one in the artwork
+  window (Clean fanart sees it as clean and leaves it).
+
+## v3.8.3 — 2026-11-13 — One box per player for artwork updates
+
+- **You choose which players get the new artwork.** Since 3.8.0 a replaced fanart, and a picture chosen in the artwork
+  window, went to every player switched on for that library. Now there is one box per player, named after it:
+  *Update library in Kodi after fanart download*, *Update library in Jellyfin after fanart download* and so on, in the
+  Clean fanart window; *Update library in Kodi after artwork download* in the title bar of the artwork window; and
+  *Update library in Kodi* in **Update artwork in players…**, which now opens a window with the boxes and a Start button
+  instead of sending at once. Only players switched on for movies or TV under Settings are listed. A player you untick
+  stays unticked in that browser until you tick it again. This replaces the single box of 3.8.2.
+
+## v3.8.2 — 2026-11-13 — The Clean fanart window says it updates the players, with a box to turn it off
+
+- **Show the new fanart in Kodi and the other players** in the Clean fanart window, ticked by default. Since 3.8.0 the
+  replaced fanart already went to Kodi, Plex, Emby and Jellyfin as an artwork refresh, but the window did not say so.
+  Now it does, and unticking the box leaves the players alone (the job log says so); Update artwork in players in the
+  Metadata menu sends it later.
+
+## v3.8.1 — 2026-11-13 — Kodi gets one request at a time
+
+- **Every request to a Kodi now waits for the one before it.** Each part of Curator already sent its own Kodi calls one
+  after the other, but the library update queue, watched sync, the Kodi report, connection tests and on-screen notices
+  run in their own threads and could reach Kodi at the same moment. All Kodi calls now pass one lock per Kodi address,
+  so Kodi only ever has one request from Curator to answer. A large job, such as the artwork refresh after Clean fanart,
+  takes longer but never floods Kodi. A pause between calls (waiting for a Kodi scan to finish) does not hold the lock.
+
+## v3.8.0 — 2026-11-13 — New artwork shows in Kodi without a rescan; library workers survive a database error
+
+- **Changed artwork reaches Kodi without a rescan or a wipe.** Kodi keeps a cached copy of every picture it has shown, so
+  a new `fanart.jpg` under the same name stayed hidden behind the old one (Update library re-reads the item but keeps the
+  cache). Now, after Clean fanart and whenever a picture is chosen or uploaded in the artwork window, Curator queues an
+  artwork refresh of that movie or show in the Library updates queue: Kodi drops its cached copy of the changed pictures
+  and, when the file name changed (another extension), the item is pointed at the new file. Kodi shows the new picture
+  the next time the item is on screen. Nothing is rescanned, the .nfo is not read again and the watched state is not
+  touched. Plex, Emby and Jellyfin refresh the item. Clean fanart hands its items to the queue 100 at a time.
+- **Update artwork in players** in the Metadata menu at the bottom does the same for the movies or shows you pick, with
+  all their pictures: for artwork changed before this update, or outside Curator.
+- **Fixed: a database error stopped a player's library updates until Curator was restarted.** When a connection dropped
+  (Postgres restarting, for example), the worker thread of each player ended. It now logs the error and goes on after
+  10 seconds.
+
+## v3.7.9 — 2026-11-13 — Clean fanart: replace fanart that has a title or logo on it
+
+- **Clean fanart…** in the Metadata menu at the bottom (pick movies or shows; select all for the whole library) replaces
+  the fanart you already have when it has a title or logo on it. Curator does not record where a scraped fanart came
+  from, so each file is matched with the online pictures: by its exact size among the TMDB pictures (no download), or
+  else by comparing the picture with small previews. Fanart that matches a picture with text is replaced with the best
+  clean one (the clean-fanart order of 3.7.7); fanart that is already clean stays, and an item without fanart gets a
+  clean one. Fanart that matches nothing online stays unless *Also replace fanart that matches no picture online* is
+  ticked.
+- It never touches fanart you picked or uploaded in the artwork window, or a locked item, and keeps an item's fanart when
+  no clean picture exists online. A replaced file stays in that item's artwork window, so it can be picked back. It runs
+  as a file job in the Jobs panel with a line per item (replaced, already clean, no clean fanart online, left alone),
+  and asks TMDB and Fanart.tv at their usual pace. Rescraping with *Overwrite artwork* could not do this, because it only
+  replaces a picture with a larger one.
+
+## v3.7.8 — 2026-11-13 — No movie results window on a TV import; fanart choices also offered as extra fanart
+
+- **Fixed: Force scan now on the webhook queue opened the Movie scan results window** with an old movie scan's numbers,
+  although only episodes were queued. The page hears about a running scan from two places: the live update for the scan
+  that runs (here TV) and its own check for the scan of the open tab (Movies). It compared the two, so "TV running"
+  followed by "the last movie scan, finished" looked like a movie scan that had just ended. A scan is now compared only
+  with the earlier state of its own library. A scan you start still opens its results when it ends.
+- **The artwork window offers every fanart picture as extra fanart.** The extra fanart already on disk showed as rows
+  named extrafanart1, extrafanart2 and so on with no candidates, while the Fanart row above had many. There is now one
+  **Extra fanart** section for movies, shows and sets: it shows the files in `extrafanart/` and lists every fanart
+  candidate (clean ones first). Choosing one, or uploading a file there, adds it as the next `fanartN`; nothing already
+  there is replaced. The bin on a file there still deletes just that file.
+
+## v3.7.7 — 2026-11-13 — Lyrics downloads report back, Show call for webhooks, clean fanart first
+
+- **A lyrics download says what it did.** Search and download lyrics only said it had started. When it ends, a notice
+  now says how many lyrics were saved, how many tracks LRCLIB has none for, how many albums already had lyrics and
+  what failed (or that LRCLIB could not be reached), and the open album is read again so its lyrics marks are current.
+  The Jobs panel keeps the line per album.
+- **Show call on Recent webhooks.** Each webhook row keeps the call as it arrived (up to 64 KB). **Show call** in the
+  Queue window, Recent webhooks, opens the JSON body with a Copy button, so an ignored or unrecognised call can be read.
+  Calls received before this update have no body to show.
+- **Lidarr DownloadFailure and other calls without an item are recognised.** Lidarr's DownloadFailure and ImportFailure
+  carry no artist block, so they were reported as *Unknown … Not a Radarr, Sonarr, Bazarr or Lidarr payload*. They
+  now go to the Lidarr activity feed, named after the release. Health, HealthRestored and ApplicationUpdate calls from
+  Radarr, Sonarr and Lidarr are named after the app that sent them (by its instance name) instead of Unknown.
+- **Prefer clean fanart** (Settings, Movies, under Artwork languages; on by default). With an artwork language order
+  set (English by default), fanart followed it like posters, so English fanart with a title or logo on it beat a clean
+  one. Fanart without text now comes first, and a picture with text is used only when there is no clean one. Posters,
+  landscape, banners and the rest keep the language order, so landscape art keeps its title. The artwork window lists
+  and suggests clean fanart first. Existing fanart is not replaced; scrape artwork again (or pick it) to change one.
+
+## v3.7.6 — 2026-11-12 — Music search on the page, a scrape-failed notification, one webhook file job per step
+
+- **Music search filters the loaded list at once.** Typing in the Music search box asked the server for the whole
+  filtered library again after each pause and showed a progress overlay. The page already holds every album of the open
+  filter, so the search now runs there, with the same rule: an artist whose name matches keeps all its albums, otherwise
+  only the albums (and missing releases) whose title matches are shown. On a 28,500-album library it draws in about
+  0.13 s and sends no request. Select all, the column filters, the poster grid and Export follow the search, and an album
+  page stays open while it is filtered out. Clear filters empties the search without reloading.
+- **A scrape that fails, or leaves items unscraped, sends a notification.** New event under Settings, Notifications:
+  *A scrape failed, or could not scrape some items*, with the first five titles and their reasons. It is on for new
+  targets; tick it on existing ones. A scrape started by a webhook import is reported by *An import ended with a failed
+  step* instead, so one import never sends two messages.
+- **Webhook file jobs run once per step.** Subtitle clean-up, trailers, theme songs and season trailers after an
+  import ran once per item; each step now takes every imported item at once, so the episodes of one show are handled
+  together. An item that fails is logged and the rest still run.
+- The Music videos API moved out of the recycle-bin routes into its own file. The addresses are unchanged.
+
+## v3.7.5 — 2026-11-12 — Integrity wording everywhere; a stale front-end test
+
+- **The integrity settings use the button names**: *Quick integrity check after a Radarr or Sonarr import* and *Full
+  integrity check per day*, and the README and specification call the Music videos buttons *Quick integrity check* and
+  *Full integrity check* (renamed in 3.6.7). The specification describes the music video copy rules of 3.6.6.
+- **The front-end test for the Music videos filters** still expected any two videos with the same artist and title to
+  be Duplicates. It now checks the movie rules (Duplicate for the same release, Upgrade available for the weaker copy).
+  The Python suite skips this test when Node is not installed, which is how it went unnoticed.
+
+## v3.7.4 — 2026-11-12 — Kodi's stale entries are removed again, more carefully
+
+- **Fixed: Kodi entries of files that are gone were never removed.** After an upgrade, a rename or a delete, Curator
+  asks Kodi which entries point at files that are no longer there (Update library on a movie or show, and the check
+  before a folder scan) and removes them. Kodi's answer was read one level too deep, so no entry was ever found and
+  nothing was removed; the tests fed it the wrong shape and passed. It now reads the answer as Kodi sends it.
+- **Safer while it is switched on for real**: an entry is removed only when the library folder that should hold its file
+  is mounted and can be read (a drive that is away looks exactly like files that are gone), and the check before a
+  folder scan only touches entries inside that folder, whatever Kodi's filter returns. Entries whose path no Kodi path
+  row translates are still left alone.
+- Expect a one-off tidy-up in Kodi the next time a movie or show gets a library update: entries of old files that piled
+  up are removed then. The activity log says how many.
+
+## v3.7.3 — 2026-11-12 — Saved filters can run an action on a schedule; the Kodi report
+
+- **A saved movie or TV filter can run an action**: *Scrape what is missing*, *Quick integrity check* or *Download
+  trailers*, every day or every week on a chosen day, at a chosen hour (the time zone under General). It runs for what
+  the filter matches at that hour, as a job in the Jobs panel that waits for a running scan. Set it in the Save filter
+  window; the Saved menu shows the schedule and has **Run now**, with the last result in its tooltip. The action reads
+  more ribbons than scan tagging does (New, Latest added, Not scraped, Scrape failed, No NFO, No poster, No trailer,
+  Ignored, and for movies Upgrade available, Duplicate, Probe failed and Corrupt); the search box and the few ribbons
+  that only work on screen are left out, and a filter with nothing the server can judge cannot get an action, so an
+  action never falls back to the whole library. Scan tagging keeps its rules.
+- **The Kodi report** (Tools, Orphan report, Kodi, **Compare with Kodi**) reads Kodi's movies and episodes, in pages of
+  2,000, translates each file through the Kodi path rows and compares it with the library: entries whose file is gone
+  (**Clean the Kodi video library**), library files Kodi has no entry for (**Scan in Kodi**, per folder or for all),
+  files Kodi has that Curator does not index, Kodi paths no row translates, and library folders no row reaches. Nothing
+  changes until a button is pressed, and a library folder that is not mounted is left out so an offline drive shows
+  nothing. Music is not included: Kodi lists music by song, which on a large library is slow on Kodi's side.
+
+## v3.7.2 — 2026-11-12 — Undo Fix Match; a music scan failure from v3.6.6 fixed
+
+- **Fixed: music scans and Lidarr imports since v3.6.6 reported every album they wrote as failed** ("unsupported
+  operand type(s) for +=: 'int' and 'list'"): new and changed albums in an incremental scan or a Lidarr import, and
+  every album in a full or deep scan. The tracks were still written, but the album was listed under Failures and its
+  MusicBrainz lookup and missing artwork were skipped in that run. An incremental scan leaves those albums alone because their files did not change, so run a full music scan once after this update to look them up. The batched
+  write of unchanged tracks reused the name of the count the album step returns. A test against a real database now
+  runs that step.
+- **Undo Fix Match.** A movie or show page has **Undo Fix Match** for seven days after a Fix Match. It puts back the
+  metadata, ids, seasons and episodes (numbers included), and the artwork and .nfo files Curator keeps next to the item,
+  as they were just before the Fix Match. Placeholder episodes and empty seasons the Fix Match added are removed, ones it
+  removed come back, and artwork or .nfo files it added go to the recycle bin. Video files, paths and which file an item
+  points to are left as they are now. It waits while a scan or scrape runs, and only the last Fix Match of an item can be
+  undone. A Fix Match that waited in the queue is covered too: the state is saved when it is applied.
+
+## v3.7.1 — 2026-11-12 — "Added to the library" notification
+
+- **A daily or weekly message listing what was added.** Settings, Notifications has a new event, *Added to the
+  library*, and below the targets a schedule for it: never (the default), every day, or every week on a chosen day, at
+  a chosen hour (in the time zone set under General). The message lists the movies, the episodes grouped per show
+  (*Fargo (2014) S01E01–E04*), the albums and the music videos added since the last one, up to 15 names per kind.
+  When nothing was added, nothing is sent. Tick the event on each target that should get it; new targets do not have
+  it on.
+- **Preview** shows the message as it would go out now, and **Send now** sends it at once to the targets that have the
+  event ticked and starts the next window. The time of the last message is kept in `config/digest_state.json`, so a
+  restart neither sends it twice nor loses what came in meanwhile.
+
+## v3.7.0 — 2026-11-12 — One compare window layout for every Duplicate pill
+
+- **Albums, movies, episodes, music videos, and show and artist folders compare the same way.** Each window says why
+  the rows are copies, shows the copies side by side with a picture, the name, the facts, the Radarr/Sonarr/Lidarr line
+  and the path, puts **Delete from disk** in the bin at the top and **Remove from library** at the bottom of each copy,
+  and ends with **Not duplicates**. The middle is what fits the media: the songs of each album, the file facts of a
+  movie or episode, the folder totals of a show or artist.
+- **Albums gain Remove from library** in the compare window, and **Not duplicates** for every pair whose songs line up
+  (by title or position as well as AcoustID or fingerprint); same-release pairs had no such button.
+- **Show and artist folders gain Remove from library and a reason line** (the shared TheTVDB, TMDB, IMDb or MusicBrainz
+  id, or the same name), and use the full window width instead of narrow cards.
+- **Music videos have a compare window.** Their Duplicate and Upgrade available pills open it (they used to type the
+  title into the filter box), with the suggested copy to keep, Delete and Remove from library.
+- **Movie duplicate groups also mark the suggested copy to keep**, as the upgrade window did.
+- **The tab names stay on one line** on screens wider than 1,100 px (Movie sets, TV shows and Music videos wrapped out
+  of the tab bar).
+
+## v3.6.9 — 2026-11-12 — Bulk album actions run as one job
+
+- **Applying matches, treating as compilations, ReplayGain, Audit audio, Check missing tracks and Find metadata for
+  several artists run as one job.** The page sent one request per album, one after another, and waited for all of them
+  before it showed anything. Now one job starts at once and shows in the Jobs panel as *Album batch*, with progress, a
+  log line per album and a **Stop** button (it stops after the album it is on). An album that fails is logged with the
+  reason and the rest go on. When the job ends, the page reads again only the artists it touched, clears the loaded
+  matches that were applied, and says how many went through and the first failure. Apply all matches uses the same job.
+- **ReplayGain and Audit audio in a batch no longer add one Jobs entry per album**, and a batch audit sends one
+  *corrupt file* notification for the whole run.
+- One batch runs at a time; starting another while one runs says so instead of queueing it.
+
+## v3.6.8 — 2026-11-12 — The .nfo check on the movie and TV lists stops reading every plot
+
+- **The purple "NFO differs" check reads only rows that changed.** Each load of the Movies or TV list fetched the plot,
+  outline, tagline and other .nfo fields of every movie, show, season and episode and fingerprinted them in Python
+  (about 0.2 s for 10,000 movies and 0.4 s for 50,000 episodes, plus moving every plot out of the database). The
+  database now returns an md5 of those columns instead, and only a row whose md5 changed since the last load is read
+  in full and fingerprinted again. Any change to those columns, from a scan, a scrape, an edit or a watched sync, changes
+  the md5, so the check stays exact. The first load after a restart still reads everything once.
+- **The lists no longer write while loading, except the first time a file is seen** (its baseline) and after the
+  .nfo itself was checked; a row that looks changed is still confirmed against its .nfo before it turns purple.
+
+## v3.6.7 — 2026-11-12 — Small fixes from the review: scans, indexes, Follow imports, menus, export, and slow requests in About
+
+- **A full music scan of one folder fills release fields for that folder only.** Label, catalog, barcode, release
+  status, country and MusicBrainz ids were filled from the tags of every track in the library; now only albums under the
+  scanned folders that still have a blank field are read.
+- **New indexes** on the movie TMDB and IMDb ids, the show TheTVDB and TMDB ids (also trimmed, as the copy windows
+  compare them), and on `updated_at` of albums and episodes, which the list refreshes during a scan read.
+- **Follow imports stops resending an unchanged list.** The open window asks every 3 seconds; when nothing moved the
+  answer is one line instead of 100 rows (the running times still count up).
+- **Large replies are compressed a little less.** gzip level 6 instead of 9: on a 34 MB music list it took 0.32 s
+  instead of 0.60 s, for 3% more bytes.
+- **Video menus have Stop ignoring**, like Music, when every picked item is ignored (it sets them back to New).
+- **Music right-click menus have Update library and Move…** (artists), and **Update library** (albums: one update per
+  artist folder), which were only on the artist and album pages.
+- **A filter that matches nothing stays on**, with *Nothing matches these filters* and a **Clear filters** button, in
+  Music, the poster grids and Music videos. Music used to switch back to All by itself.
+- **The last three browser confirm boxes** (merging a season, discarding unsaved lyrics, purging the data or cache
+  folder) use Curator's own confirm window.
+- **Integrity buttons have one name everywhere**: *Quick integrity check* and *Full integrity check*.
+- **Music video scans send the scan finished and scan failed notifications**, like the other libraries.
+- **Music videos have Export** (CSV or XML, the shown list).
+- **Creating a movie set** says which movies could not be added instead of leaving them out silently, and the TMDB
+  collection id typed in the **+ Set** window is kept (it was sent under a name the server did not read).
+- **Follow imports shows what a Lidarr import's scan did**: the scan step lists its stage times (MusicBrainz, Artwork
+  and so on), and a scan that failed now shows as failed instead of done.
+- **The movie and episode compare windows say why the rows are copies**: the id that tied them (TMDB, IMDb, TheTVDB,
+  or title and year), and for a duplicate group what makes it the same release.
+- **About lists slow requests**: every request that took two seconds or more since Curator started (newest 50), with
+  its time, so a slow window can be named without reading the logs.
+
+## v3.6.6 — 2026-11-12 — Faster TV refreshes, scans and music counts; music videos follow the movie rules; a music Corrupt filter
+
+- **TV list refreshes during a scan check only the shows that changed.** Each refresh read every season and episode
+  .nfo in the library, and every show to look for twin folders. It now reads those of the changed shows only.
+- **The music scanner writes a track in one statement.** A changed track was a lookup and then an update or insert; an
+  unchanged track was one update each. A changed track is now one insert-or-update, and the unchanged tracks of an
+  album one statement together.
+- **The music list no longer reads every album review**, only whether one is there (for Missing album review). The
+  filter counts are one pass over albums and one over artists instead of about twenty, and the Incomplete tags filter
+  asks once for the whole list instead of once per album.
+- **Music videos follow the movie rules for copies.** Duplicate now means the same release (same source, resolution and
+  about the same size); a weaker copy shows **Upgrade available**. Before, any two videos with the same artist and title
+  were Duplicates.
+- **Deleting a music video uses the movie guards and window.** The Music videos folder must be mounted and writable, as
+  for a movie, and the window offers **Remove from library** as well as Delete from disk. Restoring a music video from the
+  recycle bin brings back its .nfo, media info file and pictures with it.
+- **Music has a Corrupt pill and filter.** Audit audio already tested FLAC files; it now also decodes other formats with
+  ffmpeg. An album with a track that does not decode cleanly shows **Corrupt**, the filter menu has *Corrupt files*, a
+  newly found corrupt file is recorded in Activity history and sends the *corrupt file* notification, and a track whose
+  file is replaced loses its old audit result.
+- **One wording for every menu.** Music right-click items read like the video ones (*Find metadata (3)*, *Write .nfo*,
+  *Mark as processed*, *Remove or delete…*), with the count only when more than one is picked. The tabs read
+  *Movie sets*, *TV shows* and *Music videos*, Alt+5 opens Music videos, and the Tools menu no longer repeats the Music
+  videos tab and the Library analytics button.
+
+## v3.6.5 — 2026-11-11 — Copy windows open without Radarr or Sonarr; Lidarr deletes reach the library; music edits refresh only what changed
+
+- **The movie and episode Upgrade and Duplicate windows open at once.** They read every movie, or every episode in
+  the library, to find the copies of one item, and then waited for Radarr or Sonarr to say which copy it has. They now
+  read only the item's possible copies (same TMDB, IMDb or TheTVDB id, season and episode), and the Radarr and Sonarr
+  lines are filled in a moment after the window opens (`GET /api/v1/copies/{kind}/{id}/arr`,
+  `GET /api/v1/video-duplicates/arr`), the way the album windows load Lidarr since 3.6.4. A Duplicate pill reads only
+  that item's group, and the Duplicates window only the open library. Replacing a copy no longer asks Radarr or Sonarr
+  first.
+- **Lidarr deletes reach the library.** AlbumDelete, ArtistDelete and TrackFileDelete were taken as imports: an album
+  or artist delete was dropped ("did not include any imported file paths"), and a deleted folder showed as a failed
+  import. They are now removals. The album is found under the artist folder Lidarr names (by MusicBrainz release group,
+  else title). When its folder is gone, the album (or, for an artist, every album under that folder) leaves the library
+  and the players are asked to clean; Activity history says "Removed in Lidarr". Nothing leaves the library when the
+  music folder around it cannot be read, so a mount that is away never empties it. When the folder is still there
+  (Lidarr kept the files, or one track file went) the album is read again; an artist whose files Lidarr kept stays.
+- **Music edits refresh only the artists they touched.** Applying a match, treating albums as compilations, album jobs,
+  finding artist metadata, writing an .nfo, an upgrade, an artist merge and adding an artist reloaded all 29,000 albums
+  afterwards. They now read again just those artists, and artist folders with the same name, whose Duplicate and Upgrade
+  marks can follow (`POST /api/library/refresh`), under the open filter and search.
+- **Deleting music from disk cleans the players and leaves busy albums alone.** Like a movie or episode delete, it now
+  asks Kodi and the other players to clean the artist folders, and it skips an album a batch or lookup job is writing
+  ("A running job is using this item").
+
+## v3.6.4 — 2026-11-11 — The Duplicate window and deleting a copy no longer wait for Lidarr
+
+- **The Duplicate pill opens its window at once.** The window waited for Lidarr to say which copy it uses, and for a
+  copy without a MusicBrainz release group that meant reading Lidarr's whole artist list. The pairs now come from the
+  database alone and the Lidarr lines are filled in a moment later. The lookup of albums that share a recording or a
+  fingerprint read every track in the library; it now uses two new indexes (about 0.04 s for one album on a library of
+  340,000 tracks).
+- **Deleting a duplicate copy is quick.** Telling Lidarr to read the artist folder again now runs in the background
+  instead of holding up the delete, and the window that reloads after it opens at once too.
+- **Import logs time the catalogue notes on their own.** Release countries, duplicates, upgrade copies and original
+  years were counted inside "Artwork took …"; they now have their own "Countries, duplicates and upgrades took …" line.
+- **The music Scan icon is redrawn**: two beamed notes with the magnifier in the same place as the movie and TV icons.
+  The second note's stem stopped short of its head.
+
+## v3.6.3 — 2026-11-11 — Special releases: one setting for duplicates, one for upgrades
+
+- **Special releases have a setting per relation.** A special release is a Deluxe, Expanded, Anniversary, Special,
+  Limited, Collector's, Extended or box set edition, an album with bonus tracks, or a copy with a different number of
+  tracks. Settings, Music, Duplicates and upgrades now has *Count special releases as duplicates* and *Count a
+  better-sounding special release as an upgrade*, both off by default, so a Deluxe edition can be offered as an
+  upgrade without being marked a duplicate (or the other way round). They replace the two v3.6.2 settings. Remix
+  albums never count as either.
+
+## v3.6.2 — 2026-11-11 — Remix albums and special editions are not copies; the Duplicate and Upgrade pills open fast
+
+- **A remix album is never a duplicate or an upgrade of the studio album.** Edition notes such as "(Remixes)" were
+  dropped when titles were compared, so "Californication (Remixes)" counted as a better copy of "Californication". A
+  remix album (MusicBrainz release type Remix, or Remix, Remixes, Remixed or a "(… Mixes)" note) is now its own kind,
+  next to album, single, EP, live and compilation.
+- **Two settings under Settings, Music, Duplicates and upgrades**: *Keep special editions apart* (on by default:
+  Deluxe, Expanded, Anniversary, bonus tracks, Special, Limited, Collector's, Extended, box sets) and *Keep copies with
+  a different number of tracks apart* (off by default). They apply to the pills, the comparison windows and the bulk
+  duplicate cleanup, and changing one records the marks again at once.
+- **The upgrade window and an album's Duplicate pill read only that album and its possible copies** (an artist of the
+  same name, the same MusicBrainz release, or a shared recording or fingerprint), not the whole library. On a test
+  library of 29,000 albums the upgrade window took 0.02 s instead of loading every album first (0.3 s here), and the
+  Duplicate window 0.11 s instead of 0.77 s; a slower database gains more. A Duplicate pill whose mark no longer
+  holds is still cleared instead of opening an empty window.
+
+## v3.6.1 — 2026-11-11 — Music scan log times each stage; recording duplicates for a few albums no longer reads the library
+
+- **The music scan log says how long each stage took**, where it ends, named like the stages on the progress bar:
+  "Directory walk took 0.7s", "MusicBrainz took 14.3s", "Artwork took 2.6s" … A stage under a tenth of a second is
+  left out. The "Time per step" line at the end still splits the stages into their parts.
+- **"Countries, duplicates and upgrades" read the whole library for a scan of two albums** (20 s on a real library):
+  it loaded every album and the tags of every track to compare copies. It now loads only the albums that can be
+  copies of the scanned ones (same artist name or same MusicBrainz release), with the same marks as before: 0.65 s →
+  0.02 s for one album on a test library of 29,000 albums. A mark left behind elsewhere is still cleared by the
+  catalogue maintenance at start.
+- **A scan of several albums by one artist does the artist-level work once** (website, artist artwork, the name from
+  tags), after that artist's last album; it ran once per album. "Time per step" shows it as "Artist folder".
+
+## v3.6.0 — 2026-11-11 — Follow imports: the line fills in order
+
+- **The line between steps turned green out of order**: the line into a step was green as soon as that step was waiting
+  or running, so the library update (waiting from the moment an import is picked up) showed a green line while the
+  scrape and the file jobs before it had not run. The line into a step is now green only once the step before it is
+  finished, so it fills from left to right.
+
+## v3.5.9 — 2026-11-11 — Follow imports names every episode of a season import
+
+- **A season imported as many webhooks showed only its first episode** ("Cheers (1982) S01E01 · 23 webhooks"). It now
+  shows the episodes the webhooks named, as ranges: "Cheers (1982) S01E01–E23 (23 episodes)". A gap stays visible
+  ("S01E01–E03, E05, S02E01 (5 episodes)"). This is the same list of episodes the queue already kept for the folder.
+
+## v3.5.8 — 2026-11-11 — Faster library lists and imports: work only on what changed
+
+A pass over the code for work done on the whole library when only a few items changed, slow fixed waits, and one
+database query per item where one per batch does. Measured on a test library of 6,500 movies, 30,000 episodes and
+29,000 albums with 342,000 tracks. No request limit of an outside service was touched.
+
+- **The library lists open faster**: music 2.9 s → 1.2 s, movies 1.4 s → 0.6 s, TV 2.0 s → 0.5 s, with the same
+  content (compared reply by reply). FastAPI passed every value of these large, already cleaned lists through its
+  generic converter (1.6 s for the music list alone); they now go straight to JSON. The TV list counted each show's
+  episodes, new, missing, duplicate, upgrade and multi-episode files in seven separate passes; it now does one
+  (checked equal on 1,000 shows).
+- **An import with the player refresh on snapshots only the imported movies or shows**, not the whole library folder
+  (0.7 s per TV import on 30,000 episodes before).
+- **A scan refreshes only its own side's playlists**: a movie or TV import no longer rewrites the music playlists, and
+  a music scan no longer rewrites the movie and TV ones.
+- **Reading an album asks the database once for its stored tracks**, not once per track.
+- **An import whose scrape has to wait for another scrape starts within a second** of it ending (it checked every 5 s).
+- Checked and left as they are: recomputing duplicate and upgrade marks for the whole library takes 0.1 s for 6,500
+  movies and 0.4 s for 30,000 episodes; the other fixed waits are background loops that wake as soon as there is work.
+
+## v3.5.7 — 2026-11-11 — A scan of chosen albums: faster start, only their artists sent to the players
+
+- **A scan of a few albums asked Kodi (and the other players) to scan the whole music library**: it named no folder.
+  It now names the artist folders of the scanned albums, so Kodi scans only those.
+- **The start of such a scan did work for the whole library.** To find the one album it listed every album folder of the
+  artist and looked inside each for audio, a directory listing per album over a network share; it now goes straight to
+  the album (a disc folder still resolves to its box set). With the player refresh on, it also took a snapshot of every
+  album and track in the library before and after the scan; it now reads only the chosen albums and their artists.
+  On a test library of 29,000 albums and 342,000 tracks the snapshot went from 1.5 s each way to under 0.1 s.
+- **A scan of chosen albums ends with "Time per step"** like movie and TV scans: reading the albums, MusicBrainz and
+  AcoustID, missing metadata and artwork, .nfo files, the player refresh and the rest, slowest first.
+
+## v3.5.6 — 2026-11-11 — Scan times an hour off; the walk of one album counts its tracks
+
+- **"This stage" could be an hour too long**, with an "About 1:37:08 left" to match: the stage start was written as the
+  container's local time without its time zone, and a browser in another zone read it an hour wrong. Job start and end
+  times (scans, scrapes, file jobs, splits, watched sync, Trakt sync, ARR checks and the orphan report) now carry their
+  offset, so the page reads the right moment.
+- **A scan of chosen albums counts tracks, not albums**: "Reading Classic Album Collection: 34 of 102 tracks". A scan of
+  one box set sat at 0% until the whole set was read.
+
+## v3.5.5 — 2026-11-11 — Time per step in every movie and TV scan; imports stop losing up to a minute
+
+A one-movie import took 54 s to scan on a real library. On a test library of 5,000 movies and 30,000 episodes a
+one-movie or one-show import scans in about a second, also with the player refresh on (its snapshot of every item
+costs about 0.7 s for TV), so the time goes elsewhere. To show where:
+
+- **Every movie and TV scan ends with "Time per step"**, slowest first: reading the files, probing (split into ffprobe,
+  MediaInfo and dovi_tool for Dolby Vision files), saving file details, artwork notes, trailers and themes on disk,
+  saved filter tags, playlists, .nfo files, duplicate and upgrade marks and the player refresh. Follow imports adds it
+  to the scan step's detail, so pointing at a slow scan says which part took the time.
+- **An import that had to wait for another scan looked again only once a minute**, so it could lose up to 59 seconds
+  after the other scan had ended. It looks every 5 seconds now, Follow imports shows the scan step as waiting with the
+  reason, and the finished step says how long it waited.
+
+## v3.5.4 — 2026-11-11 — Follow imports shows how long an import took
+
+- **Each import shows its time under its status**: "5m 8s in all · 1m 17s without waiting". The first is from the
+  webhook to the end of the last step (up to now while it is on its way), the second leaves out the quiet period it
+  waited for more webhooks. Pointing at it says how much of it was waiting.
+
+## v3.5.3 — 2026-11-11 — A window opened from another one opens in front
+
+- **Follow imports opened behind the Queue window** when started from its button, so it only showed once the Queue
+  window was closed. Windows sat at one level and overlapped in page order. Now any window that opens while another is
+  open comes in front of it, and Escape closes it first. This also covers any other window opened from a window.
+
+## v3.5.2 — 2026-11-11 — The album upgrade window compares the tracks too
+
+- **The upgrade window lists every copy's songs side by side**, under the release rows, like the duplicate window does.
+  Songs are lined up on the open album by AcoustID recording, then fingerprint, then disc, number and title, then title,
+  then position, so a differently numbered copy still lines up. A song one copy lacks gets an empty cell, and a
+  differing title or a missing song is marked like any other difference. Each song shows its format, bit depth, sample
+  rate and bitrate.
+
+## v3.5.1 — 2026-11-11 — Upgrade and Duplicate pills: clickable in the music tree, red while busy
+
+- **Upgrade available and Duplicate in the music tree** are buttons now. Clicking one turns it busy at once ("Looking up
+  upgrades…") and opens the window, like the button on the album page; before, it was a label that gave no sign it was
+  working while the album and its copies were looked up, and an error went unreported.
+- **A busy pill is red with a red outline and glow.** The Upgrade pill's green pulse kept a green outline and glow on it,
+  and the Duplicate pill's own colours hid the busy state completely on movies and TV, so those never looked busy.
+  This covers every Upgrade and Duplicate pill (music, movies, episodes, show folders).
+
+## v3.5.0 — 2026-11-11 — Follow imports: an item is not Done before its player update
+
+- **Imports showed Done while their last step had not started.** When several items were imported together, each one
+  counted as finished as soon as its own scan was done, but the players' library update is queued only after every
+  item of the run is scanned. An item now keeps a waiting library step from the moment it is picked up, and the
+  player's own step (Kodi, Plex ...) takes its place when the update is queued, so it turns green when that player is
+  done.
+- **A finished import says why a step was skipped**, for example "Library update: No player library update is turned on
+  for music", so a grey dot is explained.
+
+## v3.4.9 — 2026-11-11 — Faster imports: no long Kodi waits, albums side by side, metadata three at a time
+
+I timed every scan type (all items, 10 and 1) and every webhook from the queue to the player, on a test library of 40
+movies, 12 shows and 30 albums with a stand-in Kodi whose folder scans take a second.
+
+- **Kodi library updates no longer wait 5 to 185 seconds per folder.** Curator looked at Kodi every 5 seconds after
+  sending a folder scan. A one-folder scan often ends sooner, so Curator never saw it, waited the full 90 seconds,
+  sent the same scan again and waited again. It now looks every half second for the first 10 seconds, takes a Kodi
+  that answered "not scanning" all that time as done, and checks for the end every 2 seconds. Measured: 10 movies from
+  forcing the queue to Kodi done went from 121 s to 25 s, 1 movie from 53 s to 5 s. The 90-second wait and the second
+  try stay for a Kodi that does not answer at all.
+- **Lidarr imports of different artists run side by side** (three at a time); one artist's albums stay in order. Each
+  site keeps its own request limit across threads, so no site is asked faster than before. 10 albums: about 60 to 85 s
+  instead of about 140 s; the online sites vary from run to run.
+- **The missing-metadata step of a music scan does three artists or albums at a time**, for the same reason. A full scan
+  of 30 new albums went from 454 s to 387 s; what is left is mostly the MusicBrainz step, which MusicBrainz's own rule
+  holds to one request a second.
+- The import notices the end of its scrape within half a second instead of 2 seconds.
+- Measured and fine as they are: movie and TV scans (the whole test library in 4 to 8 s, 1 or 10 folders in under
+  4 s, an unchanged library in about 2 s), an unchanged music library (2 s), and one album (6 s).
+- Not changed: an import waits for the quiet period (`CMM_DEBOUNCE_MINUTES`, 20 minutes by default) before it starts, so
+  more webhooks for the same folder join one run. That wait is the largest part of an import's time; Force scan now in
+  the Queue window skips it.
+
+## v3.4.8 — 2026-11-11 — Movie clean-up on Update library, failed-import alerts, more sources in Follow imports, browser smoke test
+
+- **Update library on a movie** now also removes Kodi's entries for that movie whose file is gone (an old copy left by an
+  upgrade into a renamed folder, a stacked copy whose parts are all gone), like a show already did. Another copy whose
+  file is there stays, and nothing is removed when the movie folder is not there.
+- **A failed import sends a notification**: the new event "An import ended with a failed step" goes once per import to
+  the targets that have it ticked, with each failed step and its reason. New targets have it on.
+- **Follow imports covers every way to a player**: items restored from the recycle bin, and library updates and Kodi
+  cleans started in Curator (Update library, the Queue window's manual update and clean). Bazarr events already went
+  through the webhook queue and show there; a test now says so.
+- **One test library with every kind of copy** (movies, an upgrade, a show in two folders, twin artists, album copies,
+  a box set with a leftover disc entry, music video copies) checks every duplicate detector and the bulk cleanup plan
+  together on a real database.
+- **The smoke test opens the app in a headless browser** (Playwright in Docker) and goes through every library tab,
+  Tools window and Settings tab, failing on a JavaScript error, a server error or an error notice. `SKIP_BROWSER=1`
+  leaves it out; the first run pulls the Playwright image (about 2 GB).
+- The 9-second pause I reported in the bulk cleanup was the gap between two of my own test commands, not the app.
+
+## v3.4.7 — 2026-11-11 — Follow imports: each webhook item's path, step by step
+
+- **Follow imports** (Tools menu, and a button in the Queue window) shows each item Radarr, Sonarr or Lidarr sends as a
+  row of steps: webhook, waiting, scan, scrape, file jobs, then each player's library update. Every step shows its
+  status and time, and pointing at it shows the detail; the step that failed or is running is written out under the
+  row. A webhook that could not be placed in the library (no path mapping) ends at its first step with the reason. The
+  window refreshes itself every 3 seconds. Each item is recorded in a new table, `ingest_journeys` (newest 300 kept).
+- **An import no longer pops up the scan results window** and its own start and finish notices over what you are
+  doing. A failed import scan still shows its error, and the run still ends with one "Webhook queue finished" notice
+  (the second, near-identical "Curator Run received" notice is gone; it still shows when the run fails).
+
+## v3.4.6 — 2026-11-11 — Fixes from a debugging pass: missed release files, false errors in Settings, version label
+
+I ran every test layer (Python on Windows and on Linux in the image, JavaScript, Postgres, the smoke test), pyflakes over
+the source, and then used the built image with generated media in a browser: every library tab, every Tools window,
+every Settings tab, the item pages, the duplicate windows, a damage check and a real bulk cleanup.
+
+- **A movie or episode whose release group is OTHER, SCENE, SHORT, EXTRA or INTERVIEW was never scanned.** The file name
+  ended in `-OTHER`, which the extras rule reads as a Plex extra (`-other`), so the file was skipped as a bonus video. A
+  name that carries a resolution, source or codec (1080p, BluRay, WEB-DL, x264 ...) is now always the release itself.
+- **Opening Settings showed three red errors** ("Radarr is not set up", the same for Sonarr and Lidarr) when those apps
+  are not configured: Settings asked each of them for its profiles. Only an app with an address and a key is asked now.
+- **The header could show v1 instead of the version** right after a restart, until a background job had hashed every
+  static file. The version is read at start now.
+- **About showed "dev" as the version**: it read a page element that no longer exists. It shows the server's version.
+
+## v3.4.5 — 2026-11-11 — Box set disc folders stay one album; a deep scan of chosen albums writes only their .nfo
+
+- A scan of one folder (a Lidarr import or retag, or a selected album) took the folder it was given as the album and its
+  parent as the artist. For a disc folder of a box set (`Artist/Box Set/CD 03 - ...`) that made each disc an album of its
+  own, under the box set folder as its "artist", next to the box set album a full scan had already made. The albums then
+  showed as duplicates of each other. Those scans now resolve a disc or wrapper folder to its album folder the same way a
+  full scan does, so the box set stays one album with all its discs.
+- Disc albums made before this fix are dropped by the next full music scan, which removes albums it did not see.
+- **A deep scan of chosen albums rewrote the .nfo of every album in the library** when Rewrite .nfo was on: the
+  selected-albums scan handed no album list to the .nfo step in deep mode. It now hands over the chosen albums, so only
+  their files are written. A deep scan of the whole library still rewrites everything.
+- **Every stage of a scan of chosen albums now stays on those albums**, in every scan mode. The sidecar count and the
+  discography refresh used to cover the whole artist folder; the Lidarr import scan recorded release countries and
+  duplicate and upgrade marks for the whole library. A scan of chosen albums now also records those marks for its
+  albums, so a stale Duplicate pill clears without a full scan.
+- **Old disc albums go when their box set is scanned.** Album entries inside a scanned album folder that no longer hold
+  a track (the leftovers of a disc folder scanned on its own) are removed, with an artist entry left without albums.
+  Rows only, never a file, and never inside an artist folder of loose tracks.
+
+## v3.4.4 — 2026-11-10 — Local disc art, missing disc art, season new-episode pill, lyrics-only download
+
+- **A disc image that is already in the album folder now counts.** The D pill looked only at images marked selected, so a
+  local `discart.png` (or `back.jpg`, `spine.jpg` and so on) that was found by a scan but never selected showed as
+  missing. The album now also counts any such file in its folder.
+- **Download missing artwork saves images again when the image marked selected has lost its file.** A selected row
+  whose file had been deleted or moved blocked the download for that type, so the disc art found by a manual search
+  was never saved. The missing image is now fetched and selected again.
+- **A season shows "N new episodes"** like the show does, for each season that has episodes marked NEW. Missing
+  episodes are not counted.
+- **Search and download only lyrics.** Right-click one or more albums or artists and choose "Search and download lyrics
+  for selected albums" (or artists). It queues a lyrics-only job as a background job that you can follow in Jobs. Tracks that
+  already have lyrics are skipped, and nothing else (tags, artwork, .nfo) is touched.
+
+## v3.4.3 — 2026-11-09 — Folders and files are created group-writable
+
+- **The container now runs with umask 002**, so folders Curator creates are 775 and files are 664 (owner and group can
+  write, everyone can read, so Kodi still reads them). Before, folders came out as 755 and most files as 644, and
+  only `.nfo` and artwork written through the shared writer got 664. `UMASK` defaults to 0002 in the image, in both compose files and in `.env.example`; change it there
+  to use another value. Existing folders and files keep their permissions. A `UMASK` that is not a valid umask now falls
+  back to 0002 with a message in the log, instead of stopping the container.
+- The IMDb status test expected the old `Curator/` user agent and now expects the Mozilla default.
+
+## v3.4.2 — 2026-11-07 — Update library on a show removes that show's stale Kodi episodes
+
+- **About** shows the real release date, read from the new `app/RELEASE_DATE` file (it was fixed text from v2.4.0).
+- **About** rows now have space between the label and the value (Version, Release date, Libraries, NFO dialects).
+- **IMDb data user agent** defaults to a common Mozilla browser name instead of naming Curator. Anything typed in Settings is still sent instead.
+
+- **Update library…** on a TV show only scanned. A Kodi scan never removes the entry of an episode whose file is gone, and
+  the clean-up Curator ran before the scan covered just the folder it scanned. It now also asks Kodi about that show (found
+  by a shared id, else title and year, so a renamed folder still matches) and removes the entries of its episodes whose
+  file is gone from disk, plus the show when none is left. Other shows and the rest of the library are not touched, and
+  nothing is removed when the show folder is not there (an offline mount).
+- The dialog said "Queued" even when nothing was queued (a library with that media type switched off). It now says so.
+- Movies are not covered yet.
+
+## v3.4.1 — 2026-11-07 — Kodi video clean after every change that leaves an old entry
+
+Old items stayed in Kodi after newer ones were scanned, because only some changes asked Kodi to clean its library.
+
+- **Renames** from Radarr and Sonarr now ask for a clean (before, only imports that replaced a file and deletes did).
+- **Curator's own changes** now ask for one too: deleting items from disk, replacing the original after a Profile 8
+  remux, deleting a split source, moving a folder, and a scan that removed missing files. It is a clean with no scan,
+  one waiting job however many requests arrive, and nothing happens when the Kodi clean setting is off.
+- **A clean Kodi refuses** is tried once more and then recorded as failed. Before, the history said it finished.
+- Removing an item from the library keeps its files, so Kodi still has them and it asks for no clean.
+- Not changed: music has no clean after a webhook (Curator removes stale songs per folder), because an audio clean
+  drops albums with missing files. Not verified against a real Kodi.
+
+## v3.4.0 — 2026-11-02 — Tools menu, music video tab, unwatching, music play counts, duplicate artists, CI
+
+- **Tools menu** in the header for the maintenance windows; the analytics window no longer carries those buttons.
+- **Wishlist searches** report which items were searched in batches instead of silently stopping at the first 100.
+- **Music videos are a library tab** with filters, a Duplicate pill, integrity checks (Check, Full check), bulk duplicate
+  cleanup and the recycle bin. The old window and its header button are gone (the tab and the Tools menu open it).
+- **Watched sync**: optional unwatching (remembers the last synced state per player), several Jellyfin/Emby users, and
+  music play counts for Kodi, Jellyfin, Emby and Plex. Settings `watch_sync_unwatch`, `watch_sync_music`.
+- **History** now records music renames, remux, split, removal from the library and watched-sync changes.
+- **Duplicate artists**: same MusicBrainz id or same name; the Duplicate pill opens a compare window with Merge and
+  Not duplicates (new table `dismissed_artist_twins`).
+- **CI**: GitHub Actions run the Python, SQL and JavaScript tests.
+- A browser smoke test of the built image found that the artist Duplicate pill opened the artist instead of the compare window (the
+  row's click handler took it first). Fixed.
+- **Lidarr label on duplicate albums**: copies without a MusicBrainz release group got no Lidarr id or "Not in" at all.
+  They are now found through Lidarr's artist folder and track files.
+- The Music videos tab reloads its list each time it is shown (a scan run elsewhere left it stale), and the library
+  scan route refuses `musicvideos` instead of failing on a column length.
+- Plex now un-marks watched items when Spread unwatching is on. The artist compare window shows small sizes in KB.
+  `scripts/smoke-test.sh` runs the image against generated media and checks the API.
+- Not verified against live Jellyfin, Emby, Plex or Lidarr apps.
+
+## v3.3.3 — 2026-11-02 — Fixes from a smoke test of the built image
+
+I built the image, ran it against a throwaway Postgres with generated media, and used the new windows in a browser.
+That found bugs the mocked-database tests could not, and they are fixed here. Every one has a test on a real Postgres.
+
+- **Full TV scans failed.** `LIKE 'missing://%'` sat inside a query that takes parameters, so Postgres read the `%` as a
+  placeholder. This was in code from the v3.0 incremental-scan work (`ids_with_gaps` and the No NFO check). A new test
+  scans all source files for a lone `%` in a `LIKE`.
+- **Music video scans failed.** The write guard did not know the music video folders, and a movie or TV scan deleted
+  their file rows (so they also lost their quality badges after every scan). Those cleanups now keep a music video's
+  file, and a scan that is cleaned up between saving and linking a file saves it again.
+- **Deleting an album with no MusicBrainz id crashed** after its files had moved (`refresh_album_peers` compared a
+  uuid column with `''`). It affected every unmatched album.
+- **A bulk cleanup stops being fragile**: one unexpected error on one copy no longer aborts the rest of the run.
+- **Movies were matched by their folder, not their file.** `movies.path` is the movie's folder; the file is
+  `video_files.path`. The Kodi smart playlist listed folder names, watched sync and collections never matched a movie,
+  the Radarr part of the orphan report could not find owners, the Kodi and Plex item refresh fell back to scanning the
+  folder, the integrity check after an import found no file, and the cleanup checked that the copy to keep still had
+  its folder, not its file. All use the video file now (`store.movie_file_paths`).
+- **The disk dashboard could not record music video folders** (`kind` held 10 characters, "musicvideos" is 11).
+- **Delete windows showed a "Remove from library" button** that did nothing, in the orphan report, the disk dashboard,
+  the twin shows window and music videos. The recycle bin warning now shows without it.
+- **An integrity check updates the list on the spot**: the Corrupt pill and the filter count no longer wait for a reload.
+- **A music video delete also takes its media info sidecar**, and a picture on a video under 30 seconds says why it
+  cannot be made. The orphan report's summary line follows what is left after a delete.
+
+## v3.3.2 — 2026-11-02 — Fixes from a review of the new features
+
+- **Music videos now use the recycle bin.** Their folders were not known to the bin, so Delete removed a music video
+  and its .nfo at once. They go to the bin like everything else.
+- **The orphan report never offers Delete on a title's only copy.** "The app does not use this file" is not "nobody needs
+  it": a movie Radarr has not imported, or an episode Sonarr has not matched, may be the only copy. Those rows now say
+  "Only copy in the library" and offer Rescan in the app instead. The server enforces it too: only a row that is in
+  the report can be deleted, and the app and id come from the report, not from the request.
+- **Bulk duplicate cleanup takes a database snapshot** first when Settings asks for one before bulk changes. Each delete
+  was one item, which never reached the setting's minimum, so no snapshot was ever taken.
+- **The cleanup window no longer re-downloads its whole preview** every 1.5 seconds while it deletes.
+- **A manual integrity check skips disc images** (ISO and similar) instead of calling them corrupt.
+- **A show or season with corrupt episodes shows the Corrupt pill** (with the count), not only the Corrupt filter.
+- **The webhook queue status reads the running scan outside the queue's lock**, so the two cannot wait on each other.
+
+## v3.3.1 — 2026-11-01 — Fixes from the first run against a real Postgres
+
+- **Fixed an import cycle** from the v3.3.0 file split: `scan_stages.py` or `store_edits.py` imported before
+  `scanner.py` or `store.py` failed. The app imports the old modules first, so it was not hit, but a tool or test that
+  imported the new module first was. Either order works now, and `tests/test_module_split.py` guards it.
+- **`scripts/test-postgres.sh` works on Windows** (Git Bash rewrote the container's paths and the wait loop never
+  ended), stops after 60 seconds if Postgres does not start, and prints its log.
+- **`tests/test_postgres_sql.py` covers more**: the whole schema applied twice, scoped music updates, show twins, the
+  wishlist, the integrity import and scheduled pass, music videos, watched sync, collections, the restored-item queue,
+  every new route, and a bulk cleanup run on real rows and files (delete, recycle bin, history, Restore). All 10 pass on
+  Postgres 16.
+
+## v3.3.0 — 2026-11-01 — Bulk duplicate cleanup, activity history, upgrade wishlist, stray files, and the gaps from v3.2
+
+- **Bulk duplicate cleanup** has its own red button (Library analytics and the Duplicates window) and its own window: a
+  warning, a Preview that lists what is kept, deleted and left alone with the space saved, a tick per title, and a
+  separate red confirm button that stays off until there is a preview. With the recycle bin off, the warning says the
+  files cannot come back and an "I understand" box must be ticked too. It keeps the best copy, and among equal copies
+  the one Radarr, Sonarr or Lidarr uses. It leaves a copy alone when the copy to keep is missing, empty or corrupt, or
+  when the copy is another edition, locked, marked Not duplicates, the same file through another mount, a file two
+  episodes share, or an album with tracks the kept album lacks. Weaker copies only go when that box is ticked.
+- **Activity history** (Library analytics): a searchable list of what was deleted, restored, emptied, renamed, moved or
+  changed and found corrupt, and why. A delete from a job is listed with that job as its reason.
+- **Upgrade wishlist** (Library analytics, targets under Settings, Files): movies, shows and albums under the wanted
+  resolution, HDR or audio quality, with Search per item and for everything shown (up to 100).
+- **Integrity**: optional quick check after each Radarr or Sonarr import, with a notification and an optional new search
+  when a file is corrupt, and an optional daily full check of the files checked longest ago.
+- **Low disk alert** (Settings, General): a notification under a set free space, once a day per folder, and optionally
+  deleting the oldest recycle bin items on that drive first.
+- **Orphan report**: now walks the library folders for stray files nothing lists, and covers Lidarr (unmapped files,
+  album copies with none of Lidarr's files, track files that are gone).
+- **Test buttons**: Test players (Settings, Sync) and Test connections (Orphan report) read each app the way the real
+  job does and say what came back. Nothing is written.
+- **Recycle bin**: Restore now scans the item back into the library by itself. The disk dashboard shows the bin's size.
+- **Twin shows**: the Duplicate pill opens a window comparing the folders, with Delete and Not duplicates (and Undo).
+- **Disk dashboard**: albums can be deleted from it, and music video folders are included.
+- **Webhook queue**: the status also shows how far the running scan or scrape is ("this stage 4 of 30 read").
+- **Kodi playlists**: the saved search box now narrows a playlist by title, and saved music filters can be playlists
+  (albums, in playlists/music). Presets that depend on the page, such as Gold match, make no playlist.
+- **Music videos**: an editor per item (typed values, lock, plot), a picture taken from the video, Delete with the
+  .nfo and pictures, Look up blanks from TheAudioDB, watched sync with Kodi, Jellyfin and Emby, and removing a folder
+  now clears its rows on the next scan.
+- **Code and tests**: the scan stages moved to `video/scan_stages.py`, the stored item edits to `video/store_edits.py` and
+  the video duplicate windows to `js/video/duplicates.js` (every old name still works). New `tests/js/logic.test.js` runs
+  front end logic, and `scripts/test-postgres.sh` runs Curator's SQL against a throwaway Postgres.
+
+## v3.2.2 — 2026-11-01 — Duplicate albums say which copy Lidarr uses
+
+- **Same release pairs in the duplicate album window now show Lidarr**, as the AcoustID and fingerprint pairs already
+  did: "Id N · in use" on the copy holding Lidarr's files, and Not in on a copy that does not. The upgrade window gets
+  the same "in use" wording.
+- **A pair where Lidarr uses neither copy** now says Not in on both, because Lidarr can use a third copy. A copy with
+  no release group id is checked through the other copy of the pair. When Lidarr's files are not on disk the copies
+  stay unmarked, since the path mappings are the likely cause.
+- The check reads the albums Lidarr holds instead of searching MusicBrainz, so it stays quick with many pairs.
+
+## v3.2.1 — 2026-10-31 — Format badges on artist rows
+
+- **The Format cell of an artist row shows the colored badges** its albums use (green for lossless such as FLAC, grey
+  for lossy such as MP3), one per format, instead of plain text like FLAC/MP3. Clicking one filters the Format column
+  on it, as on an album row.
+
+## v3.2.0 — 2026-10-31 — Player watched sync, integrity check, orphan report, playlists, collections, disk space, music videos
+
+- **Duplicate album window compares track by track.** Tracks without an AcoustID or fingerprint match now sit side by
+  side by disc and track number, then by title, in the left album's order. Before, the left album's tracks were
+  listed first and the right album's under them.
+- **Player watched sync** (Settings, Sync): play counts, last-played times and resume points between the library and
+  Kodi, Jellyfin, Emby and Plex, matched by file path. The higher count and the later time win; a resume point one
+  side lacks is copied over. Both ways, pull or push, now or every N hours. Movies gained resume columns.
+  **Put the watched state back after Curator refreshes an item in Kodi** (on by default) re-finds each refreshed item
+  and restores its play count, last played and resume point when the refresh dropped them.
+- **Video integrity check**: Check integrity (quick, the first and last minute) and Full integrity check (the whole
+  file) decode with ffmpeg from the right-click menu and the Media menu of the selection footer. A decode error gives
+  the file a red **Corrupt** pill and puts it under the new Corrupt filter (movies and TV). A replaced file (other
+  size or mtime) drops the old result.
+- **Radarr and Sonarr orphans** (Library analytics): files Sonarr keeps but no episode uses, library files in an app's
+  folder the app does not know, and app records whose file is gone. Delete goes through the library delete (recycle
+  bin, then a rescan in the app); a missing file gets Rescan in the app. A report where most files look missing warns
+  about the path mappings instead.
+- **Kodi smart playlists**: a saved movie or TV filter can be written as "Curator - name.xsp", listing the file names
+  that match, rewritten after every scan and when filters change. Folder under Settings, Files.
+- **Collections in Jellyfin, Emby and Plex** (Settings, Sync): movie sets with two or more movies and saved filters
+  with a tag are pushed as collections. Curator keeps the members of the collections it made or took over in step.
+- **Disk space dashboard** (Library analytics): free space and library size per library folder, growth over time
+  (measured daily), and the duplicate, upgrade and extra copies that would free the most space, with Delete.
+- **Music videos**: a new folder media type. The music video window (header icon) scans the folders, reads artist,
+  title and year from a <musicvideo> .nfo or the file name, probes each file for quality badges, writes a Kodi .nfo
+  when one is missing, and sends Kodi a video library update.
+- **Incremental scans touch only what they added or read again** in the remaining stages: video duplicate and upgrade
+  marks (plus items already marked, so a removed copy's partner is looked at again; very large scans still check
+  everything), the music sidecar count, release countries, music duplicates, upgrades and original years, and the
+  music library update to the players (only the changed album folders, none when nothing changed).
+- **Dry run for the client library refresh** (Movies, TV and Music scan settings): the scan log says "would refresh N
+  items" and names them, and nothing is sent.
+
+## v3.1.1 — 2026-10-31 — Duplicate pill for twin show folders, webhook queue progress
+
+- **Two show folders that hold the same show now both get a Duplicate pill**, even when none of their episodes is a
+  duplicate release (for example when one folder is the better copy, so its episodes only carry Upgrade available).
+  Folders are the same show when they share a TVDB, TMDB or IMDb id and their names match once a year or country in
+  brackets is left out (`Show` and `Show (2019)`), or, with no ids, the same title and year. The pill tooltip says how
+  many other folders hold the show. The Duplicate filter and Status column include them. Shows still cannot be
+  collapsed into one row.
+- **The webhook queue shows how far a running batch is**: the Queue window ring and clock show done of total (for
+  example `3/12`), the status line adds "3 of 12 done, 5 more waiting", and the Jobs drawer shows the same. Music
+  counts each album as it finishes. Movies and TV count a library folder's items once that folder's scan, scrape and
+  file jobs are done. Imports that arrive during a run are listed as more waiting.
+
+## v3.1.0 — 2026-10-30 — Recycle bin for Delete from disk
+
+- **Delete from disk can be undone.** Deleted movies, episodes, sets, albums, artists, extra episode copies, replaced
+  tracks and duplicate subtitles move into a hidden `.curator-trash` folder at the top of their own library folder.
+  It is on the same drive, so even a large file moves at once. Each item is listed in the new `trash_items` table.
+- **Settings, General, Recycle bin** switches it on or off (on by default) and sets how many days items are kept
+  (30 by default, 1 to 365). Open recycle bin lists each item with where it came from, its size, when it was deleted
+  and when it goes for good, with Restore and Delete now per item and Empty recycle bin for all.
+- **Restore** moves the item back to where it was, and refuses when something else is there now. Scan its folder
+  afterwards to bring it back into the library.
+- **Old items are deleted for good** at startup, every 6 hours and whenever the bin is opened.
+- Scans skip the bin folder, and `.nomedia`, `.ignore` and `.plexignore` markers keep Kodi, Jellyfin, Emby and Plex
+  out of it. With the bin off, or for a file outside every library folder, Delete from disk deletes at once as
+  before. The delete warning says which of the two happens.
+- New routes: `GET /api/v1/trash`, `POST /api/v1/trash/restore`, `/trash/delete` and `/trash/empty`.
+
+## v3.0.9 — 2026-10-30 — Incremental scans tag only new and changed items
+
+- **Saved filters that carry a tag** now only tag the movies and shows an incremental scan added or read again, like
+  the other incremental stages. Before, every movie or show in the scanned folders was checked against each tagged
+  filter. Full and deep scans still check them all.
+
+## v3.0.8 — 2026-10-30 — Incremental video scans stay with new and changed items
+
+- **The check for trailer and theme song files on disk** now looks only at the movies and shows an incremental scan
+  added or read again. It used to look at every movie or show in the library. Full and deep scans still check them
+  all.
+- **Generating missing episode thumbnails** now looks only at the episodes an incremental scan added or read again.
+  It used to look at every episode on disk under the scanned folders. Full and deep scans still check them all.
+
+## v3.0.7 — 2026-10-30 — Video scans only rewrite .nfo files on full and deep scans
+
+- **Rewrite .nfo files at the end of a scan (Movies and TV) now applies to full and deep scans only.** With it on, an
+  incremental scan and every webhook import used to rewrite every .nfo under the scanned folders. They now write only
+  the missing ones, as with the box off; scrapes still write the .nfo of what they change.
+- The scan log now says how many items were already up to date. Video .nfo files that already hold the same text
+  were already left alone (no write, no .nfo.bak, not counted); that is unchanged.
+
+## v3.0.6 — 2026-10-30 — Music scans only write .nfo files that change
+
+- **Rewrite .nfo files at the end of a scan (Music) now applies to full and deep scans only.** With it on, an
+  incremental scan used to rewrite every artist.nfo and album.nfo under the scanned folders. It now writes only the
+  albums it found new or changed, and any album.nfo that is missing, as it does with the box off.
+- **An artist.nfo or album.nfo that already holds the same text is left alone.** Before, every file the step covered
+  was written again: it got a new .nfo.bak when backups are on, the album's or artist's Modified date moved, and it
+  counted as written. Now only real changes are written and counted; the scan log says how many were already up to
+  date, and how many artist files were written. This applies wherever Curator writes music .nfo files.
+
+## v3.0.5 — 2026-10-30 — Lidarr Retag webhooks are read
+
+- **Every Lidarr Retag webhook was ignored with "Lidarr did not include any imported file paths", and the history
+  did not say which artist it was.** Lidarr sends Retag after it rewrites the tags of a track file, with the artist
+  and that one file under `trackFile`; Curator only read the `trackFiles` list that Download and Rename send. Retag is
+  now read: the album folder of the retagged file is queued for a music scan, so the new tags reach the library and
+  the players, and the history names it Artist — Album (the album taken from the folder name, as Retag does not
+  send it). Many retags of one album become one scan. A Lidarr event that is ignored for another reason now still
+  shows the artist.
+
+## v3.0.4 — 2026-10-30 — Unnumbered bonus videos are not each other's upgrades
+
+- **Bonus videos the scan could not number showed Upgrade available, with every other one as a copy.** A file
+  without an episode number is stored as Season 0, Episode -1, and copies are matched on show, season and episode,
+  so all of them looked like copies of one episode. An episode without a real number is now only ever itself; its
+  Upgrade or Duplicate mark goes away the next time the marks are worked out (a scan, or opening the window).
+- **"Special Features", "Bonus Features" and "Bonus Material" folders are extras**, like Extras and Featurettes. A TV
+  scan no longer stores their videos as episodes, and Organize extras sorts such a folder inside a movie or show
+  folder into the extras layout.
+
+## v3.0.3 — 2026-10-30 — The info pane follows a deleted duplicate
+
+- **After deleting or removing a copy in the duplicate or upgrade window, the info pane could still show the file
+  that was deleted.** The pane was only read again when the open episode kept its row and its second file took over.
+  When the duplicate was a separate episode or movie, or the pane showed one of the other copies, it kept the old
+  path. Now the show is read again and whatever is open is refreshed; when the open item was the one deleted, the
+  pane moves to a copy that stayed. Keeping one copy in the upgrade window also reads the show's episode list again.
+
+## v3.0.2 — 2026-10-30 — The Sonarr "in use" mark now shows
+
+- **v3.0.1's "in use" and "Not this episode's file" marks never appeared.** The duplicates window and the upgrade
+  window build their copies without the season and episode number, so the check had no episode to compare with and
+  both copies only showed the Sonarr file number. The copies now carry the episode, and a test goes through the same
+  step the window uses.
+
+## v3.0.1 — 2026-10-29 — Duplicates show which copy Sonarr uses for the episode
+
+- **The duplicates window could show a Sonarr number on both copies of one episode.** The number is Sonarr's file
+  id, and Sonarr can keep a file record that is attached to another episode, or to none, next to the one it uses.
+  The window now also reads Sonarr's episode list and marks each copy: "File 563445 · in use" for the file Sonarr
+  attaches to this episode, and "Not this episode's file (attached to S01E02)" or "(attached to no episode)" for a
+  record Sonarr keeps but does not use here. Radarr and Lidarr numbers now read "Id".
+
+## v3.0.0 — 2026-10-29 — A TV scan no longer fails on its first file without an episode number
+
+- **"TV scan failed: 'unmatched_count'".** The page reads the last saved scan the first time it asks for the scan
+  state. When that first request came while a scan was already running (right after a restart, for example), the
+  saved totals replaced the running scan's totals, and the first file without an episode number (or the first
+  failure) then stopped the whole scan. The saved state is now read when a scan starts and never replaces a running
+  one, and a missing total starts at zero instead of failing.
+- **Files and show folders deleted while a scan runs are logged as "Gone during the scan"** instead of being listed as
+  failures. Their library entries are kept until the next scan, which sees the folders as they are then.
+
+## v2.9.9 — 2026-10-29 — No DVD icon beside DVDRip in the info pane
+
+- **The media icons in the info pane showed both DVDRip and DVD.** They now follow the same rule as the badges
+  (v2.9.5): when the release format already names the source, only the format's icon is shown. The source icon stays
+  when the format has no icon of its own (HDRip shows DVD). Blu-ray Remux keeps its two icons, the Blu-ray disc and
+  Remux, which together read Blu-ray Remux. The rule now lives on the server too (`sources.source_covered`), with the
+  same format-to-source table as the page.
+
+## v2.9.8 — 2026-10-29 — TV No NFO filter lists the shows its count names
+
+- **No NFO on TV Shows counted hundreds of episodes but listed only the shows that lack a tvshow.nfo.** The count
+  took the episodes of every show the page had loaded, while the list kept a show only for its own .nfo, so those
+  episodes never appeared. A show is now listed when it or any of its episodes on disk has no .nfo, the same way the
+  other episode filters (No IMDb rating, No subtitles) work. Open the show to see the episodes. The show list carries
+  a new per-show total (no_nfo_count) for shows whose episodes are not loaded yet.
+- Missing-episode placeholders no longer count as having no .nfo (they have no file to write one for), and neither
+  does a season that holds only those.
+
+## v2.9.7 — 2026-10-29 — Incremental TV scans only look up subtitles for new episodes
+
+- **An incremental TV scan searched OpenSubtitles.com for every episode of a show that had one new episode.** The scan
+  recorded which shows changed, and the subtitle step then took all of their episodes, using up the daily download
+  quota on episodes that were already done. It now records the episodes it added or read again and looks up only
+  those. Movies were not affected. Full and deep scans still check every episode, as before.
+- The automatic switch to the original language after a scan now also takes only those episodes.
+
+## v2.9.6 — 2026-10-29 — Blu-ray spelled one way, one source badge per file
+
+- **Blu-ray is always written Blu-ray.** Bluray, BluRay, blu ray and BLU-RAY in badges, the Source and Source format
+  columns, their filters and the source text now read Blu-ray (UHD Bluray reads UHD Blu-ray). Only what is shown
+  changes; renamed files keep the scene spelling BluRay.
+- **One source badge when the format says it.** Besides DVD next to DVDRip, Blu-ray next to Blu-ray Remux and WEB next
+  to WEB-DL, the source is now also hidden when the format belongs to it under another name: UHD Blu-ray next to UHD
+  Remux, BD-Rip next to Blu-ray Rip. The page uses the same format-to-source table as the server, and a test keeps them
+  in step.
+
+## v2.9.5 — 2026-10-29 — One source badge when the format names it
+
+- **DVDRip no longer comes with an extra DVD badge.** When the release format already names the source (DVDRip names
+  DVD, Blu-ray Remux names Bluray, WEB-DL names WEB), only the format badge is shown. This applies to the info panel,
+  the badges in Library updates, the Source column (left empty then) and the source text. The duplicates window
+  already worked this way.
+
+## v2.9.4 — 2026-10-29 — Quality badges for every imported item in Library updates
+
+- **Some Radarr and Sonarr imports showed no quality badges in Library updates.** The lookup took only the first
+  file the webhook named and looked for it as the movie's or episode's main file. A file Radarr or Sonarr renamed, an
+  upgrade stored next to the old file as a second copy, or a queued show whose file list had been re-sorted found
+  nothing, and a movie only fell back to its folder when the webhook named no file at all.
+- Now every file the webhook named is looked up among all probed files, a file still on disk is preferred over one an
+  upgrade replaced, and a title that still has nothing falls back to its movie folder, or to its show folder and the
+  episode code in the title (S38E04).
+
+## v2.9.3 — 2026-10-29 — One set of path mapping rules
+
+- **Path mapping uses one set of rules everywhere** (`curator/path_map.py`). Each app keeps its own path rows; only
+  the code that applies them is shared, by Kodi, Emby, Jellyfin and Plex updates, paths Kodi reports back, and paths
+  from Radarr, Sonarr, Bazarr and Lidarr. Before, four copies differed in small ways. Now, for all of them: the
+  longest root wins; `/tv` never matches `/tv2`; trailing slashes and backslashes do not matter; a root with a drive
+  letter or a UNC share (`\\nas\tv`) ignores letter case; a target written with backslashes (a Windows server) gets
+  backslashes; and a row for the root folder `/` works.
+- Tests that assume the container's Linux paths (`test_imdb_data.py`, `test_ytdlp_update.py`) are skipped on Windows,
+  so a local test run there shows only real failures.
+
+## v2.9.2 — 2026-10-29 — Music track pills and column widths, one ARR client
+
+- **Fixed: the FLAC OK, Corrupt and Upscaled pills never showed on music tracks.** Two scripts defined `audioBadge`,
+  and the video one (codec and language text for the language editor) replaced the music one. The video one is now
+  `audioTrackLabel`.
+- **Fixed: column widths in the music track table.** Two scripts defined `columnWidth`; the movie table's version
+  took a column object and replaced the music one, which takes a column name. The movie one is now `matrixColumnWidth`.
+- **New test against this:** `tests/test_js_scripts.py` fails when two scripts define the same top-level function,
+  `const`, `let` or `class`, and runs `node --check` on every script when Node is installed.
+- **One HTTP client for Radarr, Sonarr, Lidarr and Bazarr** (`curator/arr_client.py`). The not-set-up check, API
+  key header, timeouts, refused keys, the app's own error text and the connection note now work the same for all
+  four. Lidarr now says "Lidarr refused the API key" for a wrong key, and its errors read "Lidarr answered 500:
+  ..." like the others. Each app keeps its own API base.
+
+## v2.9.1 — 2026-10-29 — Writing a show's .nfo files clears its NFO changes
+
+- **The NFO changes pill on a show could stay after Write .nfo, however often it was pressed.** Three causes are fixed:
+  - A missing-episode placeholder kept the .nfo of the file it once had. A later lookup changed its fields, so it
+    counted as a change, but placeholders are never written. Placeholders no longer count, and writing the show drops
+    the old .nfo from them (the file on disk is left alone).
+  - A season with a season .nfo on disk but no folder and no episode files of its own was skipped by the writer. Its
+    .nfo is now rewritten too.
+  - Two episode rows that point at the same .nfo (the same episode listed twice, or one file under two spellings of
+    its name on a share that ignores letter case) each wrote it in turn, so every press rewrote the same files
+    ("Wrote 30 .nfo files" again and again). Only one row writes now; the others are named in a warning after the
+    write and in the container log.
+
+## v2.9.0 — 2026-10-29 — Scans refresh the items they changed on the players
+
+- **New switches under During a scan** for Movies, TV and Music, off by default: *Update client libraries for items
+  with updated metadata*, *with updated artwork* and (Movies and TV) *with updated ratings*. The last step of any scan,
+  incremental, full or deep, then refreshes the items whose metadata, artwork or ratings changed, including values
+  filled in for the first time, values replaced because overwrite is on, and items the scan added.
+- **Per-item refresh where a folder scan is not enough.** Kodi gets RefreshMovie, RefreshTVShow or RefreshEpisode for
+  each changed item, so it reads the .nfo and artwork again; Plex gets a metadata refresh per item. Emby and Jellyfin
+  get the item folders marked as changed. An item a player does not have yet gets a scan of its folder instead. A
+  changed season refreshes its show.
+- Music: Emby, Jellyfin and Plex refresh the changed album and artist folders. Kodi and Navidrome already scan after
+  every music scan; Kodi has no way to refresh one album's album.nfo or artwork.
+- The refresh runs in the library update queue as one job per player (Library updates shows "Refresh"), and does not
+  merge with folder scans. Players without path rows are left out, with the reason in the scan log.
+
+## v2.8.3 — 2026-10-29 — Bazarr version in the connection test
+
+- **Test connection now shows and saves the Bazarr version.** Bazarr names it `bazarr_version` in its status reply,
+  so the test said only "Connected to Bazarr" and saved no version.
+
+## v2.8.2 — 2026-10-29 — Add show by TMDB id on Sonarr 5
+
+- **Add show works for a show with no TVDB id on Sonarr 5 and newer.** Curator still looks for the TVDB id first
+  (through Sonarr and TMDB). When there is none, Sonarr adds the show by its TMDB id and Curator keeps it as wanted
+  until the files arrive. When Sonarr reports a TVDB id for it, that id is saved too. Below Sonarr 5 such a show is
+  still refused, now with a note that Sonarr 5 can add it.
+
+## v2.8.1 — 2026-10-29 — ARR versions saved, Sonarr 5 API and TMDB lookups
+
+- **Test connection saves the version.** Radarr, Sonarr, Lidarr and Bazarr: the version the app reports is logged
+  and saved in `config/arr_versions.json` with the API used and the time, and shown under the Test connection button.
+- **Ready for Sonarr 5.** When the test finds Sonarr 5 or newer and its new `/api/v5` answers, Curator uses it for
+  every Sonarr call. An endpoint v5 does not have is tried again on `/api/v3`. Sonarr 3 and 4 keep using `/api/v3`.
+- **Shows with only a TMDB id can be looked up in Sonarr 5.** Look up in Sonarr, Look up all episodes, Search
+  missing episodes and the missing-episode search find the show by TMDB id there, and add it by TMDB id when Sonarr
+  does not have it. Below Sonarr 5 these stay greyed out for shows without a TVDB id, and the server refuses them.
+  Test the connection again after upgrading Sonarr.
+
+## v2.8.0 — 2026-10-29 — One bin on the right-click menus
+
+- **The right-click menus have one red Remove/delete… item instead of Remove from library and Delete from disk.** It
+  sits at the bottom with the bin icon and label centred and opens the Remove window, which offers Delete from disk and Remove from library,
+  the same window as the bin in the selection footer. This is on movies, sets, shows, seasons, episodes, artists and
+  albums, and saves a row on every menu.
+- Music now asks in that one window too. Before, artists and albums had two separate questions. A music folder Curator
+  cannot write to only offers Remove from library.
+
+## v2.7.9 — 2026-10-29 — Same actions on every media type
+
+- **Music has Latest added.** A new quick filter (and filter menu entry) lists albums added in the last 30 days,
+  newest first. An artist sorts on its newest album, also when sorting on the Added column.
+- **Music quality badges filter the list.** Format, Quality, Bits, Sample rate and Bitrate in the Music table are now
+  coloured badges (green for lossless), like the Movies and TV tables. A click filters that column, and badges in
+  different columns combine. Clicking a badge no longer opens the album.
+- **Original language in the selection footer.** Movies and TV have an Original language button under Media. One kind
+  of item shows the changes first, as on the right-click menu.
+- **Organize extras for a season.** The right-click menu offers it for a season too; it sorts the extras of that
+  season's show, as it does for an episode.
+- **Sonarr items need a TVDB id, like Radarr needs a TMDB id.** Look up in Sonarr and the Sonarr searches are greyed
+  out for shows without one, with a hint to scrape the show first, instead of failing after the click.
+- Update library… stays on movies and shows only: Kodi and the other players scan a whole show folder, not one
+  season or episode.
+
+## v2.7.8 — 2026-10-29 — Fixes from a review of the last releases
+
+- **Original language: languages outside the common list now match.** TMDB gives two-letter codes (`ta`, `te`, `fa`,
+  `cn`) and MKV tracks three-letter ones (`tam`, `tel`, `per`, `chi`), so a Tamil, Telugu, Persian or Cantonese film
+  was always left alone. Release names with Tamil, Telugu, Malayalam, Kannada, Bengali, Punjabi, Urdu, Persian,
+  Indonesian, Malay, Catalan, Tagalog, Mandarin or Cantonese next to DL or DUBBED are now recognised too.
+- **Clear filters and saved filters now undo the Latest added sort.** Before, clearing the filters turned Latest
+  added off but kept the list sorted newest first, and a saved filter with Latest added did not sort at all.
+- **The date added shown under a show now matches the Added column** (the newest episode on disk).
+- **Library queue badges go next to the right item.** A history row titled with two items, of which only one had
+  quality facts, showed that item's badges after both names. They are now listed under the title with the item name.
+
+## v2.7.7 — 2026-10-29 — Info pane banners keep room for their buttons
+
+- **A shrinking banner stops at 56px tall**: one row of the Processed, Lock and Delete buttons with 10px above and
+  below, so the buttons no longer hang over the text under the banner. Narrower than that (about 300px), the banner's
+  sides are trimmed again instead of it getting lower.
+
+## v2.7.6 — 2026-10-29 — Info pane banners shrink with the pane
+
+- **A banner at the top of the info pane now scales down when the pane is narrowed**, for movies, sets, TV shows,
+  seasons, episodes, artists and albums. Before, the banner was held at 148px tall and its sides were cut off once
+  the pane was narrower than about 800px. It now keeps its shape and gets smaller. From about 800px wide it stays
+  148px tall as before. A landscape image shown in place of a missing banner keeps the old strip.
+
+## v2.7.5 — 2026-10-28 — Latest added sorts newest first
+
+- **Latest added now sorts the list newest first.** Before, it only kept items added in the last 30 days and left them
+  in the column sort (title, usually). Turning it on now sorts on the Added column, newest at the top, on Movies and
+  TV Shows. Turning it off puts back the sort you had, unless you changed it in the meantime.
+- **A show counts from its newest episode.** The show list carries a new `last_added` date (the newest episode on
+  disk, or the show itself), so a show that got an episode yesterday is in Latest added and at the top, and the Added
+  column sorts on it. Seasons and episodes stay in season order under their show.
+- The Added column sorts on the real date instead of the text, so `2024-05-01 12:00` and `2024-05-01T12:00` sort together.
+
+## v2.7.4 — 2026-10-28 — Filter the library by clicking a quality badge
+
+- **Quality badges in the Movies and TV tables filter the list when clicked.** A badge sets the column filter of its
+  column to every value that holds it: **P7** in Main HDR keeps DV P7, DV P7 FEL and DV P7 MEL. Clicking **FEL** on
+  one of those rows narrows it to DV P7 FEL, and **P7** again widens back to all of profile 7. Clicking the badge that
+  matches the filter exactly clears it.
+- Works on Res, Main HDR, DV profile, EL, Secondary HDR, Video codec, Audio codec, Channels, Audio, Source, Source
+  format and 3D. Badges in different columns combine, and the column header shows the filter as usual.
+
+## v2.7.3 — 2026-10-28 — Switch dubbed releases to the original language
+
+- **New setting: Enable automatic switch of default language to original language** (Settings, Files, Original
+  language), one switch for movies and one for TV episodes, both off by default. After a Radarr or Sonarr import, and
+  after a library scan finds a new or changed file, the default audio of an MKV is set to the original language.
+- The original language from the scrape is the first choice. When it is unknown, a release or folder name such as
+  `German.DL`, `DL.French`, `Italian.DUBBED` or `DUBBED.Italian` names the dubbed language and the one other audio
+  language is used. `MULTI` or `DUAL` alone, three or more languages, or unknown track languages leave the file alone.
+  Commentary tracks are never picked.
+- **Preferred subtitle languages**, five in priority order, choose the default subtitle after the switch: the first
+  language with a full (or SDH) subtitle wins. When the audio is in one of those languages, only a forced subtitle in
+  it is chosen. With no match, every subtitle default is cleared, so a dubbed forced track does not stay on. The list
+  starts from the OpenSubtitles languages until it is saved.
+- **Switch to original language…** on the right-click menu (movie, show, season, episode) previews the changes and runs
+  as a file job.
+- Only MKV files are changed, with mkvpropedit, then probed again. Defaults set by hand with a Default button or
+  Language defaults are remembered (new `video_files.user_default_size` column) and automatic runs skip that file
+  until it is replaced.
+
+## v2.7.2 — 2026-10-28 — Quality badges in the library update queue
+
+- **Library updates show what quality was added.** The waiting and running library updates and Recent library
+  updates now follow each movie, episode or album with the same colored badges as the info panel. Video shows
+  resolution, aspect ratio, HDR (with Dolby Vision profile and layer), source, video codec, audio codec and
+  channels, bit depth and container. Music shows the format (green when lossless), bit depth, sample rate and
+  bitrate. A batch with several items lists each one with its own badges under the title.
+- The webhook queue reads the facts from the probed file or the album when it hands the items to the players, and
+  **Send library update** on movies does the same. History rows keep them in a new `work_events.quality` column, so
+  updates logged before this version have no badges.
+
+## v2.7.1 — 2026-10-24 — Fix Match removes the old show's missing episodes and seasons
+
+- **Matching a show to another title no longer leaves the old title's seasons and missing episodes behind.** Louis
+  Theroux's folder, matched wrongly to Harvey Birdman, kept Harvey Birdman's seasons 3 and 4 after it was matched
+  correctly. Fix Match now removes the missing-episode placeholders that the new match does not list, and any season
+  left empty. Locks do not protect them, since the old identity is gone. Only database entries are
+  removed, never files on disk, and episodes that have a file are kept.
+- If the new match lists no episodes at all, all of the old match's missing episodes and empty seasons are still removed.
+- **Old artwork goes too.** When the new match has no image of a kind that the old match had (a banner, say), the old
+  image is removed instead of kept. Only the image file Curator saved for that kind is deleted.
+- **The warning triangle for episodes that are not in the TMDB season goes away.** Fix Match forgot nothing of the
+  old match's season episode lists, so every episode looked out of place. They are cleared and refilled from the new
+  match.
+- **Duplicate and upgrade pills are redone after Fix Match**, since the new show title changes which episodes count as
+  the same one.
+- **Missing episode rows can be highlighted, and removed.** A missing row can now be clicked and is highlighted, and
+  its right-click menu has "Remove S02E05 from the missing list" for an episode that does not belong to the show.
+- **A scrape that replaces data also replaces each season's episode list**, so a stale list from an earlier wrong
+  match no longer leaves rows such as S02E05 behind.
+- **The "new episodes" pill no longer counts missing episodes**, which cannot be marked as processed.
+- **A black frame is never kept as an episode or movie thumbnail.** The grab checks the picture and tries another spot
+  in the file (25%, 55%, 70%, 15%, 85%) when it is black. A thumbnail that is already black is replaced by grabbing it
+  again.
+- **The Duplicate pill shows on a show and on a season** when any of its episodes has another copy, like the Upgrade
+  pill already did.
+- **E-AC-3, eac3, DD+ and Dolby Digital Plus show as one audio format** (Dolby Digital Plus) in badges, columns and
+  cards, so one file no longer looks like it has two formats.
+- **Every job in the Jobs window has a red ✕ on its right** that stops it when it runs and removes it from the queue
+  when it waits (music and video scans, scrapes, file jobs, queued scans and ARR queue items).
+- **The episode edit pane has an Episode number field.** The number is changed inside the season and kept (locked)
+  against later scrapes. A missing-episode placeholder holding that number is replaced; a real episode with it is
+  refused.
+- **Saving in the Language defaults window no longer runs the search again.** The list stays as it is, with the saved
+  tracks shown as the defaults, and the scroll position is kept.
+- **Language defaults saves only what you picked.** Picking an English subtitle no longer also sets the audio default
+  to English. A file with no pick still gets the preferred tracks when you use Save all.
+- **Language defaults save shows its progress clearly.** The status is bold in a framed box with a progress bar, and
+  the count no longer repeats ("11 of 176 11 of 176"). The Save button turns red and reads Saving… until the whole
+  save is done, like other busy buttons.
+- A `CLAUDE.md` in the project root holds the build, database migration and testing commands and the project rules.
+- The scrape log says how many were removed. Run Fix Match once more on a show that was matched already to clean it.
+
+## v2.7.0 — 2026-10-24 — The Fix Match log says what happened to each image
+
+- **A Fix Match scrape now logs every artwork kind:** replaced (with the file name), no image found for the new
+  match so the old one is kept, or candidates found but none could be saved. The line shows in the scrape log and
+  under Saved scrapes, so a poster that did not change can be explained.
+
+## v2.6.9 — 2026-10-24 — A wrong auto match is less likely, and Fix Match replaces the old artwork
+
+- **A folder with no ids is no longer matched to a lone search result with an unrelated name.** The match took the
+  only hit when there was exactly one and the year fitted, without looking at its name. A search for "Louis Theroux When
+  Louis Met" could return another show and be accepted. A lone hit now needs a name that resembles the title; otherwise
+  the show is left for Fix Match, as the log says ("No confident match … Use Fix Match"). This applies to movies and
+  shows on TMDB and TVDB.
+- **Fix Match now replaces the artwork of the item, not only larger images.** "Overwrite" only swapped an image for
+  one with more pixels, so a show matched to the right title kept the wrong show's poster and fanart when the old
+  image was bigger. After Fix Match, new artwork replaces the old whatever its size.
+- A show that was already matched wrongly keeps its ids; run Fix Match on it once.
+
+## v2.6.8 — 2026-10-24 — The scan stage is called "Trailers and subtitles"
+
+- **The scan's Trailers stage is now named "Trailers and subtitles",** because subtitles are downloaded right after the
+  trailers. The step also shows when only subtitle downloads are on, and stays lit while subtitles download.
+
+## v2.6.7 — 2026-10-24 — The Upgrade and Duplicate windows warn about copies in different show folders
+
+- **When the copies of an episode sit in different show folders, the Upgrade and Duplicate windows say so** and name
+  both folders, above the copies. A show entry that was matched to the wrong show (a Louis Theroux folder matched as a
+  second Harvey Birdman) pairs its files with the real show's episodes. The warning makes that visible before you
+  delete anything.
+
+## v2.6.6 — 2026-10-24 — "S12E02.-.19.Title" is episode 2, not episodes 2 to 19
+
+- **A number after a spaced dash is no longer read as the end of an episode range.** Hell's Kitchen
+  `S12E02.-.19.Chefs.Compete.mkv` was taken as episodes 2 to 19, so S12E02, E03 and E04 all claimed the same
+  episodes and appeared as copies of each other. `S01E01-04`, `S01E01-E04` and `S01E01.-.E04` are still ranges.
+- Rescan the show so its files are read again with the new rule. Until then the old episode numbers and the false
+  Upgrade and Duplicate pills stay.
+
+## v2.6.5 — 2026-10-24 — Episodes of different shows are never copies of each other
+
+- **An episode is no longer matched as a copy of another show's episode.** The Upgrade window for Harvey Birdman S01E02
+  offered "When Louis Met S01E02" as the other copy, because both shows had the same id and the same season and episode
+  numbers. Episodes now match only when the show names agree (a year or country in the name is ignored, so Show and
+  Show (2019) still match). That removes the false Upgrade and Duplicate pills and the risk of deleting another
+  show's file from the window.
+- Run a rescan (or any scan that finishes) once so the old false pills are recalculated.
+
+## v2.6.4 — 2026-10-24 — Deleting a duplicate can no longer take the copy you keep
+
+- **Fix for episodes lost when deleting a copy of a two-part (Multi) file twice.** The first try stopped with an error
+  after it had already switched the episode to its other file, so the library and the disk disagreed. The second try
+  then deleted that file. Deleting a copy now checks everything first and changes nothing when it refuses.
+- **Delete from disk never removes a file that an episode in the library still uses as its own,** never removes a
+  file another episode keeps as a second copy, and never deletes anything when the copy you keep is not on disk.
+
+## v2.6.3 — 2026-10-24 — Deleting a copy of a two-part episode file works the first time
+
+- **Deleting or removing one copy of a file that holds two episodes (Multi) from the Duplicate or Upgrade window no
+  longer stops with "Another indexed episode uses the same file".** The copy now goes for both episodes together; an
+  episode that has another file keeps it. Before, the first try was refused and only the second, after the other
+  episode was gone, went through.
+
+## v2.6.2 — 2026-10-24 — Movie versions get the same arrow as episode versions
+
+- **Each version row under an opened movie now starts with the ↳ arrow,** as the version rows under an episode do.
+
+## v2.6.1 — 2026-10-24 — A collapsed episode shows the pill of its other versions
+
+- **An episode row with versions collapsed now shows the Upgrade available pill when any of its files is the weaker one,**
+  as a collapsed movie row does. Before, only the episode's own file counted, so an episode whose second file was
+  the weaker one showed no pill until you opened it.
+
+## v2.6.0 — 2026-10-24 — Deleting one copy of an episode leaves the other in the library
+
+- **Deleting (or removing) one copy of a duplicate episode from the Duplicate or Upgrade window no longer removes the
+  whole episode.** When the episode's own file was the one deleted, its best other file now becomes the episode's file,
+  so the episode stays in the tree with the copy you kept. Deleting the other file leaves the episode as it was.
+  The show is read again so the row and its versions are right straight away.
+- A normal Delete or Remove of an episode from the library is unchanged and still removes the episode.
+
+## v2.5.9 — 2026-10-24 — An opened episode lists every version
+
+- **Opening an episode with "2 versions available" now lists both files,** best first, the way an opened movie does.
+  Before it listed only the second file, so the episode's own file never showed under it. The version rows also
+  carry the episode's Added date. With Collapse versions off, each extra file still gets its own row under the episode.
+
+## v2.5.8 — 2026-10-24 — The Unknown audio language pill clears after you set the language
+
+- **Setting an audio or subtitle language on an episode or movie now clears the Unknown audio language pill straight
+  away** on its row, and on the season and show above it. The file was changed and read again, but the list kept the
+  flag it had before. The list rows are now read again after a language change, a default-track change and Update
+  media info.
+
+## v2.5.7 — 2026-10-24 — The Duplicate window lists a second file of an episode
+
+- **Clicking a Duplicate pill on an episode no longer opens an empty window ("None").** An episode's duplicate is
+  usually a second video file stored with that episode, and the window only looked at episode rows. It now lists the
+  second file next to the episode so you can compare them.
+- **Delete from disk and Remove from library work on that second file** (they failed before). Only that file goes; the
+  episode stays. The flags on the show, season and episode update afterwards.
+- "Not duplicates" is not offered when one of the copies is a second file of an episode.
+
+## v2.5.6 — 2026-10-24 — Seasons show the Upgrade and Duplicate pills
+
+- **A season row now carries the Upgrade available and Duplicate pills when any of its episodes does,** so the affected
+  season can be found without opening every season. The Upgrade available and Duplicate filters match the season too.
+
+## v2.5.5 — 2026-10-24 — Episode versions, and a show's Upgrade pill follows its episodes
+
+- **A second video file of an episode is now shown as a version of that episode,** the way two files of one movie are.
+  With **Collapse versions** on (Settings → Movies), the episode row has a caret and "2 versions available"; open it to
+  see each file on its own row with its resolution, HDR, size and audio. With it off, every file has its own row under
+  the episode. The weaker file carries the Upgrade pill. The setting now covers movies and episodes. Expand all and
+  Collapse all open and close the versions too.
+- **Clearing duplicate episodes now clears the show's and the season's Upgrade and Duplicate pills.** The episode rows
+  updated but the show and season rows kept the old pill until the page was reloaded. They now follow their episodes,
+  including for a show you have not opened.
+
+## v2.5.4 — 2026-10-24 — An expired Trakt sign-in asks you to reconnect
+
+- **Trakt refusing the saved refresh token (400 "invalid refresh token") no longer repeats an error every five
+  minutes.** Curator forgets the dead tokens, keeps your Client ID and secret, stops the scheduled sync, and Settings →
+  Trakt shows "Trakt sign-in expired. Connect again to resume syncing." Press Connect with Trakt to sign in again.
+- A Trakt outage or network failure keeps the tokens and is logged as a one-line warning instead of a traceback.
+
+## v2.5.3 — 2026-10-24 — Episode thumbnails are saved under the name the library looks for
+
+- **A generated episode thumbnail is saved as `<video>-thumb.jpg`,** the name Kodi and the scan use. When the episode
+  number in the database differed from the one in the file name (Lupin S04E01 stored as season 3), the generator wrote
+  `<video>-S03E01-thumb.jpg` instead, and the library kept showing the old `<video>-thumb.jpg` (the green one). The
+  episode mark is now added to the name only when one file holds several episodes. The scan's thumbnail generation
+  follows the same rule.
+- An older `…-S03E01-thumb.jpg` next to a file is left alone; it can be deleted.
+
+## v2.5.2 — 2026-10-24 — A regenerated thumbnail shows at once
+
+- **Local artwork is no longer cached for an hour by the browser.** Images from the library folders were sent with
+  `max-age=3600`, so a thumbnail that was regenerated, or any image that was replaced, kept showing the old picture
+  until the hour was up. This was why the Dolby Vision thumbnail still looked green after Curator had written a good
+  one. The browser now checks each time and gets a short "not modified" answer when the file is unchanged.
+
+## v2.5.1 — 2026-10-24 — Profile 5: plain seek first, grabs are logged
+
+- **For Dolby Vision profile 5 the plain seek is tried before the scene-detect one.** That is the form that was run by
+  hand on the real file and gave a normal picture; the scene filter in front of libplacebo is now only the second try.
+- **Every frame grab writes its ffmpeg command and result to the container log** (`docker compose logs curator`), so
+  a wrong thumbnail can be traced to the exact command.
+
+## v2.5.0 — 2026-10-24 — Dolby Vision profile 5: the Trickplay add-on's chain
+
+- **Profile 5 thumbnails use the filter chain from the Trickplay add-on** (read from its source): libplacebo uploads the
+  frame itself, applies the Dolby Vision metadata with `hable` tone mapping and perceptual gamut mapping, and the
+  scale comes after it. The earlier chain scaled first and went through `hwupload` and `hwdownload` by hand, and gave a
+  green frame in testing. HDR grabs also write the JPEG tagged full-range BT.709, as the add-on does.
+- **The dovi_tool route is back as the second choice,** tried only when libplacebo fails or gives a green frame. A green
+  result from it is refused too.
+
+## v2.4.9 — 2026-10-24 — A green Dolby Vision frame is never saved
+
+- **The dovi_tool route for profile 5 is removed.** `dovi_tool -m 3` only rewrites the metadata; the picture stays in
+  Dolby Vision's own colour space, so the result was still green. Profile 5 can only be shown correctly by libplacebo
+  applying the Dolby Vision metadata.
+- **A frame that comes out green on a Dolby Vision file is thrown away** (its average chroma is checked) and the grab
+  reports why, instead of saving a wrong thumbnail. Other Dolby Vision profiles and HDR10 are unaffected.
+
+## v2.4.8 — 2026-10-24 — Dolby Vision profile 5 thumbnails through dovi_tool
+
+- **Profile 5 files now get a proper thumbnail without a GPU.** If libplacebo with Vulkan cannot render it, a short
+  stream copy around the frame is converted with `dovi_tool -m 3` (profile 5 to 8.1) and then tone mapped to SDR with
+  zscale. This is the method the Trickplay add-on uses. dovi_tool is already in the image.
+- libplacebo is asked to apply the Dolby Vision metadata explicitly, and the converted path writes a full-range BT.709
+  JPEG.
+
+## v2.4.7 — 2026-10-24 — No green thumbnails for Dolby Vision profile 5
+
+- **A profile 5 file is only rendered through libplacebo, never through the plain tone map.** Profile 5 has no HDR10
+  base layer; without the Dolby Vision metadata its frame is all green or purple. Since v2.4.6 let the plain tone map
+  finish, it wrote that green frame as a success when libplacebo (which needs a Vulkan device) could not run. Now the
+  grab fails with a message that names libplacebo/Vulkan and ffmpeg's last line, and no wrong thumbnail is saved.
+- If you still see the failure after rebuilding the image, the software Vulkan device is not working in the container;
+  send the message and the next step is a Dolby Vision-aware render through dovi_tool.
+
+## v2.4.6 — 2026-10-24 — HDR and Dolby Vision thumbnails: JPEG range
+
+- **Tone-mapped thumbnails are written as full-range JPEG.** Newer ffmpeg refuses to write a limited-range frame to a
+  JPEG ("Non full-range YUV is non-standard"), so every HDR and Dolby Vision grab ended with *ffmpeg could not extract a
+  frame*. The chain now ends in `yuvj420p` and ffmpeg runs with `-strict unofficial`, as the Trickplay add-on does.
+- **The colour probe no longer depends on ffprobe's `-show_entries` form,** which older ffprobe builds reject; the
+  tag and Dolby Vision data now come from `-show_streams`.
+- **The Docker image gets `libvulkan1` and `mesa-vulkan-drivers`,** so ffmpeg's libplacebo has a software Vulkan device
+  for Dolby Vision profile 5 files (they have no HDR10 base layer). Rebuild the image to get it.
+
+## v2.4.5 — 2026-10-24 — Thumbnail errors say why
+
+- **When ffmpeg cannot get a frame, the message now names the kind of file (SDR, HDR, Dolby Vision) and ffmpeg's own
+  last error line,** instead of only *ffmpeg could not extract a frame from this file*. This is to find out why a
+  tone-mapped HDR/Dolby Vision grab fails on a given file.
+
+## v2.4.4 — 2026-10-24 — Queue window no longer jumps
+
+- **The current-work line at the top of the Queue window is always shown.** It used to appear while something was being
+  scanned or updated and vanish when idle, which pushed the rest of the window up and down. It now reads *Idle* when
+  nothing is running and keeps its height.
+
+## v2.4.3 — 2026-10-24 — Stuck "counting seasons and episodes…"
+
+- **The batch footer no longer stays on *counting seasons and episodes…*.** The message was cleared only when no later
+  click on the master box (All or None) had happened, so ticking and unticking quickly left it on for good. Each
+  counting pass now ends the message, and the footer repaints when the last one is done.
+
+## v2.4.2 — 2026-10-24 — Refused actions wait in the queue
+
+- **These no longer say "Wait for the running scan…". They queue, show in the Jobs window and run in turn:**
+  file jobs (rename, extras, delete), Apply match, movie and show artwork download, and restoring or deleting a split
+  source. A message says it was queued. When nothing else is running they start at once, as before.
+- **Remux (Dolby Vision profile 8) and a single item's ratings refresh start at once** instead of being refused during
+  a scan. The remux's follow-up deep scan still goes through the queue.
+- The queue checks again every two seconds while a job waits, so a waiting job starts even if the job ahead of it did
+  not report that it ended.
+- Moves, splits and Fix Match already queued and still do.
+
+## v2.4.1 — 2026-10-24 — Local edits no longer wait for scans
+
+- **These run at once, whatever scan, scrape or file job is running:** tag rename, delete and apply; subtitle default-track
+  edits; media-info refresh; season, episode and set artwork download. They only touch the database and the item's own
+  files, so there is nothing to wait for.
+- **Apply pending matches** no longer waits for a scan or file job. It only needs the scrape slot, and says so when a
+  scrape is running.
+- Movie and show artwork download still waits, because it starts a scrape. Moves, deletes, relocation, remux and
+  restore keep their waits.
+
+## v2.4.0 — 2026-10-24 — Language defaults: Save buttons
+
+- **Each file has its own Save button** (MKV files), which sets the default tracks for that file only, using the tracks
+  you clicked or the preferred ones. The list keeps its scroll position afterwards.
+- **Save all moved next to Close** in the window header, so it is always in view.
+- **Saving no longer waits for or is refused by a scan or file job.** It runs at once on its own worker. This was likely
+  why Save all appeared to do nothing.
+- **Only changes are written.** A file whose chosen track is already the single default (including unflagged first audio) is skipped, and the result says how many files changed.
+- **A clicked track is readable.** The highlight is a soft tint with an outline and normal text colour instead of a
+  bright fill with near-matching text.
+
+## v2.3.9 — 2026-10-24 — Scrape log
+
+- **Every scrape now leaves a log.** When a scrape finishes, stopped or failed ones included, its log is saved under
+  config/logs as `…_<media>_scrape.log` (movies, TV, sets, episodes, seasons; ratings and artwork jobs too). The Scrape
+  window has a *Saved scrapes* button that lists them, newest first, and opens one with Copy and Export. Before, the
+  log was only in memory and was gone after the next scrape or a restart (only movie sets were kept).
+- The newest *scan_log_keep* scrape logs per media are kept. Movie set scrapes now save as scrape logs rather than
+  scan reports.
+
+## v2.3.8 — 2026-10-24 — Fix Match waits in the queue
+
+- **Fix Match is queued behind a running scan instead of being refused.** It stopped with *Wait for the running scan or
+  file job to finish*. Now it takes its place in the Queue window as *Fix match*, with the other jobs. The new id is
+  written when its turn comes, just before the scrape reads it, so the running scan cannot undo it. The message says it
+  is queued. (A duplicate or upgrade mark that the new id causes is shown once the job has run, not at once.)
+
+## v2.3.7 — 2026-10-24 — Sonarr is told about a merge
+
+- **After a season merge, Sonarr is asked to rescan the show,** so it picks up the files and the two apps agree. The
+  message after saving says so (*Saved. Sonarr was asked to rescan the show.*), and Curator then scans the show again
+  when Sonarr is done (v2.3.6). Nothing is sent when Sonarr is not set up or the show has no TVDB id.
+- **A merge no longer reports a failed .nfo write.** The season that was merged away was still being written; the show
+  is written instead.
+
+## v2.3.6 — 2026-10-24 — Scan after a Sonarr rescan
+
+- **Asking Sonarr to rescan a show now also queues a scan in Curator.** Sonarr only tells Curator about files it adds or
+  removes, so a rescan that changed numbers or paths left nothing in the queue and the library unchanged. Curator now
+  waits until Sonarr has finished the rescan, then scans that show itself, with Sonarr's current numbers. The scan shows
+  in the Queue window as *Scan of <show> after the Sonarr rescan*, and the message after the click says so.
+
+## v2.3.5 — 2026-10-24 — Stale marks, ghost seasons and the rescan message
+
+- **The Upgrade pill goes away when no other copy is stored.** Opening the pill said *No other copy is stored for this
+  item* and cleared the Duplicate mark but left an Upgrade mark that is kept as a path, so the pill stayed. Both are
+  cleared now.
+- **A leftover season .nfo no longer brings back an empty season.** After the episodes of season 4 were numbered
+  season 3, an old `season04.nfo` in the show folder made the scan create an empty *season 4*. With Sonarr set up, a
+  season .nfo for a season Sonarr does not list is ignored, and the empty season it made is removed on the scan.
+- **Rescanning a season or an episode reports the TV scan.** The answer came back with the movie scan's status, so the
+  message read *Movie scan finished. 0 movies added …* with the numbers of an older movie scan.
+
+## v2.3.4 — 2026-10-24 — Placeholder episodes
+
+- **An episode that is only a placeholder is no longer treated as a copy.** After Sonarr replaced a file, the empty
+  *Episode missing* row for it sat next to the new file, was listed in the Upgrade and Duplicate window as a copy with
+  nothing in it, and made the new file look like a duplicate or an upgrade. Placeholders are now left out of those
+  marks and that window, and any mark they carried is cleared.
+- **A placeholder can be removed from the library again.** Delete tried to remove the placeholder's file path and
+  stopped with *It is outside its library folder*. Placeholders have no file, so only the library entry is removed, and
+  the window no longer offers *Delete from disk* for them.
+- **Rescanning an episode that has no file now looks for it.** The episode rescan only read the stored file path, so on
+  a placeholder it did nothing. It now looks in the show folder for the file carrying that number, by its name or by
+  Sonarr. To bring back files that an earlier merge or removal lost, rescan the show.
+- **Episodes in the Upgrade and Duplicate window show their thumb in 16:9** instead of a poster crop.
+
+## v2.3.3 — 2026-10-24 — Merged episodes become copies, or fill the missing ones
+
+- **Fixed: merging seasons, or moving an episode onto a number that is taken, did not work properly for the second
+  file.** The query that stored it as a copy was refused by Postgres (*column "episode_id" is of type uuid but
+  expression is of type text*), so no copy appeared and no Duplicate or Upgrade mark. It is fixed and was run against
+  the real schema.
+- **A file that lands on an episode that is only a placeholder now fills it.** Season 3 held *Episode missing*
+  placeholders (from TheTVDB) with the same numbers as the files in Partie 4. The file now becomes that episode, which
+  keeps its TheTVDB title and plot, loses the red *Episode missing* sash and takes the file's thumb. Only an episode
+  that really has a file gets the file as a second copy. If an earlier merge left files attached as copies of
+  placeholders, a normal scan of the show puts them right.
+
+## v2.3.2 — 2026-10-23 — Merging seasons treats clashes as duplicates
+
+- **A season merge no longer stops on episodes that exist in both seasons.** The same file stored under both numbers
+  (a scan read it as S04E01 once and as S03E01 later) is one episode, and the extra row is dropped. The same episode
+  number with a different file becomes a second copy of that episode, the way a scan stores a duplicate, so it shows
+  up under the Duplicate and Upgrade marks and the duplicate tools like any other. The episode already in the
+  target season stays the main one. Moving a single episode to a season that already has that episode number does
+  the same.
+
+## v2.3.1 — 2026-10-23 — Merge seasons when renumbering
+
+- **Renumbering a season onto a number the show already has now warns and offers a merge.** Saving shows *Season 3
+  already exists in this show* with a question, *Merge this season into it?*. Agreeing moves the episodes into that
+  season, fills its empty title, plot, premiere date, year and artwork from this one, and removes this season. If both
+  seasons have an episode with the same number, nothing is merged and the message names those episodes. A merge always
+  moves the episodes, whatever the box says.
+
+## v2.3.0 — 2026-10-23 — Edit season numbers
+
+- **A season's number can be edited.** The season Edit window has a *Season number* field and a box, ticked by default,
+  *Also change the season number of its N episodes*. Saved, the season (and its episodes, when ticked) move to the new
+  number, the .nfo files are rewritten, and the season name moves with it. A number that already belongs to another
+  season of the show is refused. Untick the box to renumber only the season.
+- **An episode's season number can be edited** in the episode Edit window. The episode moves to that season, which is
+  created when the show does not have it. An episode number that is already used in the target season is refused.
+- **A scan keeps numbers set by hand.** Edited seasons and episodes are locked on their season number, so the next scan
+  does not put them back to the number in the file name (or in Sonarr). The padlock unlocks them again. The files and
+  season artwork on disk are not renamed.
+
+## v2.2.2 — 2026-10-23 — Episode numbers follow Sonarr
+
+- **A file named S04E01 that Sonarr and TheTVDB number S03E01 is now stored as S03E01.** When Sonarr is set up under
+  Settings, Integrations, a TV scan asks it which episodes each file holds (matching the show by TVDB id, or by folder
+  when it has none, through the path mappings) and uses those season and episode numbers in the library, in the
+  generated .nfo files and for scraping, instead of the numbers in the file name. Multi-episode files follow Sonarr too.
+  An existing .nfo that carries the old numbers is read under the new ones. A show that is stored with different numbers
+  than Sonarr gives is rescanned even when nothing on disk changed, so Lupin corrects itself on the next scan. Without
+  Sonarr, or when it cannot be reached, file names decide as before. The scan log says how many files of a show were
+  numbered Sonarr's way. The files themselves are not renamed.
+
+## v2.2.1 — 2026-10-23 — Episode thumbs from HDR and Dolby Vision files
+
+- **Generated episode thumbs no longer come out purple, green or washed out for HDR sources.** Both the Generate thumb
+  button and the scan job ran a plain ffmpeg grab. A shared generator now reads the file's colour tags and Dolby Vision
+  side data: HDR10, HLG and Dolby Vision profiles 7 and 8 are tone mapped to SDR (BT.709), and profile 5, which has no
+  HDR10 layer, is tried through libplacebo first when the container has Vulkan, then through the same tone mapping.
+  SDR files are grabbed as before. Only the frame that is picked is tone mapped, so it is not slower to scan.
+  Thumbs already made from HDR files stay as they are until they are deleted and generated again.
+
+## v2.2.0 — 2026-10-23 — TV quality filter counts cover every show
+
+- **The 4K, 1080p, P7 FEL, DV, HDR10+, HDR10, HLG and SDR filters in the TV list count every episode.** They only
+  looked at episodes of shows you had opened, and the show rows carried no quality, so a library of thousands of
+  episodes showed a handful. The server now sends per-show totals for each of them, a show matches when any episode on
+  disk does, and the count adds those totals for shows that are not open, for example *140 shows, 3 212 episodes*.
+- **The same goes for the other episode filters** (No IMDb rating, No subtitles, Missing English subtitles, Multi-audio,
+  Unknown audio and subtitle language, No episode thumb, New, Multi-episode): their episode counts were also limited to
+  opened shows.
+
+## v2.1.9 — 2026-10-23 — Queue timers measure the job
+
+- **The running timers in the Queue window now count the job itself.** A Library updates, Arr or ingest row showed the
+  time since you opened the window, and started again from 0s when you came back. The server read the job's start time
+  as UTC although the database stores it in its own time zone, so any time zone ahead of UTC gave a start in the
+  future and a timer of zero. The elapsed time is now worked out by the database.
+
+## v2.1.8 — 2026-10-23 — TV3 logo by country
+
+- **Norwegian and Baltic shows on TV3 get the TV3 (Norway) logo.** A network called TV3 now uses `tv3-no.png` when the
+  show's countries include Norway, Estonia, Latvia or Lithuania. Other TV3 shows keep their usual logo.
+
+## v2.1.7 — 2026-10-23 — Provider ids on the info pane and in Edit
+
+- **The info pane shows every provider id.** A row at the bottom of the poster, title and ratings block lists each id
+  the item has, icon first, then the provider name and the number, with a bullet between them. Ids link to the
+  provider's page where there is one. Movies, shows and episodes all get the row.
+- **Provider ids can be edited.** The Edit window has a *Provider ids* field written like
+  `tmdb=1022, tvdb=2405, imdb=tt0111161` (providers: imdb, tmdb, tvdb, trakt, tvmaze, anilist, ofdb, ofdbcc, wikidata).
+  Removing an entry clears that id. Edited ids are locked, so scrapes keep them, and the .nfo is rewritten.
+
+## v2.1.6 — 2026-10-23 — Narrow an Update ratings run
+
+- **Update ratings can be limited to items with a low or thin score.** The window has a new box, *Only update items
+  where the score stored for a ticked source has…*: a rating below N (1 by default), fewer than N votes, more than N
+  votes, or no score yet. Nothing ticked updates everything; several ticked update an item that meets any of them. The
+  check is made per ticked source against the score already stored (scores on other scales are compared out of 10),
+  and only the sources that qualify are asked for that item. A missing score counts as a low rating and as few votes.
+  Items that do not qualify are not touched, and the end line reads, for example, *412 updated, 3100 left out by the
+  filter*. With a filter on, even a single item goes as a job.
+
+## v2.1.5 — 2026-10-23 — Upload artwork without a TMDB id
+
+- **An item with no TMDB id can still take artwork you upload.** Choosing artwork used to stop with *Scrape this show so
+  it has a TMDB id* for a movie, show, season, episode or set without one, which also blocked uploading your own image.
+  The picker now opens with no online images and the upload buttons.
+
+## v2.1.4 — 2026-10-23 — Source list defaults
+
+- **Open Film Database (ofdb.cc) is last in the default source order,** as the last resort for what the other sources
+  left empty, and **OFDb (ofdb.de) is off by default** (it is mostly German information). This applies to new installs
+  and to a list that was never saved. A list you have saved is left as it is: tick OFDb off and add Open Film Database
+  at the bottom under Settings, Movies and TV, if you want the same.
+
+## v2.1.3 — 2026-10-23 — Open Film Database (ofdb.cc) as a metadata source
+
+- **New source: Open Film Database (ofdb.cc).** A free, open database with a JSON API and no key (not the German OFDb,
+  and it has no scores). It is in the Movies and TV source lists as *Open Film Database* and is asked by id only (IMDb,
+  then TMDB, then TheTVDB for shows). It fills what higher sources left empty: title, original title, plot, tagline,
+  release date and year, genres, movie runtime, show status and network. Existing installs get it only when it is
+  added under Settings. It appears in the connection status list as it is used.
+
+## v2.1.2 — 2026-10-23 — A dead rating site is skipped, not hammered
+
+- **A page source that stops answering is left alone for the rest of the run.** After 4 requests in a row to the same
+  site (OFDb, Rotten Tomatoes, Metacritic) get no answer, the site is skipped until the run ends, with one clear
+  message, instead of timing out for every title (15 s each) and sending more requests to a site that may have blocked
+  this address. The next run tries again.
+
+## v2.1.1 — 2026-10-23 — Thumbnail jobs say what they are doing
+
+- **Generate thumbs is easier to follow.** The Jobs window now names the job (*Episode thumbnails*, not *File job*),
+  shows which episode it is on and how many are done (*2/4*), and the log gets a line before each episode (which file a
+  frame is taken from) and one after it with how many seconds it took.
+
+## v2.1.0 — 2026-10-23 — Fix Match jobs show in the Jobs window
+
+- **A Fix Match that has to wait is listed in the Jobs window.** It used a private waiting list that the window did not
+  read, so several Fix Matches ran one after another without showing. They now join the same queue as other scrapes,
+  labelled *Fix match* with the title, and can be removed from the queue there.
+
+## v2.0.9 — 2026-10-23 — Fix Match refreshes every field
+
+- **Fix Match now refreshes all metadata of the newly matched title.** The scrape that follows a Fix Match used the
+  fields ticked for scans in Settings, so a field that was not ticked (year, original language, countries...) kept the
+  value of the wrong match. It now refreshes every field except those you locked, with overwrite on. Ratings follow
+  the usual rating sources.
+
+## v2.0.8 — 2026-10-23 — Filter counts by kind, No poster for seasons
+
+- **TV filter counts say what they count.** Each count in the TV filter bar and in More filters is split by kind, for
+  example *12 shows, 340 episodes* or *3 seasons*, instead of one number that mixed shows, seasons and episodes.
+- **No poster also finds seasons.** A season without a poster now matches, and with No poster alone, ticking shows
+  ticks their seasons without a poster (never episodes).
+- **Missing trailer is gone from the TV filters** (No trailer stays). Movies keep Missing trailer.
+
+## v2.0.7 — 2026-10-23 — Unmatched counts shows only
+
+- **The Unmatched filter on TV Shows counts shows, not episodes.** Seasons and episodes carry no database ids of their
+  own, so every opened season and episode was counted as unmatched (almost 2000 for a handful of shows). Unmatched is now
+  a show-only filter, like No poster: it lists the shows with no TMDB, IMDb or TVDB id and ticks none of their children.
+
+## v2.0.6 — 2026-10-23 — No wall of "Show" in the scrape warning
+
+- **The "needs a match" warning no longer lists "Show" hundreds of times.** For a selection of episodes or seasons whose
+  show was not loaded in the list, every id counted as an unmatched show called *Show*. Those are now left out (the
+  server judges them), and the warning lists at most 20 titles and then *and N more*.
+
+## v2.0.5 — 2026-10-23 — Stay under Trakt's limit
+
+- **Trakt's documented limit is 500 requests per 5 minutes** (one every 0.6 s), so requests are now spaced 0.65 s
+  apart. A 429 waits for the `Retry-After` Trakt sends (up to 300 s); without one it backs off exponentially with
+  jitter. An episode no longer looks up its show's Trakt id again for every episode: the id is remembered for the run,
+  which halves the requests of a big episode run.
+
+## v2.0.4 — 2026-10-23 — Trakt rate limits are waited out
+
+- **Update ratings no longer fails whole runs on Trakt's "429 too many requests".** A 429 from any source is now waited
+  out (up to 8 times, following the `Retry-After` the source sends, up to 90 seconds) before the request counts as
+  failed, and the wait holds back every other request to that host. Trakt requests are also spaced 0.5 s apart instead of
+  0.35 s. Large runs with only Trakt ticked are slower but finish. To go faster, tick the local IMDb data and leave
+  Trakt out.
+
+## v2.0.3 — 2026-10-23 — Ratings jobs say why items failed
+
+- **The ratings summary names the main reason.** A run that ends with failures now reads, for example,
+  *0 updated, 0 skipped, 142 failed. Why: No ratings came back… (142 items)*. The full list per item is in the results
+  window under Failures.
+
+## v2.0.2 — 2026-10-23 — Multi-episode files share the IMDb score
+
+- **The later episodes of a multi-episode file take the first one's IMDb score.** IMDb lists a two-part episode once,
+  on its first number, so a file such as `S02E21E22` gave episode 21 a score and left episode 22 with none. Update
+  ratings and a scrape now give every episode of the file that has no IMDb score of its own the score (and votes) of the
+  other episodes in the file: found in the local IMDb data first, then from a score already saved on one of them. An
+  episode IMDb does rate on its own keeps its own score. Single-episode files are unchanged.
+
+## v2.0.1 — 2026-10-23 — Scope boxes in the TV selection footer
+
+- **Choose what the buttons work on.** On TV Shows the left side of the selection footer lists what is ticked, for
+  example *20 shows · 40 seasons · 200 episodes*, and each count now has a box. Untick *shows* and *episodes* and every
+  button (Scrape, Rescan, Edit, Update ratings, Artwork, .nfo, Rename, Subtitles, Lock, Processed, Move, Remove) works on
+  the seasons only. The number above reads *40 / 260 items* (in scope / ticked) when part of the selection is out of
+  scope, and plain *260* when all of it is in. All three are ticked by default and the scope resets when the selection is
+  cleared. Buttons that need a kind (Edit shows, Theme songs, Move) appear only when that kind is in scope.
+- **Artwork follows the scope.** Artwork now runs one job per ticked kind: the shows' own artwork, the seasons' artwork,
+  and the episodes' thumbnails. Artwork for seasons only no longer touches the show or its episodes (new `art_levels` and
+  season limit on artwork-only jobs).
+- **Scrape:** a scraped show already covers its seasons and episodes, so with shows in scope only the shows are scraped.
+  With only seasons and episodes in scope, a mixed selection still scrapes their shows; narrow the scope to one kind to
+  scrape exactly that kind.
+
+## v2.0.0 — 2026-10-23 — No 5000-item cut on batches
+
+- **Batches are no longer cut at 5000.** The server silently kept only the first 5000 ids of any batch (Update ratings,
+  Scrape, Lock, Remove/Delete, Processed/status, tags, and album field edits), so a larger selection was only partly
+  processed. The cut is gone. A request over 500,000 ids is refused with a message instead of being trimmed.
+
+## v1.9.9 — 2026-10-23 — Select all on TV is instant and follows the filter
+
+- **One request instead of hundreds.** Ticking the box in the title bar (or a show) on TV Shows used to open every
+  ticked show one by one to tick its seasons and episodes, which made *select all* very slow. The seasons and episodes
+  now come from the server in one request (`POST /api/v1/tv/selection`). While it runs the footer says it is counting.
+- **Only what the filter lists.** With a filter on, such as *No IMDb rating*, ticking a show picks only its episodes
+  that match the filter and are on disk, and only the seasons that hold one. With no filter it picks every season and
+  every episode on disk. This covers the quick and More filters (ratings, subtitles, audio languages, thumbs, NFO,
+  lock, upgrade, duplicate, new, scrape and probe failures, resolution and HDR, multi-episode); Filters on the
+  show or season only (no poster, trailer, theme) pick no episodes. For anything else, including column filters, the
+  shows are opened and the same rule is applied to their episodes, as before but filtered.
+- **Update ratings window:** a *Select / deselect all* box above the sources. It shows a dash when only some are ticked
+  and leaves sources that are not set up alone.
+
+## v1.9.8 — 2026-10-23 — One bin button in the selection footer
+
+- **Remove and Delete are one button.** The selection footer (music and video) had two wide red buttons, *Remove from
+  library* and *Delete from disk*. They are now a single red bin. It opens the same window as the bin on an item: Cancel,
+  Remove from library, or Delete from disk, with the warning that deleting cannot be undone.
+
+## v1.9.7 — 2026-10-23 — TV filters are exact for every show
+
+- **No more false positives.** The TV filters that look at episodes (No IMDb rating, No subtitles, Missing English
+  subtitles, Multi-audio, Unknown audio language, Unknown subtitle language, No episode thumb) used to keep any show
+  whose episodes had not been loaded yet. The show list now carries, for each show, how many of its episodes lack each
+  of those, so a show is listed only when it really has such an episode, and the counts in the filter list are real.
+  An opened show is still checked episode by episode.
+- **Missing episodes are ignored.** Episodes that are not on disk no longer make a show match these filters.
+- **Fixed:** *Missing English subtitles* checked the show's own subtitle list instead of each episode's.
+
+## v1.9.6 — 2026-10-23 — TV filters work from the show list
+
+- **All TV filters are available at once.** The More filters list on TV Shows only offered an entry such as *No IMDb
+  rating* after you had opened a show down to its episodes, because the counts ignored show and season rows. The counts
+  now cover shows, seasons and the episodes of opened shows, and no entry is greyed out. A show whose episodes have not
+  been loaded yet counts as a match for the episode-based filters (no rating, no subtitles, and so on), because it cannot
+  be ruled out until it is opened.
+
+## v1.9.5 — 2026-10-23 — Shorter selection footer
+
+- **Grouped buttons.** The video selection footer was three rows tall and covered the last rows of the list. The small
+  actions now sit in three menus: **Metadata** (Edit, Update ratings, Artwork, Write .nfo, Rename), **Media** (Subtitles,
+  Trailers, Generate thumbs, Theme songs, Split episodes) and **Organize** (Lock, Processed, Move). Scrape, Rescan, Clear,
+  Remove from library and Delete from disk stay in the row, so it is one row tall.
+- **Wider footer.** The selection footer (music and video) now slides over the status pane as well, all the way up to the
+  Scan engine button, instead of stopping at the status pane's edge.
+
+## v1.9.4 — 2026-10-23 — Update ratings asks which sources to use
+
+- **Source picker.** The right-click entry and the footer button **Update ratings** now open a window with a checkbox for
+  every source: the local IMDb data, TMDB, OMDb, Trakt, Rotten Tomatoes, Metacritic, AniList and OFDb. A source that is
+  not set up (no key, or not in the source list, or the IMDb data not built) is greyed out and says why. Only the ticked
+  sources are asked; scores from sources you leave out are kept as they are. The choice is remembered in this browser,
+  and the button is off until at least one source is ticked.
+- It works for one item (updated on the spot), for a selection (one background job) and from the footer. The job log says
+  which sources it used.
+- Tests: `tests/test_imdb_data.py` (`RatingSourcePickerTests`); the older menu tests now describe the window.
+
+## v1.9.3 — 2026-10-23 — An empty answer from Trakt is not an error
+
+- **Trakt answered 204 (no content).** For a show it has no ratings for, Trakt replies with an empty body, which the
+  client reported as *sent something that is not JSON*. An empty answer (HTTP 204, or a 200 with nothing in it) now means
+  the source has nothing for that title. A real web page or broken reply is still an error, with its status and type.
+- Tests: `tests/test_http_empty_answer.py`.
+
+## v1.9.2 — 2026-10-23 — A two-disc movie lists both files and loses the title "CD2"
+
+- **Both discs in the Filepath.** A movie stacked from several files (CD1 and CD2) showed only the first file under
+  *Filepath*. It now lists every part, one path per line.
+- **Title "CD2" is replaced.** A multi-disc movie that kept a disc folder's name as its title (from an old scan, or an
+  .nfo written from that folder) kept it on every rescan, because the scan treated an unchanged movie as finished and
+  carried the stored title over. A scan now never keeps a title that is only a disc name (CD1, Disc 2, Part 3…), uses the
+  movie's name from its folder, and re-reads a stored movie that has such a title or lists different files than the
+  folder holds, even in an incremental scan.
+- Tests: `tests/test_part_folder_movies.py`.
+
+## v1.9.1 — 2026-10-23 — Episode ratings no longer fail on Trakt, and one failing source no longer loses the rest
+
+- **Episode ratings used the wrong id.** For an episode, Update ratings asked Trakt (and OMDb) with the episode's own
+  IMDb id where they expect the show's id, so Trakt answered with a web page and every episode failed with *api.trakt.tv
+  sent something that is not JSON*. It now uses the show's ids plus the season and episode number, and no longer stores
+  the show's Trakt id on the episode.
+- **A failing source no longer fails the item.** If TMDB, OMDb or Trakt gives an error, the scores from the other
+  sources (and the local IMDb data) are still saved, and the job log adds a line saying which source was not used. An
+  item fails only when no source returned anything.
+- **Clearer error.** The *not JSON* message now says the HTTP status, the content type and the path, so a real outage or
+  a block is easy to tell apart.
+- Tests: `tests/test_imdb_data.py` (`TraktRatingsTests`).
+
+## v1.9.0 — 2026-10-23 — The format badge on an album cover is readable
+
+- **Cover badge contrast.** The format badge on the album cover (for example *FLAC 16/44.1*) had no background of its
+  own, so it was hard to read on light covers. It now has a dark background with light text. The gold Hi-Res badge is
+  unchanged.
+- Tests: `tests/test_nfo_pill_clear.py`.
+
+## v1.8.9 — 2026-10-23 — A movie in CD1 and CD2 folders is one movie again
+
+- **Multi-disc movies in CD folders.** A movie whose parts sat in a CD1 folder (or whose rows were filed under `Cd1`
+  and `Cd2`) showed up as *Cd1* and *Cd2*, and rescanning those rows did nothing: a rescan only looked inside the CD1
+  folder, where the other part is not visible, and named the movie after that folder. A movie is now always filed under
+  its release folder (the folder above CD1), named after it, with every part together, whether the parts are in one CD
+  folder or in CD1 and CD2 folders (a lone disc folder stays as it is). Rescanning a row filed under a CD folder starts from the release
+  folder, so the old *Cd1* and *Cd2* rows are replaced by one movie. A CD folder directly in the library root is left as
+  it is.
+- Tests: `tests/test_part_folder_movies.py`.
+
+## v1.8.8 — 2026-10-23 — The upgrade window scrolls instead of overlapping
+
+- **Upgrade available window.** When the comparison was taller than the window, its last rows (Audio, and so on) were
+  drawn over the *Purge the old files…* option. The comparison now keeps its full height and the window scrolls.
+- Writing an .nfo while a scan runs: the write itself was never blocked (the *written* message appears at once); the
+  wait was the library reload that followed it, which v1.8.7 moved to the background.
+- Tests: `tests/test_nfo_pill_clear.py`.
+
+## v1.8.7 — 2026-10-23 — Every album gets its audio columns, and the purple NFO pill clears when the file is written
+
+- **Audio columns for every album.** Only the oldest album of each artist showed Format, Quality, Bits, Sample rate and
+  Bitrate. The list fills missing values as it loads, but it stopped after 2,500 albums per load and went through the
+  library oldest album first, so each artist's first album was filled and the rest waited for the next load. It now fills
+  every album it is about to show in one pass (the result is saved, so it happens once). The start-up fill also no
+  longer sits behind the check for a rehome left running from the previous start.
+- **Purple NFO pill clears right after a write.** Pressing **Write .nfo** in the NFO changes window of an album that is
+  not the open one waited for a full library reload before it cleared the pill, and a reload can take minutes while a
+  scan runs, so the pill stayed and the button kept spinning even though the file was already written. The pill is now
+  cleared from the answer of the write itself, before anything slow, and the library reloads in the background. The
+  artist .nfo window works the same way.
+- Tests: `tests/test_nfo_pill_clear.py`.
+
+## v1.8.6 — 2026-10-23 — Update ratings in the batch footer, the IMDb options are easy to find, and two layout fixes
+
+- **Update ratings in the batch footer.** With movies ticked, or shows and episodes ticked, the footer has an **Update
+  ratings (n)** button next to Edit. It always runs as a job (Jobs panel: *Movie ratings*, *TV ratings*, *Episode
+  ratings*), even for one item, with the same local-IMDb-first rules as the right-click entry. Sets and seasons have no
+  scores of their own, so they do not get it and are not counted.
+- **IMDb options moved to Integrations.** The switch, the refresh interval, the user agent, Refresh now and Remove local
+  copy were far down Settings, General. They are now under **Settings, Integrations, IMDb ratings from IMDb's own data
+  files**. General and Schedules each show a short note with a link that jumps straight there. The interval is "refresh
+  every N days", not a cron schedule, and the Schedules note says so.
+- **Clear buttons no longer overlap** (Settings, Files: Video previews and Recognised text). Each cache has its own line
+  with the button beside the text, in the same style as the other secondary buttons.
+- **Music list no longer goes blank after a scan.** When a scan finished, the refresh could redraw the list for a scroll
+  position the pane no longer had, leaving one row on screen until you scrolled. After every redraw the list now checks
+  that the rows drawn are the ones at the position the pane really has and redraws them if not. It also redraws when the
+  pane changes height (the scan banner going away) and when it is shown again after being hidden.
+- Tests: footer button rules, the settings move and its pointers, the cache rows and the tree check in
+  `tests/test_imdb_data.py`.
+
+## v1.8.5 — 2026-10-23 — Update ratings works on several items, and uses the local IMDb data first
+
+- **Batch Update ratings.** The right-click entry **Update ratings** was greyed out unless exactly one item was picked.
+  It is now available for any number of movies, shows or episodes and shows the count: *Update ratings (12)*. Several
+  items run as one background job (Jobs panel: *Movie ratings*, *TV ratings*, *Episode ratings*, with progress and Stop),
+  queued behind a running scan like a scrape. When it ends it says, for example, *28 updated, 26 with the IMDb score from
+  the local data, 2 skipped, 0 failed*. Locked items are skipped (not failed); items with nothing to look up are listed as
+  failed with the reason. The lists and the open item reload when it finishes. One item still updates instantly.
+- **Local IMDb data first.** For every update, one item or many, the IMDb score and vote count now come from the local copy
+  when it has the title, and replace the one OMDb has cached. TMDB, Trakt and the Rotten Tomatoes and Metacritic page
+  scrapers are still asked for their own scores. (Before, OMDb's live answer won and the copy only filled a gap; a full
+  scrape still works that way.) With the switch off or the index not built, nothing changes.
+- **Spares the OMDb limit.** In a batch, OMDb is skipped for an item when the local copy has its IMDb score and the item
+  already has a Rotten Tomatoes or Metacritic score. Items that lack those still ask OMDb, so a first run fills them in. A
+  single-item update always asks OMDb.
+- Tests: batch rules (local first, OMDb spared, locked skipped, counts and summary, cancel, queue hand-off, route) and the
+  menu wiring in `tests/test_imdb_data.py`; the old test that expected OMDb to win now expects the local score.
+
+## v1.8.4 — 2026-10-23 — The audio columns of the music list fill in on their own, and the Columns menu lines up
+
+- **Format, Quality, Bits, Sample rate and Bitrate were blank** for albums scanned before v1.8.3. They were meant to be
+  filled in by a job a little after start, but that job sat behind two long catalogue jobs (original years and the
+  album rehome), and a failure in either one stopped it. It now runs first, on its own, so a slow or failed job after it
+  cannot hold it back.
+- **The list fills blanks itself.** When the artist and album list loads (and when the library refreshes after a scan),
+  any album that still has no audio values gets them right then, from the tracks already stored, and they are saved. It
+  does up to 2,500 albums per load, gives up on rows another job has locked rather than making the list wait, and never
+  fails the list. No rescan is needed.
+- **Columns menu.** The checkboxes were different widths (the global input padding made them grow and shrink with the
+  label), so they did not line up. Each is now the same 16 px box at the left of its cell, and the music menu is wider so
+  names such as Release status stay on one line. The movie and TV Columns menus share the fix and are a little wider.
+- Tests: the fill-while-reading rules (blank albums filled and saved, others left alone, the limit, locked rows, database
+  errors, write order), the start-up order, and the menu rule, in `tests/test_album_audio.py` and
+  `tests/test_music_columns.py`.
+
+## v1.8.3 — 2026-10-23 — The music list gets a title bar, a master box and sortable, filterable columns
+
+- **Title bar and master box.** The artist and album list now has a title bar like the movie and TV tables. The box
+  in it ticks every album on screen, takes them out again, and shows a dash when only some are ticked. With a column
+  filter on, it acts on the albums that are left, and ticks on albums the filter hides stay.
+- **Columns** (button above the list): Status, Year, Type, Edition, Tracks, Length, **Format**, **Quality**, **Bits**,
+  **Sample rate**, **Bitrate**, Match, Country, Label, Catalog no., Release status, Added, Modified, Processed, Cover, NFO
+  and Path. They resize, move by dragging the name, and the choice, order, widths and sort are saved with the other
+  layout choices on the server (`ui_state.json`). The pills that sat at the end of a row are now the Status column; the
+  track count, edition, added date, flag and processed mark are columns too. Added, Processed and Edition still follow
+  their switches under Settings, UI Elements. **Reset with Default columns** in the menu.
+- **Sorting.** A click on a name sorts, a second click reverses. Albums are sorted inside each artist and the artists
+  follow their best album (lowest when rising, highest when falling). Rows without a value come last either way. Quality
+  sorts by the rank that decides Upgrade available (lossless before lossy, then bit depth, sample rate, bitrate). The
+  *Sort by name / Latest added …* menu still works and clears a column sort when you pick from it.
+- **Filtering.** The arrow beside a name lists the values with counts, with a find box. Picks in one column are "any of",
+  columns together are "all of". An album with several formats is found under each (`FLAC/MP3` under both). Artists with
+  no album left are hidden, and if nothing is left the list says so and offers **Clear the column filters**. *Clear
+  filters* clears these too. All, None, the NEW / 100% / Partial / Unmatched buttons, keyboard moves and Export use the
+  albums that are left.
+- **Audio facts per album** are new stored values (`audio_format`, `audio_lossless`, `audio_bit_depth`,
+  `audio_sample_rate`, `audio_bitrate` on `albums`), written by the scanner next to `quality_rank`. The weakest track gives
+  the bit depth and sample rate (the same rule as the quality rank), and the bitrate is the average. Albums scanned before
+  this version are filled in once, in small batches a little after start, with no rescan and no file access.
+- A click on any cell of an album row opens the album, and right-click works on the whole row.
+- Tests: `tests/test_album_audio.py` (summary rules, payload, backfill, scanner and schema wiring) and
+  `tests/test_music_columns.py` (labels, sort, filters, master box, wiring) run the real code in node.
+
+## v1.8.2 — 2026-10-23 — Master checkbox on TV shows and the batch footer in grid view work
+
+- **TV list, master checkbox in the title bar.** Ticking it now checks every show on screen straight away. Before, the
+  list waited until the seasons and episodes of every show had been fetched (one request each, so a minute or more
+  on a big library), and the click looked like it did nothing. The next click on a single row then toggled the state
+  that was already set, which is why everything except that row appeared selected, and why unticking all needed a
+  click on a row first. The seasons and episodes now load in the background and the list repaints as they arrive.
+  Clicking the master box again, **All**, **None**, or a single box while they load cancels the loading, and a show
+  you untick in the meantime keeps its seasons and episodes unticked.
+- The master box now shows a dash when only some rows are ticked, and it is ticked when every row that can be ticked
+  is. Rows that cannot be ticked (missing episodes, rows still loading) no longer count, so the box could stay
+  unticked after a full selection and the next click would tick again instead of clearing.
+- The same immediate repaint applies to the single row boxes and to the Space key.
+- **Grid view, movies, sets and TV.** Ticking a poster card did nothing: the card's wrapper swallowed the click
+  before the page could see it, so no item was selected and the batch footer never slid up. Music uses a different
+  handler, which is why it worked. The box now selects, the footer opens and shows the buttons for the selection.
+  A click on the empty margin around the box still does not open the item.
+- A ticked box no longer flips back to unticked a moment after the click.
+- Tests: `tests/test_master_checkbox.py` runs the real selection code in node (checks first, children later,
+  cancel, unticking while loading, header state) and guards the grid checkbox wrapper.
+
+## v1.8.1 — 2026-10-23 — The user agent sent to IMDb can be changed
+
+- **Settings, General, API credentials, IMDb data** has a new **User agent** box. It is the name that the requests to
+  `datasets.imdbws.com` send. The default stays `Curator/<version> (+https://github.com/jonnypuma/curator)` and is shown
+  in the box while it is empty. Type your own, for example the name an agreement or licence you hold with IMDb asks
+  for, and it is sent on every request instead, both the check for new files and the downloads. **Use default**
+  clears it (press **Save settings** to apply, like the time zone Reset).
+- The saved name is cleaned so it is always a safe single-line header: plain printable ASCII, extra spaces folded, at
+  most 200 characters. Anything else is dropped, so a pasted line break cannot add a header.
+- `GET /api/v1/imdb-data` now reports both the name in use and the default.
+- Asked whether **Refresh ratings** also uses the local IMDb copy: it does. On an episode it uses the copy first and
+  does not ask OMDb. On a movie or show OMDb answers as before and the copy supplies the IMDb score when OMDb gave none.
+  It is the only ratings button, so scrapes and that button share the same rule.
+
+## v1.8.0 — 2026-10-23 — IMDb ratings and episode ids from IMDb's own data files (optional)
+
+- New switch under **Settings, General, API credentials**: **Use IMDb's free datasets for ratings and episode details**.
+  It is **off by default**. While it is off nothing is downloaded and no lookup uses the data. The section carries a note
+  that IMDb offers these files for personal and non-commercial use only, links to IMDb's terms for the datasets and its
+  licensing article, and says "Data from IMDb's non-commercial datasets, for personal use only."
+- When it is on, Curator downloads three files from `datasets.imdbws.com` (ratings, episodes and basic title facts,
+  about 290 MB), builds one searchable index of about 270 MB in the cache folder, and **deletes the downloaded files
+  straight after**. A build takes a minute or two. It goes to a side file and replaces the old index in one step, so a
+  failed or interrupted build keeps the old data. **Remove local copy** deletes the index, once the switch is off.
+- Each install downloads for its own user, straight from IMDb. The request names the app, its version and the project
+  in its user agent (`Curator/1.8.0 (+https://github.com/jonnypuma/curator)`). The files are never bundled in the image
+  or the repository (`.gitignore` and `app/.dockerignore` now skip `*.tsv`, `*.tsv.gz`, `imdb.sqlite*`, `data` and
+  `cache`), and Curator has no route that serves them. Each download is capped well above the real file size and checked
+  for being complete. Nothing is fetched when there is less than 1.5 GB free in the cache folder.
+- Files you put in `<data>/imdb` yourself (`title.ratings.tsv.gz`, `title.episode.tsv.gz`, `title.basics.tsv.gz`) are used
+  for the build when they are newer than the refresh interval, so nothing is downloaded. Curator never changes or
+  deletes them.
+- **Refresh every 30 days** by default (7 to 365 in Settings). A background check runs quietly and downloads again only
+  when the index is older than that, or when you press **Refresh now**. It first asks IMDb whether it has published
+  anything new. After a failed update it waits a day before trying by itself. The update shows in the Jobs panel as
+  *IMDb data*, and the status line in Settings shows the age, the size, what it holds and the last error.
+- Scrapes use the copy only to fill gaps, so a live answer is never replaced:
+  - A show scrape gives **every episode its own IMDb id and IMDb score**, with no web request. Before, an episode only
+    got an IMDb score from OMDb in an episode-only scrape, one request each.
+  - **Refresh ratings** on one episode uses the copy first and does not ask OMDb when the copy has the episode.
+  - For movies and shows the copy is the last source. It supplies the IMDb score when OMDb gave none (no key, the daily
+    limit, or an unknown title), and the title, original title, year, runtime and genres that no other source had.
+    OMDb is still asked as before.
+- README: new section **Where ratings come from**, with the IMDb data files and their limits.
+- The settings keys are `imdb_data` and `imdb_refresh_days` under the video settings. New routes `GET`, `DELETE`
+  `/api/v1/imdb-data` and `POST /api/v1/imdb-data/refresh`.
+
+## v1.7.7 — 2026-10-23 — The Update yt-dlp button stands out, and About links to the project
+
+- **Update yt-dlp** in the About window is now the filled accent-colour button used for main actions, a little larger,
+  instead of the outlined one that blended into the table. While GitHub lists a newer yt-dlp release, the button also
+  gets a soft ring around it, next to the "… is available" line. The ring goes away when the check says you are current,
+  or after an update.
+- About has a new **Project** row, right under Version, linking to <https://github.com/jonnypuma/curator>. It opens in
+  a new tab. Links in that window now use the accent colour.
+
+## v1.7.6 — 2026-10-22 — The README uses example addresses and names
+
+- The README no longer shows one person's network. The Kodi path mapping section now uses example NFS addresses
+  (`192.168.1.20`, `192.168.1.21` and `192.168.1.22`) and example mount names (`/media`, `/nas1/Media`, `/nas2/Media`
+  and `/nas2/Media2`) in place of real hosts and NAS model names. The `CMM_ALLOWED_ORIGINS` example is now
+  `http://192.168.1.50:4455`.
+- Only the text changed. Nothing in the app behaves differently.
+
+## v1.7.5 — 2026-10-22 — A Reset button for the schedule time zone
+
+- **Settings, General, Time zone** has a **Reset** button beside the zone box. It clears the box so the schedules go
+  back to the server's own zone, which is `CMM_TIMEZONE` and then `TZ` from docker-compose. The button's tooltip and
+  the text under the box name that zone (for example Europe/Oslo).
+- Reset only empties the box and says so in the status line. Press **Save settings** to apply it, the same as every
+  other setting on the page. It does not save by itself.
+- The button is greyed out while the box is empty, because there is nothing saved to reset, and it comes back as soon
+  as a zone is typed or saved. Clearing the box by hand does the same thing as pressing it.
+- Reset clears the saved zone rather than copying the server's name into the box, so a later change to `TZ` in
+  docker-compose is still followed.
+
+## v1.7.4 — 2026-10-22 — The schedule time zone can be set in Settings
+
+- **Settings, General** has a new **Time zone** section with **Schedule time zone**. Type a zone name such as
+  `Europe/Oslo` (the box suggests names as you type) and save. It is the clock that scheduled scans, library cleans
+  and backups run by, and the time in backup file names. The "Times use …" line under each schedule shows the zone in
+  use.
+- Before this, the zone could only be set with `CMM_TIMEZONE` or `TZ` in docker-compose, and a change needed a restart.
+  The order is now: the zone saved in Settings, then `CMM_TIMEZONE`, then `TZ`, then the system clock. Leave the box
+  empty to keep following the server. The box shows the server's own zone as its placeholder, and the text under it
+  names it.
+- The saved zone takes effect at once. The schedules look it up every minute and remember it until settings.json
+  changes, so there is no restart and no extra disk read on each tick.
+- A name that is not a zone is refused when you save, with a message that gives an example. A bad name in the file
+  itself is ignored, so it cannot stop the schedules.
+- It is one zone for the whole server. It does not follow the browser or the person who set it, and a schedule keeps
+  firing at the same clock time wherever you are. The container's own `TZ` still sets the logs and the database.
+  Daylight saving changes are handled as before.
+
+## v1.7.3 — 2026-10-22 — Media info files can be switched on and off in Settings, for movies and TV separately
+
+- **Settings, Movies** has a new box under Writing: **Write a .cmm_mediainfo.xml media info file beside each movie**.
+  **Settings, TV** has a new **Media info files** section with **Write a .cmm_mediainfo.xml media info file beside
+  each episode**. Both are on by default. The file holds what the probe found, so a moved or renamed folder is not
+  probed again.
+- Until now this could only be switched off for everything at once, with the environment variable
+  `CMM_WRITE_SIDECARS=0`, and a change needed a container restart. The boxes apply to the next file that is written,
+  with no restart, and movies and TV are independent: you can keep the files for movies and stop them for TV, or the
+  other way round.
+- `CMM_WRITE_SIDECARS` still works as the starting value: with it set to `0`, both boxes start off until you save
+  Settings, after which the boxes decide. It is read when Settings are loaded, so it is no longer fixed at startup.
+- Turning a box off does not delete files that already exist. They stay, are still used to skip a probe, and still show
+  in the Files section. A file is only left alone, never rewritten, while its box is off.
+- This covers the media info file only. Writing `.nfo` files and artwork keeps its own boxes under Writing.
+
 ## v1.7.2 — 2026-10-22 — An upgrade now cleans the old file out of Kodi, and a rescan stops saying "Removing"
 
 - **Upgrades leave no stale entry in Kodi.** When Radarr or Sonarr replaces a file with a better one, the delete of

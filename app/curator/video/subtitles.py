@@ -324,7 +324,7 @@ def purge_duplicates(video_path, cfg, log):
             writes.check(path)
             from resonance import trash
 
-            trash.discard(path, kind="subtitle")
+            trash.discard(path, kind="subtitle", reason="Duplicate subtitle file removed")
             removed += 1
             log(f"Removed {os.path.basename(path)}: same text as {kept}")
         except (OSError, AppError) as exc:
