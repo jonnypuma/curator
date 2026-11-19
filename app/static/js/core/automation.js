@@ -783,6 +783,7 @@ async function refreshQueuePanel() {
     state.queuePanel.scans = status.scans || [];
     state.queuePanel.arr = status.arr || [];
     state.queuePanel.library = status.library || [];
+    state.queuePanel.libraryFailed = status.library_failed || [];
     state.queuePanel.events = history.events || [];
     state.queuePanel.scanEvents = history.scans || [];
     state.queuePanel.arrEvents = history.arr || [];
@@ -1093,6 +1094,48 @@ function queueLibraryRow(item) {
     </tr>`;
 }
 
+// Player updates that failed (the player was off, or its database was): kept until they are retried or cleared.
+// Curator retries each one once by itself when that player answers again; the buttons are for everything else.
+function queueFailedLibraryRow(item) {
+    const names = (item.items || []).filter(Boolean);
+    const asked = item.trigger ? `<br><small class="muted queue-trigger">Triggered by: ${escapeHtml(item.trigger)}</small>` : "";
+    const what = `${names.length ? `${escapeHtml(names.join(", "))}<br>` : ""}<small class="muted">${escapeHtml(item.scope || "")}</small>${asked}`;
+    const tries = Number(item.tries) > 1 ? ` · failed ${Number(item.tries)} times` : "";
+    return `<tr data-key="${escapeHtml(item.id)}">
+        <td>${providerIcon(item.player || item.source)}</td>
+        <td>${mediaLabelHtml(item.media)}</td>
+        <td>${what}</td>
+        <td><small class="settings-warning">${escapeHtml(item.error || "Failed")}</small><br><small class="muted">${escapeHtml(String(item.failed_at || "").replace("T", " "))}${tries}</small></td>
+        <td class="queue-fit"><button type="button" class="btn-ghost" data-action="queue-library-retry-one" data-id="${escapeHtml(item.id)}">Retry</button>
+            <button type="button" class="btn-ghost btn-remove" data-action="queue-drop-library" data-id="${escapeHtml(item.id)}">Remove</button></td>
+    </tr>`;
+}
+
+function queueFailedLibraryHtml(rows) {
+    if (!rows.length) return "";
+    return `<h3 class="queue-group queue-failed-head">Failed <span class="album-count">${rows.length}</span>
+            <button type="button" data-action="queue-library-retry-failed">Retry failed</button>
+            <button type="button" class="btn-ghost btn-remove" data-action="queue-library-clear-failed">Clear failed</button></h3>
+        <table class="queue-table"><thead><tr><th>Player</th><th>Media</th><th>Items</th><th>What went wrong</th><th></th></tr></thead>
+        <tbody>${rows.map(queueFailedLibraryRow).join("")}</tbody></table>`;
+}
+
+async function retryFailedLibrary(id) {
+    const data = await api("/api/v1/queue/library/retry-failed", { method: "POST", body: id ? { ids: [id] } : {} });
+    const count = Number(data.queued) || 0;
+    notify(count ? `${count} failed update${count === 1 ? "" : "s"} queued again.` : "Nothing was queued again.", count ? "success" : "info");
+    refreshQueuePanelSoon();
+}
+
+function clearFailedLibrary() {
+    askDanger("Clear the failed updates?", "They are dropped without being sent to the players. This does not touch any file.", "Clear failed",
+        async () => {
+            const data = await api("/api/v1/queue/library/clear-failed", { method: "POST", body: {} });
+            notify(`Cleared ${Number(data.cleared) || 0} failed update${Number(data.cleared) === 1 ? "" : "s"}.`, "info");
+            refreshQueuePanelSoon();
+        }, true);
+}
+
 // "Scanning 5 of 37" for a Kodi job that goes through its folders one at a time; "" when the job has no such count.
 function libraryProgressLabel(item) {
     const progress = item && item.progress;
@@ -1157,7 +1200,8 @@ function paintQueueLists() {
     } else if (tab === "arr") {
         html = queueGrouped(state.queuePanel.arr || [], "<th>Item</th><th>Where</th><th></th>", queueArrRow);
     } else if (tab === "library") {
-        html = queueGrouped(state.queuePanel.library || [], "<th>Player</th><th>Media</th><th>Items</th><th>Status</th>", queueLibraryRow);
+        html = queueGrouped(state.queuePanel.library || [], "<th>Player</th><th>Media</th><th>Items</th><th>Status</th>", queueLibraryRow)
+            + queueFailedLibraryHtml(state.queuePanel.libraryFailed || []);
     } else {
         const items = state.queuePanel.items || [];
         html = queueGrouped(items, "<th>Item</th><th>From</th><th>Event</th><th>Webhooks</th><th></th>", (item) => `<tr>
@@ -1557,6 +1601,9 @@ const AUTOMATION_ACTIONS = {
     "queue-kodi": (action) => runAction(() => queueKodiLibrary(action.dataset.media)),
     "queue-library-manual": (action) => runAction(() => queueManualLibrary(action), "Queuing…"),
     "queue-library-retry": (action) => runAction(() => retryLibraryUpdate(action.dataset.id), "Queuing…"),
+    "queue-library-retry-one": (action) => runAction(() => retryFailedLibrary(action.dataset.id), "Queuing…"),
+    "queue-library-retry-failed": () => runAction(() => retryFailedLibrary(""), "Queuing…"),
+    "queue-library-clear-failed": () => clearFailedLibrary(),
     "queue-show-call": (action) => runAction(() => showWebhookCall(action.dataset.id)),
     "queue-copy-call": () => runAction(copyWebhookCall),
     "queue-clear": () => clearQueueAsk(),

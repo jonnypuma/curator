@@ -5703,3 +5703,4 @@ button.tag-pill.is-busy .activity-spin {
 #trash-search { flex: 1 1 260px; min-width: 0; }
 .trash-sort { font: inherit; font-weight: 600; color: inherit; white-space: nowrap; }
 .trash-why { max-width: 320px; font-size: 12px; overflow-wrap: anywhere; }
+.queue-failed-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--danger); }

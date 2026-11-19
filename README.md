@@ -209,6 +209,10 @@ the item's folder (you pick the players) and shows up under Library updates in t
 Radarr, Lidarr) only asks that app to rescan; no player is told. After a Sonarr rescan Curator scans the show as
 well, because Sonarr only reports files it adds or removes.
 
+**A failed player update is kept.** When a player cannot take an update, it stays in the Queue under Library updates,
+in a Failed list with what went wrong. Curator queues it again by itself the first time that player answers again,
+and **Retry failed**, **Retry**, **Remove** and **Clear failed** do the rest by hand.
+
 **Every library update says what triggered it.** Rows under Library updates in the Queue, the finished row in Recent
 library updates, and the Kodi alerts for a scan that was sent or is waiting all end with *Triggered by*, for example a
 Radarr webhook and its event, a schedule, the manual update button, a retry, a file job or a bulk cleanup. Requests that

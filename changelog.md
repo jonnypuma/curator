@@ -1,5 +1,29 @@
 # Changelog
 
+## v4.4.2 — 2026-11-19 — Failed player updates are kept, retried when the player is back, and have Retry buttons
+
+- **A player update that fails is no longer lost.** When Kodi, Emby, Jellyfin, Plex or Navidrome cannot take an
+  update (the player is off, or its database is, as with Kodi's MariaDB), the update stays in the Queue under
+  Library updates, in a **Failed** list, with what went wrong, when, how often it failed and what triggered it.
+- **Retried by itself when the player answers again.** The first update that works on a player queues that player's
+  failed updates once more, and Recent library updates says so. Each failed update gets one such automatic try; one
+  that fails again waits for you.
+- **Retry failed** queues every failed update again, **Retry** on a row just that one, **Remove** drops one and
+  **Clear failed** drops them all (no file is touched). Several failed full scans of the same library become one.
+- Up to 200 failed updates are kept per player; the oldest go first. Updates that failed before this version were
+  not kept and cannot be brought back.
+
+## v4.4.1 — 2026-11-19 — A Kodi error says which request failed, and no longer stops the rest of a refresh
+
+- **"Kodi: Kodi: Internal error." now names the request.** Kodi's own error text says nothing about what it was
+  asked. The message now reads, for example, "Kodi answered AudioLibrary.SetAlbumDetails with: Internal error.", and
+  a refresh that fails names the item it was working on.
+- **One item Kodi refuses does not stop the others.** A refresh job (new metadata or artwork for several items) used
+  to end at the first error. It now goes on with the remaining items and reports how many could not be refreshed and
+  why. The job only fails when nothing in it could be refreshed.
+- **Dropping Kodi's cached copy of a picture is best effort.** When Kodi refuses that request, the new artwork is
+  still set on the item.
+
 ## v4.4.0 — 2026-11-19 — Imported episodes and movies reach Kodi after their .nfo, so the media flags show
 
 - **The cause of missing media info in Kodi after an import.** A webhook import runs scan, scrape, file jobs and then

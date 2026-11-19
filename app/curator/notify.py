@@ -123,7 +123,10 @@ def kodi_call(host, user, password, method, params=None, timeout=None):
     except ValueError as exc:
         raise RuntimeError("Kodi did not answer with JSON-RPC") from exc
     if data.get("error"):
-        raise RuntimeError(f"Kodi: {data['error'].get('message') or data['error']}")
+        error = data["error"]
+        reason = error.get("message") if isinstance(error, dict) else error
+        # Kodi's own words ("Internal error", "Invalid params") say nothing about which request it was.
+        raise RuntimeError(f"Kodi answered {method} with: {reason or error}")
     return data.get("result")
 
 
@@ -1906,6 +1909,14 @@ def _kodi_forget_texture(target, url):
     return removed
 
 
+def _forget_texture_quietly(target, url):
+    try:
+        return _kodi_forget_texture(target, url)
+    except RuntimeError as exc:
+        logger.info("Kodi kept its cached copy of %s: %s", url, exc)
+        return 0
+
+
 def _kodi_new_art(target, mappings, kind, item_id, art):
     """Show changed artwork in Kodi without a rescan: forget the cached pictures and point the item at the new files.
 
@@ -1920,10 +1931,10 @@ def _kodi_new_art(target, mappings, kind, item_id, art):
         old = current.get(art_kind) or ""
         same = bool(remote) and _same_remote(kodi_art_inner(old), remote)
         if old:
-            _kodi_forget_texture(target, old)
+            _forget_texture_quietly(target, old)
             touched = True
         if remote and not same:
-            _kodi_forget_texture(target, remote)       # a picture of that name Kodi may have cached earlier
+            _forget_texture_quietly(target, remote)    # a picture of that name Kodi may have cached earlier
             changes[art_kind] = remote
     if changes:
         kodi_call(*target, setter, {id_key: item_id, "art": changes})
@@ -1943,58 +1954,64 @@ def _kodi_refresh(cfg, media, items):
     keep = []   # watched state to put back after the refresh (a refresh can drop the resume point)
     shows = None
     named = {}
+    failures = []
     for item in items:
         _stop_if_cancelled()
-        kind = item.get("kind")
-        if kind in ART_ONLY_KINDS:
-            art_done += _kodi_art_only(target, mappings, item, named)
-            continue
-        if kind in {"movie", "episode"}:
-            remote = _remote(item.get("path"), mappings)
-            if not remote:
-                unmapped += 1
+        # One item Kodi refuses must not stop the items after it.
+        try:
+            kind = item.get("kind")
+            if kind in ART_ONLY_KINDS:
+                art_done += _kodi_art_only(target, mappings, item, named)
                 continue
-            if kind == "movie":
-                method, key, id_key, refresh = "VideoLibrary.GetMovies", "movies", "movieid", "VideoLibrary.RefreshMovie"
-            else:
-                method, key, id_key, refresh = "VideoLibrary.GetEpisodes", "episodes", "episodeid", "VideoLibrary.RefreshEpisode"
-            name = remote.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-            found = kodi_call(*target, method, {"filter": {"field": "filename", "operator": "is", "value": name},
-                                                "properties": ["file", "playcount", "lastplayed", "resume"]}) or {}
-            row = kodi_match(found.get(key), remote)
-            if row and item.get("art"):
-                art_done += _kodi_new_art(target, mappings, "movie" if kind == "movie" else "episode", int(row[id_key]),
-                                          item["art"])
-                if not item.get("full"):
+            if kind in {"movie", "episode"}:
+                remote = _remote(item.get("path"), mappings)
+                if not remote:
+                    unmapped += 1
                     continue
-            if row:
-                resume = row.get("resume") or {}
-                before = {"plays": int(row.get("playcount") or 0), "last": row.get("lastplayed") or None,
-                          "resume": float(resume.get("position") or 0), "total": float(resume.get("total") or 0)}
-                if before["plays"] or before["resume"]:
-                    keep.append((method, key, id_key, name, remote, before))
-                kodi_call(*target, refresh, {id_key: int(row[id_key]), "ignorenfo": False})
-                refreshed += 1
-            else:
-                new_folders.append(item.get("folder"))
-        elif kind == "show":
-            remote = _remote(item.get("folder"), mappings)
-            if not remote:
-                unmapped += 1
-                continue
-            if shows is None:
-                shows = (kodi_call(*target, "VideoLibrary.GetTVShows", {"properties": ["file"]}) or {}).get("tvshows") or []
-            row = kodi_match(shows, remote)
-            if row and item.get("art"):
-                art_done += _kodi_new_art(target, mappings, "tvshow", int(row["tvshowid"]), item["art"])
-                if not item.get("full"):
+                if kind == "movie":
+                    method, key, id_key, refresh = "VideoLibrary.GetMovies", "movies", "movieid", "VideoLibrary.RefreshMovie"
+                else:
+                    method, key, id_key, refresh = "VideoLibrary.GetEpisodes", "episodes", "episodeid", "VideoLibrary.RefreshEpisode"
+                name = remote.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+                found = kodi_call(*target, method, {"filter": {"field": "filename", "operator": "is", "value": name},
+                                                    "properties": ["file", "playcount", "lastplayed", "resume"]}) or {}
+                row = kodi_match(found.get(key), remote)
+                if row and item.get("art"):
+                    art_done += _kodi_new_art(target, mappings, "movie" if kind == "movie" else "episode", int(row[id_key]),
+                                              item["art"])
+                    if not item.get("full"):
+                        continue
+                if row:
+                    resume = row.get("resume") or {}
+                    before = {"plays": int(row.get("playcount") or 0), "last": row.get("lastplayed") or None,
+                              "resume": float(resume.get("position") or 0), "total": float(resume.get("total") or 0)}
+                    if before["plays"] or before["resume"]:
+                        keep.append((method, key, id_key, name, remote, before))
+                    kodi_call(*target, refresh, {id_key: int(row[id_key]), "ignorenfo": False})
+                    refreshed += 1
+                else:
+                    new_folders.append(item.get("folder"))
+            elif kind == "show":
+                remote = _remote(item.get("folder"), mappings)
+                if not remote:
+                    unmapped += 1
                     continue
-            if row:
-                kodi_call(*target, "VideoLibrary.RefreshTVShow",
-                          {"tvshowid": int(row["tvshowid"]), "ignorenfo": False, "refreshepisodes": False})
-                refreshed += 1
-            else:
-                new_folders.append(item.get("folder"))
+                if shows is None:
+                    shows = (kodi_call(*target, "VideoLibrary.GetTVShows", {"properties": ["file"]}) or {}).get("tvshows") or []
+                row = kodi_match(shows, remote)
+                if row and item.get("art"):
+                    art_done += _kodi_new_art(target, mappings, "tvshow", int(row["tvshowid"]), item["art"])
+                    if not item.get("full"):
+                        continue
+                if row:
+                    kodi_call(*target, "VideoLibrary.RefreshTVShow",
+                              {"tvshowid": int(row["tvshowid"]), "ignorenfo": False, "refreshepisodes": False})
+                    refreshed += 1
+                else:
+                    new_folders.append(item.get("folder"))
+        except RuntimeError as exc:
+            failures.append((str(item.get("label") or item.get("title") or item.get("kind") or "an item"), str(exc)))
+            logger.warning("Kodi refresh of %s failed: %s", failures[-1][0], exc)
     text = f"Kodi refreshed {refreshed} item{'s' if refreshed != 1 else ''}."
     if art_done:
         text = (text if refreshed else "") + f" Kodi shows the new artwork of {art_done} item{'s' if art_done != 1 else ''}."
@@ -2007,7 +2024,7 @@ def _kodi_refresh(cfg, media, items):
         count = len(absent)
         waits = (f"Kodi does not have {job_history.names_text(absent, shown=3)} yet, so there was no artwork to update "
                  f"there. {'They arrive' if count != 1 else 'It arrives'} with the library scan of the import.")
-        if not (refreshed or art_done or new_folders or unmapped):
+        if not (refreshed or art_done or new_folders or unmapped or failures):
             # Nothing happened and nothing is wrong: Kodi had to be asked to find that out, but it is not news. No
             # alert and no row in Recent library updates; only the container log keeps it.
             logger.info("%s", waits)
@@ -2035,11 +2052,20 @@ def _kodi_refresh(cfg, media, items):
     if unmapped:
         plural = unmapped != 1
         text += f" {unmapped} item{'s' if plural else ''} had no Kodi path row and {'were' if plural else 'was'} left out."
+    if failures:
+        if len(failures) == len(items):
+            # Nothing worked: the job fails, with what Kodi said and for which item.
+            raise RuntimeError(f"Kodi could not refresh {failures[0][0]}. {failures[0][1]}"
+                               + (f" ({len(failures) - 1} more failed too.)" if len(failures) > 1 else ""))
+        count = len(failures)
+        text += (f" {count} item{'s' if count != 1 else ''} could not be refreshed, the first one {failures[0][0]}: "
+                 f"{failures[0][1]}.")
     # In Alerts and Recent webhooks too, with the titles: an artwork update leaves no other trace there.
     labels = [str(item.get("label") or "").strip() for item in items if str(item.get("label") or "").strip()]
     from curator import job_history
 
-    _activity(text, "done" if (refreshed or art_done or folders) else "noted", "", job_history.names_text(labels, shown=5))
+    outcome = "error" if failures else "done" if (refreshed or art_done or folders) else "noted"
+    _activity(text, outcome, "", job_history.names_text(labels, shown=5))
     return text
 
 

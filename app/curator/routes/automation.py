@@ -49,6 +49,10 @@ def queue_status():
         data["library"] = library_queue.snapshot()
     except Exception:
         data["library"] = []
+    try:
+        data["library_failed"] = library_queue.failed_snapshot()
+    except Exception:
+        data["library_failed"] = []
     return {**data, "items": ingest.items()}
 
 
@@ -431,6 +435,33 @@ def queue_retry_library(body: LibraryRetry):
     if not label:
         raise AppError("This update has no folder to scan again", 400)
     return {"ok": True, "message": f"Queued again: {label}"}
+
+
+class RetryFailed(BaseModel):
+    ids: list[str] | None = None
+
+
+@router.post("/queue/library/retry-failed")
+def queue_retry_failed_library(body: RetryFailed | None = None):
+    """Queue the failed player updates again: all of them, or the ones named."""
+    from curator import library_queue
+
+    ids = None
+    if body and body.ids is not None:
+        ids = []
+        for item in body.ids:
+            try:
+                ids.append(str(uuid.UUID(str(item))))
+            except ValueError:
+                continue
+    return {"queued": library_queue.retry_failed(ids=ids)}
+
+
+@router.post("/queue/library/clear-failed")
+def queue_clear_failed_library():
+    from curator import library_queue
+
+    return {"cleared": library_queue.clear_failed()}
 
 
 @router.post("/queue/library/clear")

@@ -719,6 +719,102 @@ def _scope_label(payload, full, paths):
     return f"{count} folder{'s' if count != 1 else ''}"
 
 
+FAILED_KEPT = 200
+RETRIED = "Retry of a failed update"
+
+
+def keep_failed(player, row, error):
+    """Leave a failed update in the queue as failed, with what went wrong, so it can be run again. The oldest ones
+    beyond FAILED_KEPT per player are dropped."""
+    from resonance import db
+
+    payload = dict(row.get("payload") or {})
+    payload["error"] = str(error or "")[:500]
+    payload["tries"] = int(payload.get("tries") or 0) + 1
+    db.execute(
+        "UPDATE work_queue SET status = 'failed', started_at = NULL, payload = %s WHERE id = %s AND lane = 'library'",
+        (Jsonb(payload), row["id"]),
+    )
+    db.execute(
+        """
+        DELETE FROM work_queue WHERE id IN (
+            SELECT id FROM work_queue WHERE lane = 'library' AND kind = %s AND status = 'failed'
+            ORDER BY created_at DESC OFFSET %s)
+        """,
+        (player, FAILED_KEPT),
+    )
+
+
+def failed_snapshot():
+    """The failed updates that wait for a retry, oldest first."""
+    from resonance import db
+
+    if db.pool is None:
+        return []
+    rows = db.fetchall(
+        """
+        SELECT id::text AS id, kind, title, source, status, payload, started_at, created_at
+        FROM work_queue WHERE lane = 'library' AND status = 'failed' ORDER BY created_at ASC
+        """
+    )
+    found = []
+    for row in rows:
+        item = _public(row)
+        payload = row.get("payload") or {}
+        item.update({"status": "failed", "error": str(payload.get("error") or ""), "tries": int(payload.get("tries") or 1),
+                     "failed_at": str(row.get("created_at") or "")[:16]})
+        found.append(item)
+    return found
+
+
+def retry_failed(player=None, ids=None, auto=False):
+    """Queue failed updates again: all of them, one player's, or the ones named. Returns how many.
+
+    auto is the retry Curator does by itself when a player answers again. Each failed update gets that once; one that
+    fails again waits for the button. Several failed full scans of one library become one."""
+    from resonance import db
+
+    rows = db.fetchall(
+        "SELECT id::text AS id, kind, payload FROM work_queue WHERE lane = 'library' AND status = 'failed' ORDER BY created_at ASC"
+    )
+    wanted = None if ids is None else {str(item) for item in ids}
+    again, drop_ids, seen = [], [], set()
+    for row in rows:
+        payload = dict(row.get("payload") or {})
+        if player and row.get("kind") != player:
+            continue
+        if wanted is not None and row["id"] not in wanted:
+            continue
+        if auto and payload.get("auto_tried"):
+            continue
+        key = (row.get("kind"), payload.get("merge")) if payload.get("full") and payload.get("merge") else None
+        if key and key in seen:
+            drop_ids.append(row["id"])          # the same full scan twice
+            continue
+        if key:
+            seen.add(key)
+        payload["triggers"] = merged_triggers(payload.get("triggers"), RETRIED)
+        if auto:
+            payload["auto_tried"] = True
+        payload.pop("error", None)
+        again.append((row["id"], row.get("kind"), payload))
+    for row_id, _kind, payload in again:
+        db.execute("UPDATE work_queue SET status = 'queued', started_at = NULL, payload = %s WHERE id = %s AND status = 'failed'",
+                   (Jsonb(payload), row_id))
+    if drop_ids:
+        db.execute("DELETE FROM work_queue WHERE id = ANY(%s::uuid[])", (drop_ids,))
+    for kind in {kind for _row_id, kind, _payload in again}:
+        if kind in _wake:
+            _wake[kind].set()
+    return len(again)
+
+
+def clear_failed():
+    from resonance import db
+
+    return len(db.fetchall("DELETE FROM work_queue WHERE lane = 'library' AND status = 'failed' RETURNING id"))
+
+
 def drop(item_id):
     from resonance import db
 
@@ -737,7 +833,7 @@ def cancel(item_id):
         """
         SELECT id::text AS id, kind, status
         FROM work_queue
-        WHERE id = %s AND lane = 'library' AND status IN ('queued', 'running')
+        WHERE id = %s AND lane = 'library' AND status IN ('queued', 'running', 'failed')
         """,
         (str(item_id),),
     )
@@ -913,9 +1009,24 @@ def _finish_row(player, row):
         try:
             from resonance import db
 
-            db.execute("DELETE FROM work_queue WHERE id = %s", (row["id"],))
+            if failed and not stopped:
+                keep_failed(player, row, str(failed))
+            else:
+                db.execute("DELETE FROM work_queue WHERE id = %s", (row["id"],))
         except Exception:
             logger.exception("could not remove the finished library update")
+        if not failed and not stopped:
+            # The player answers again: what failed while it was away gets one more try by itself.
+            try:
+                again = retry_failed(player, auto=True)
+                if again:
+                    from curator import work_log
+
+                    label = _LABELS.get(player, player)
+                    work_log.note("library", player, "", "", "", "noted",
+                                  f"{label} answers again: {again} failed update{'s' if again != 1 else ''} queued once more.")
+            except Exception:
+                logger.exception("could not queue the failed library updates again")
         _wake[player].set()
 
 
