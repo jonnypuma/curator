@@ -4,8 +4,6 @@
 
 # Curator
 
-**Project page:** [jonnypuma.github.io/#/curator](https://jonnypuma.github.io/#/curator) · **All add-ons and apps by jonnypuma:** [jonnypuma.github.io](https://jonnypuma.github.io/)
-
 Curator is a media manager built for Kodi. It covers the whole path from a finished download in
 Lidarr, Radarr, Sonarr to a Kodi library update. When one of those apps reports an
 import, Curator indexes the music, movie, movie set, or TV folder, reads and writes Kodi `.nfo`

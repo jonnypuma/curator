@@ -780,7 +780,10 @@ def _video(media, group, auto, interrupt=False):
         result = None
         waited = False
         while not _stop.is_set():
-            result = scanner.run_targeted(media, root, targets, held=True, interrupt=interrupt)
+            from curator import scan_refresh
+
+            with scan_refresh.importing(targets):
+                result = scanner.run_targeted(media, root, targets, held=True, interrupt=interrupt)
             if result is not None:
                 break
             if interrupt:

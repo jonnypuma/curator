@@ -1,5 +1,21 @@
 # Changelog
 
+## v4.4.0 — 2026-11-19 — Imported episodes and movies reach Kodi after their .nfo, so the media flags show
+
+- **The cause of missing media info in Kodi after an import.** A webhook import runs scan, scrape, file jobs and then
+  the library update for the players. The scan step also has a last stage that refreshes changed items on the players,
+  and it counted the episode or movie it had just added as changed. Kodi did not have that item yet, so Curator had
+  Kodi scan its folder right then, before the scrape had written the .nfo with the stream details (resolution, codec,
+  HDR, audio, subtitles). Kodi added the item from the half-finished folder. The library update at the end of the
+  import then found it already in Kodi, and Kodi does not read the .nfo of an item it already has, so the flags
+  stayed empty until you refreshed the item by hand.
+- **Fixed.** During an import the scan no longer sends its newly added items to the players. They arrive once, with
+  the import's library update, after the scrape and the .nfo. Items the import changed that the players already had
+  are still refreshed, and a scan started by hand or by a schedule behaves as before.
+- The media info file Curator writes beside a video (`.cmm_mediainfo.xml`) was never the problem: it is written when
+  the file is probed, during the scan. Kodi takes its media flags from the .nfo.
+- Items imported before this version keep their empty flags until they are refreshed in Kodi once.
+
 ## v4.3.9 — 2026-11-18 — Recycle bin: search, type, sorting, and why each item was deleted
 
 - **Why.** Every item in the recycle bin now shows the reason it was deleted: the job that did it (Bulk duplicate

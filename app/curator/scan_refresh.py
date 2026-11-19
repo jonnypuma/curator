@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +189,39 @@ def snapshot(media, roots=None, albums=None, folders=None):
     return found
 
 
+# Folders a webhook import is scanning right now. The import sends its own library update as its last step, after the
+# scrape has written the .nfo (with the stream details the players show as media flags). Refreshing an item the
+# import's scan just added would make a player scan the folder at once and add the item from a half-finished folder;
+# the later library update then finds it already there and does not read the .nfo again.
+_importing = {}
+_importing_lock = threading.Lock()
+
+
+@contextmanager
+def importing(folders):
+    """Mark these folders as being scanned by an import for as long as the block runs."""
+    paths = [str(folder) for folder in folders or [] if folder]
+    with _importing_lock:
+        for path in paths:
+            _importing[path] = _importing.get(path, 0) + 1
+    try:
+        yield
+    finally:
+        with _importing_lock:
+            for path in paths:
+                left = _importing.get(path, 0) - 1
+                if left > 0:
+                    _importing[path] = left
+                else:
+                    _importing.pop(path, None)
+
+
+def import_scan(folders):
+    """True when this scan of chosen folders is an import's scan."""
+    with _importing_lock:
+        return any(str(folder) in _importing for folder in folders or [])
+
+
 def changed(before, after, categories):
     """Item keys whose chosen categories differ. An item that was not there before counts as changed."""
     keys = []
@@ -266,6 +301,15 @@ def after_scan(media, roots, before, log, albums=None, folders=None):
         if after is None:
             return 0
         keys = changed(before, after, categories)
+        if keys and import_scan(folders):
+            added = [key for key in keys if key not in before]
+            if added:
+                keys = [key for key in keys if key in before]
+                noun = "item" if len(added) == 1 else "items"
+                log(f"Client libraries: {len(added)} new {noun} of this import {'goes' if len(added) == 1 else 'go'} to the "
+                    "players with the import's library update, after the scrape and the .nfo")
+                if not keys:
+                    return 0
         if not keys:
             log("Client libraries: no item got new " + _names(categories))
             return 0
